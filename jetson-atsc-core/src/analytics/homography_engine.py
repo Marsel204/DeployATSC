@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
@@ -26,6 +26,7 @@ class HomographyEngine:
         dst_points_ground: List[List[float]],
         ground_width_m: float = 10.5,
         ground_length_m: float = 45.0,
+        corridor_polygon_pixel: Optional[List[List[float]]] = None,
     ) -> None:
         """
         Args:
@@ -33,11 +34,13 @@ class HomographyEngine:
             dst_points_ground: 4 corresponding metric coordinates on ground plane [[X, Y], ...].
             ground_width_m: Physical road corridor width in meters (default 10.5m).
             ground_length_m: Physical road approach corridor length in meters (default 45.0m).
+            corridor_polygon_pixel: Optional arbitrary N-point polygon [[u, v], ...] (N >= 3)
+                for road approach corridor containment test. Defaults to src_points_pixel.
         """
         self.src_points = np.array(src_points_pixel, dtype=np.float32)
         self.dst_points = np.array(dst_points_ground, dtype=np.float32)
-        self.ground_width = ground_width_m
-        self.ground_length = ground_length_m
+        self.ground_width = float(ground_width_m)
+        self.ground_length = float(ground_length_m)
 
         if len(self.src_points) != 4 or len(self.dst_points) != 4:
             raise ValueError("Homography requires exactly 4 control point correspondences.")
@@ -46,8 +49,11 @@ class HomographyEngine:
         self.H: np.ndarray = cv2.getPerspectiveTransform(self.src_points, self.dst_points)
         self.H_inv: np.ndarray = cv2.getPerspectiveTransform(self.dst_points, self.src_points)
 
-        # Polygon of approach corridor in pixel space for containment test
-        self.corridor_poly: np.ndarray = self.src_points.astype(np.int32)
+        # Polygon of approach corridor in pixel space for containment test (supports N >= 3 points)
+        if corridor_polygon_pixel is not None and len(corridor_polygon_pixel) >= 3:
+            self.corridor_poly: np.ndarray = np.array(corridor_polygon_pixel, dtype=np.int32)
+        else:
+            self.corridor_poly: np.ndarray = self.src_points.astype(np.int32)
 
     @classmethod
     def from_config(cls, config_path_or_dict: str | Dict[str, Any]) -> HomographyEngine:
@@ -62,6 +68,7 @@ class HomographyEngine:
         src = homo_cfg.get("src_points_pixel")
         dst = homo_cfg.get("dst_points_ground")
         dims = homo_cfg.get("ground_dimensions_m", {"width": 10.5, "length": 45.0})
+        poly = homo_cfg.get("corridor_polygon_pixel") or cfg.get("lane_metrics", {}).get("corridor_polygon")
 
         if not src or not dst:
             raise ValueError("Invalid homography section in configuration.")
@@ -71,7 +78,64 @@ class HomographyEngine:
             dst_points_ground=dst,
             ground_width_m=float(dims.get("width", 10.5)),
             ground_length_m=float(dims.get("length", 45.0)),
+            corridor_polygon_pixel=poly,
         )
+
+    def measure_pixel_distance(
+        self,
+        p1: Tuple[float, float] | List[float],
+        p2: Tuple[float, float] | List[float],
+    ) -> float:
+        """
+        Calculates ground distance in meters between two image pixel points.
+        """
+        g1 = self.pixel_to_ground(float(p1[0]), float(p1[1]))
+        g2 = self.pixel_to_ground(float(p2[0]), float(p2[1]))
+        return float(np.hypot(g2[0] - g1[0], g2[1] - g1[1]))
+
+    def calibrate_from_sample_ruler(
+        self,
+        p1_pixel: Tuple[float, float] | List[float],
+        p2_pixel: Tuple[float, float] | List[float],
+        real_distance_m: float,
+    ) -> float:
+        """
+        Scales the ground metric space so that the measured distance between
+        p1 and p2 in pixel space matches real_distance_m.
+
+        Returns:
+            Scale factor applied to ground dimensions and homography matrix.
+        """
+        if real_distance_m <= 0:
+            raise ValueError("Sample ruler length must be positive.")
+
+        current_dist = self.measure_pixel_distance(p1_pixel, p2_pixel)
+        if current_dist < 1e-4:
+            raise ValueError("Sample ruler points are too close together to calibrate scale.")
+
+        scale_factor = float(real_distance_m / current_dist)
+
+        # Scale ground dimensions and destination control points
+        self.ground_width *= scale_factor
+        self.ground_length *= scale_factor
+        self.dst_points = self.dst_points * scale_factor
+
+        # Scale forward and inverse Homography: H_new = S * H, H_inv_new = H_inv * S^-1
+        s_mat = np.array([
+            [scale_factor, 0.0, 0.0],
+            [0.0, scale_factor, 0.0],
+            [0.0, 0.0, 1.0],
+        ], dtype=np.float32)
+        s_inv_mat = np.array([
+            [1.0 / scale_factor, 0.0, 0.0],
+            [0.0, 1.0 / scale_factor, 0.0],
+            [0.0, 0.0, 1.0],
+        ], dtype=np.float32)
+
+        self.H = np.dot(s_mat, self.H)
+        self.H_inv = np.dot(self.H_inv, s_inv_mat)
+
+        return scale_factor
 
     def pixel_to_ground(self, u: float, v: float) -> Tuple[float, float]:
         """

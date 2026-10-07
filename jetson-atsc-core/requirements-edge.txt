@@ -22,3 +22,9 @@ jetson-stats>=4.2.0  # jtop telemetry for Jetson
 
 # Development & Export Helpers
 pytest>=8.0.0
+
+# Interactive Web Dashboard & Stream Ingest
+fastapi>=0.110.0
+uvicorn>=0.28.0
+python-multipart>=0.0.9
+yt-dlp>=2024.3.10

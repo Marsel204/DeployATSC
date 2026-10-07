@@ -25,6 +25,17 @@ CLASS_NAMES = {
     3: "truck",
 }
 
+# Canonical normalization map for standard vehicle categories (COCO and custom)
+CANONICAL_VEHICLE_MAP = {
+    "motorcycle": "motorcycle",
+    "motorbike": "motorcycle",
+    "bike": "motorcycle",
+    "car": "car",
+    "automobile": "car",
+    "bus": "bus",
+    "truck": "truck",
+}
+
 
 class TrackedVehicle:
     """Represents a single tracked vehicle in rectified pixel and metric space."""
@@ -119,6 +130,26 @@ class DetectorTracker:
         print(f"[Detector] Initializing YOLO from: {self.model_path} (TensorRT: {self.is_tensorrt})")
         self.model = YOLO(self.model_path, task="detect")
 
+    def map_class(self, class_id: int) -> Optional[str]:
+        """
+        Maps model output class_id to canonical PKJI vehicle category:
+        'motorcycle', 'car', 'bus', 'truck'.
+        Returns None if class is not a recognized road vehicle (e.g. person, traffic light).
+        """
+        if self.model is not None and hasattr(self.model, "names") and self.model.names:
+            raw_name = str(self.model.names.get(class_id, "")).lower().strip()
+            if raw_name in CANONICAL_VEHICLE_MAP:
+                return CANONICAL_VEHICLE_MAP[raw_name]
+            # If model only has 4 classes without full names, fallback to CLASS_NAMES
+            if len(self.model.names) == 4 and class_id in CLASS_NAMES:
+                return CLASS_NAMES[class_id]
+            return None
+        return CLASS_NAMES.get(class_id, None)
+
+    def is_valid_vehicle_class(self, class_id: int) -> bool:
+        """Returns True if class_id corresponds to a tracked road vehicle."""
+        return self.map_class(class_id) is not None
+
     def track(
         self,
         frames: List[np.ndarray],
@@ -180,7 +211,10 @@ class DetectorTracker:
 
                 for i in range(len(boxes)):
                     c_id = int(cls_arr[i])
-                    c_name = CLASS_NAMES.get(c_id, f"class_{c_id}")
+                    c_name = self.map_class(c_id)
+                    if c_name is None:
+                        continue  # Skip non-vehicles (e.g. traffic light #114 class_9, pedestrians)
+
                     tid = int(id_arr[i])
                     current_obs = self.track_obs_counts.get(tid, 0)
                     v = TrackedVehicle(

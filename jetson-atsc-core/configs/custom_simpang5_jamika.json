@@ -1,0 +1,122 @@
+{
+  "system": {
+    "description": "Custom calibration for custom_simpang5_jamika",
+    "mode": "SINGLE_CAM",
+    "calibration_path": "configs/rectilinear_calib.npz",
+    "model_path": "models/Final.pt"
+  },
+  "homography": {
+    "description": "Sidewalk-curb perspective projection to physical metric ground plane",
+    "src_points_pixel": [
+      [
+        539.0,
+        934.0
+      ],
+      [
+        766.0,
+        491.0
+      ],
+      [
+        1446.0,
+        493.0
+      ],
+      [
+        1631.0,
+        947.0
+      ]
+    ],
+    "ground_dimensions_m": {
+      "width": 8.0,
+      "length": 40.0
+    },
+    "dst_points_ground": [
+      [
+        0.0,
+        40.0
+      ],
+      [
+        8.0,
+        40.0
+      ],
+      [
+        8.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0
+      ]
+    ],
+    "corridor_polygon_pixel": [
+      [
+        539.0,
+        934.0
+      ],
+      [
+        766.0,
+        491.0
+      ],
+      [
+        1446.0,
+        493.0
+      ],
+      [
+        1631.0,
+        947.0
+      ]
+    ]
+  },
+  "traffic_light_monitor": {
+    "description": "Optical Yellow Phase Visual Trigger with temporal debounce and cooldown lockout",
+    "lamp_roi_pixel": {
+      "ymin": 13,
+      "xmin": 3,
+      "ymax": 443,
+      "xmax": 324
+    },
+    "hsv_thresholds": {
+      "hue_min": 18,
+      "hue_max": 35,
+      "sat_min": 120,
+      "sat_max": 255,
+      "val_min": 150,
+      "val_max": 255
+    },
+    "active_ratio_threshold": 0.25,
+    "debounce_frame_count": 3,
+    "cooldown_lockout_seconds": 15.0
+  },
+  "lane_metrics": {
+    "description": "Indonesian PKJI 2014 Passenger Car Equivalent (PCE) weighted flow",
+    "corridor_polygon": [
+      [
+        539.0,
+        934.0
+      ],
+      [
+        766.0,
+        491.0
+      ],
+      [
+        1446.0,
+        493.0
+      ],
+      [
+        1631.0,
+        947.0
+      ]
+    ],
+    "physical_road_area_m2": 320.0,
+    "pcu_weights": {
+      "motorcycle": 0.4,
+      "car": 1.0,
+      "truck": 1.6,
+      "bus": 1.6
+    },
+    "stopped_speed_threshold_mps": 1.0,
+    "green_time_bounds_sec": [
+      10.0,
+      120.0
+    ]
+  }
+}

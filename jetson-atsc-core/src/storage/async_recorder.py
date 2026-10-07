@@ -57,6 +57,7 @@ class AsyncRecorder:
             maxsize=self.max_buffer_size
         )
         self._running = False
+        self._write_lock = threading.Lock()
         self._writer: Optional[cv2.VideoWriter] = None
         self._thread: Optional[threading.Thread] = None
 
@@ -149,8 +150,10 @@ class AsyncRecorder:
             if (frame.shape[1], frame.shape[0]) != (self.width, self.height):
                 frame = cv2.resize(frame, (self.width, self.height))
 
-            self._writer.write(frame)
-            self.recorded_frames += 1
+            with self._write_lock:
+                if self._writer is not None:
+                    self._writer.write(frame)
+                    self.recorded_frames += 1
             self._frame_queue.task_done()
 
     def stop(self) -> None:
@@ -159,9 +162,10 @@ class AsyncRecorder:
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=3.0)
 
-        if self._writer:
-            self._writer.release()
-            self._writer = None
+        with self._write_lock:
+            if self._writer:
+                self._writer.release()
+                self._writer = None
 
         print(
             f"[AsyncRecorder] Finalized {self.current_filepath} (Recorded: {self.recorded_frames}, Dropped: {self.dropped_frames})"
