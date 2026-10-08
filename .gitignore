@@ -1,2 +1,9 @@
 .agents
 .agents/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+*.log
+recordings/*.mp4
