@@ -120,9 +120,10 @@ class EdgeDaemon:
         )
 
         print("[EdgeDaemon] Initializing RS-485 Signal Interface & Watchdog...")
-        self.signal_interface = SignalInterface.from_config(self.hw_config)
+        hardware_settings = json.loads(json.dumps(self.hw_config))
         if args.mock_hardware:
-            self.signal_interface.mock_mode = True
+            hardware_settings.setdefault("serial_interface", {})["mock_mode"] = True
+        self.signal_interface = SignalInterface.from_config(hardware_settings)
 
         # 3. Initialize Monitoring & Telemetry
         print("[EdgeDaemon] Initializing System Telemetry & Thermal Guard...")
@@ -441,6 +442,11 @@ class EdgeDaemon:
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Adaptive Traffic Signal Controller Edge Daemon")
+    parser.add_argument("--operation", choices=["observation", "legacy-control"], default="observation",
+                        help="Observation never constructs cabinet hardware; controller operation is explicit")
+    parser.add_argument("--source-mode", choices=["replay", "live"], default=None)
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--mode", type=str, choices=["SINGLE_CAM", "DUAL_CAM"], default=None, help="Operating camera mode")
     parser.add_argument("--source_sys", type=str, default=None, help="Kamera Sistem source path, MP4 file, or RTSP URL")
     parser.add_argument("--source_acq", type=str, default=None, help="Kamera Akuisisi source path, MP4 file, or RTSP URL")
@@ -459,6 +465,17 @@ def parse_arguments() -> argparse.Namespace:
 
 def main():
     args = parse_arguments()
+    if args.operation == "observation":
+        from pathlib import Path
+        from scripts.launch_ui import serve_observation
+        with open(args.config, encoding="utf-8") as stream:
+            camera_config = json.load(stream).get("cameras", {})
+        system = args.source_sys or camera_config.get("kamera_sistem", {}).get("source", "/dev/video0")
+        acquisition = args.source_acq or camera_config.get("kamera_akuisisi", {}).get("source", "/dev/video1")
+        source_mode = args.source_mode or ("replay" if Path(str(system)).is_file() and Path(str(acquisition)).is_file() else "live")
+        serve_observation(host=args.host, port=args.port, source_mode=source_mode,
+                          source_sys=str(system),source_acq=str(acquisition),config=args.config)
+        return
     daemon = EdgeDaemon(args)
     daemon.start()
 

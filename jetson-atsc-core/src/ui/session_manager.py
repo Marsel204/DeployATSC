@@ -490,7 +490,9 @@ class SessionManager:
 
         # 3. Compute and validate Homography Matrix
         try:
-            H = cv2.getPerspectiveTransform(src_arr, dst_arr)
+            H, _ = cv2.findHomography(src_arr, dst_arr, method=0)
+            if H is None:
+                raise ValueError("Perspective anchors do not define a homography")
             cond = np.linalg.cond(H)
             if np.isnan(cond) or np.isinf(cond) or cond > 1e7:
                 raise ValueError(f"Homography matrix is degenerate or ill-conditioned (condition number: {cond:.1e})")

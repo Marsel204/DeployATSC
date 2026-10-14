@@ -53,7 +53,7 @@ class ATSCDecisionEngine:
                 L=traffic.occupancy_pct,
             )
             latency_ms = (time.perf_counter() - t0) * 1000.0
-            failsafe = False
+            failsafe = bool(getattr(self.anfis, "last_error", None))
         except Exception as e:
             green_time = self.fallback_green
             latency_ms = (time.perf_counter() - t0) * 1000.0

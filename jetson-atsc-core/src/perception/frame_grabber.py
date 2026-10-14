@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from collections import deque
 from typing import Optional, Tuple
 import cv2
 import numpy as np
@@ -66,6 +67,8 @@ class FrameGrabber:
 
         self._latest_frame: Optional[np.ndarray] = None
         self._latest_timestamp: float = 0.0
+        self._latest_monotonic: float = 0.0
+        self._observation_queue = deque(maxlen=16)
         self._frame_count: int = 0
         self._dropped_frames: int = 0
         self._is_opened: bool = False
@@ -173,6 +176,7 @@ class FrameGrabber:
 
             ret, frame = self.cap.read()
             now = time.time()
+            acquired = time.monotonic()
 
             if not ret or frame is None:
                 if self.is_file and self.auto_loop:
@@ -189,6 +193,11 @@ class FrameGrabber:
                 self._latest_frame = frame
                 self._latest_timestamp = now
                 self._frame_count += 1
+                self._latest_monotonic = acquired
+                if len(self._observation_queue) == self._observation_queue.maxlen:
+                    self._dropped_frames += 1
+                self._observation_queue.append({"sequence":self._frame_count,
+                    "timestamp":acquired,"frame":frame})
 
             # Prevent 100% CPU spinning on fast disk reads
             if self.is_file:
@@ -209,6 +218,22 @@ class FrameGrabber:
     def is_opened(self) -> bool:
         """Returns whether the capture stream is open and functional."""
         return self._is_opened
+
+    def read_observation(self):
+        """Single-consumer, sequence-aware read; the legacy latest-frame API remains."""
+        with self._lock:
+            return self._observation_queue.popleft() if self._observation_queue else None
+
+    def discard_observation_queue(self):
+        with self._lock:self._observation_queue.clear()
+
+    def observation_health(self):
+        with self._lock:
+            age = time.monotonic()-self._latest_monotonic if self._latest_monotonic else None
+            return {"state":"ready" if age is not None and age<=1 else "stale",
+                    "age_sec":age,"sequence":self._frame_count,
+                    "dropped_frames":self._dropped_frames,"queue_depth":len(self._observation_queue),
+                    "image_size":[self.width,self.height],"fps":self.fps}
 
     def stop(self) -> None:
         """Stops the grabber thread and releases hardware resources."""

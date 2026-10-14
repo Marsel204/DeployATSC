@@ -115,7 +115,7 @@ def test_measure_pixel_distance_and_sample_ruler_calibration(base_4pt_homography
     assert abs(v_rec - v1) <= 1
 
 
-def test_session_manager_validate_and_save_multipoint_polygon():
+def test_session_manager_validate_and_save_multipoint_polygon(isolated_config_output):
     """
     Test that SessionManager accepts polygon_points_pixel and sample_ruler in custom config.
     """
@@ -172,7 +172,7 @@ def test_session_manager_validate_and_save_multipoint_polygon():
         os.remove(config_file)
 
 
-def test_api_save_custom_config_multipoint():
+def test_api_save_custom_config_multipoint(isolated_config_output):
     """
     Test FastAPI /api/configs/save_custom endpoint with multi-point polygon and sample ruler.
     """

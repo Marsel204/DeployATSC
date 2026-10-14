@@ -49,6 +49,8 @@ class TrackedVehicle:
         confidence: float,
         timestamp: float,
         obs_count: int = 5,
+        stable_id: bool = True,
+        epoch: int = 0,
     ) -> None:
         self.track_id = track_id
         self.class_id = class_id
@@ -57,6 +59,9 @@ class TrackedVehicle:
         self.confidence = float(confidence)
         self.timestamp = timestamp
         self.obs_count = obs_count
+        self.stable_id = stable_id
+        self.epoch = epoch
+        self.velocity_valid = False
 
         # Contact point: center of bottom edge
         self.bottom_center = (
@@ -110,8 +115,18 @@ class DetectorTracker:
         self.max_history_len = 10
         self.min_stopped_observations = 5
         self.last_seen_timestamp: float = 0.0
+        self.epoch = 0
 
         self._load_model()
+
+    def reset_tracking(self) -> None:
+        """Start a new identity epoch without reloading the model weights."""
+        self.epoch += 1
+        self.track_trajectories.clear()
+        self.track_obs_counts.clear()
+        self.last_seen_timestamp = 0.0
+        if self.model is not None and hasattr(self.model, "predictor"):
+            self.model.predictor = None
 
     def _load_model(self) -> None:
         """Loads Ultralytics YOLO model or TensorRT engine."""
@@ -225,6 +240,8 @@ class DetectorTracker:
                         confidence=float(conf_arr[i]),
                         timestamp=timestamp,
                         obs_count=current_obs,
+                        stable_id=boxes.id is not None,
+                        epoch=self.epoch,
                     )
                     frame_vehicles.append(v)
 
@@ -285,6 +302,7 @@ class DetectorTracker:
                     speed = dist_m / dt
                     # Clamp unrealistic tracking jump noise
                     v.velocity_mps = min(35.0, max(0.0, speed))
+                    v.velocity_valid = bool(v.stable_id and np.isfinite(speed))
                 else:
                     v.velocity_mps = 0.0
             else:
