@@ -41,6 +41,7 @@ class ANFISInferenceEngine:
         self.output_name: str = ""
         self.active_provider: str = ""
         self.last_inference_ms: float = 0.0
+        self.last_error: Optional[str] = None
 
         self._init_session(prefer_cuda)
 
@@ -85,6 +86,7 @@ class ANFISInferenceEngine:
             Optimal green duration t_ANFIS clamped to [min_green_sec, max_green_sec].
         """
         t0 = time.perf_counter()
+        self.last_error = None
 
         # Input tensor of shape (1, 3)
         input_tensor = np.array([[float(V_w), float(Q), float(L)]], dtype=np.float32)
@@ -95,7 +97,10 @@ class ANFISInferenceEngine:
                 {self.input_name: input_tensor},
             )[0]
             val = float(raw_output[0, 0])
+            if not np.isfinite(val):
+                raise ValueError("ANFIS returned a non-finite green duration")
         except Exception as e:
+            self.last_error = str(e)
             print(f"[ANFIS Inference] Forward pass error: {e}. Applying failsafe green duration 30.0s")
             val = 30.0
 

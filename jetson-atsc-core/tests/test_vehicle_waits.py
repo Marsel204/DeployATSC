@@ -1,0 +1,78 @@
+import pytest
+from src.experiment.contracts import RunPolicy, VehicleObservation
+from src.experiment.vehicle_waits import VehicleWaits
+
+
+def vehicle(speed=0, point=(20,20), local_id=7, valid=True):
+    return VehicleObservation(local_id,"car",speed,point,velocity_valid=valid)
+
+
+def test_red_wait_and_total_stop_are_distinct_and_hysteresis_is_backdated():
+    waits=VehicleWaits("run",RunPolicy(),side=lambda p:p[1]-100)
+    for sequence in range(301):
+        t=9+sequence/10
+        speed=0 if 10<=t<34 else 2
+        waits.observe([vehicle(speed)], "RED" if t<30 else "GREEN", t, sequence+1, 1)
+    row=next(iter(waits.records.values()))
+    assert row["red_wait_sec"] == pytest.approx(20,abs=1e-6)
+    assert row["total_stopped_sec"] == pytest.approx(24,abs=1e-6)
+
+
+def test_motion_unknown_and_duplicate_frames_cannot_inflate_wait():
+    waits=VehicleWaits("run",RunPolicy(stop_persistence_sec=0),side=lambda p:p[1]-100)
+    waits.observe([vehicle()],"RED",0,1,1)
+    waits.observe([vehicle()],"RED",.1,2,1)
+    for _ in range(5):waits.observe([vehicle()],"RED",.1,2,1)
+    waits.observe([],"UNKNOWN",.2,3,1)
+    waits.observe([vehicle()],"RED",.3,4,1)
+    row=next(iter(waits.records.values()))
+    assert row["red_wait_sec"] == pytest.approx(.1)
+    assert row["unknown_sec"] >= .2-1e-8
+    assert "observation_gap" in row["quality_flags"]
+
+
+def test_wait_persists_over_cycles_and_crossing_counts_once():
+    waits=VehicleWaits("run",RunPolicy(stop_persistence_sec=0),side=lambda p:p[1]-20)
+    for seq in range(31):
+        t=seq/10
+        phase="RED" if t<1 or t>=2 else "GREEN"
+        waits.observe([vehicle(point=(10,10))],phase,t,seq+1,1 if t<2 else 2)
+    row=next(iter(waits.records.values()))
+    assert row["red_wait_sec"] == pytest.approx(2)
+    assert row["cycles"] == [1,2]
+    waits.observe([vehicle(2,(10,25))],"GREEN",3.1,32,2)
+    waits.observe([vehicle(2,(10,30))],"GREEN",3.2,33,2)
+    assert row["crossed_stop_line"] and row["crossing_cycle"]==2
+    assert len(waits.records)==1
+
+
+def test_unstable_id_and_warmup_do_not_accrue_wait():
+    waits=VehicleWaits("run",RunPolicy(stop_persistence_sec=0),side=lambda p:p[1]-100)
+    invalid=VehicleObservation(7,"car",0,(10,10),stable_id=False,velocity_valid=True)
+    waits.observe([invalid],"RED",0,1,1)
+    assert not waits.records
+    waits.observe([vehicle(valid=False)],"RED",.1,2,1)
+    waits.observe([vehicle(valid=False)],"RED",.2,3,1)
+    assert next(iter(waits.records.values()))["red_wait_sec"]==0
+
+
+def test_crossing_at_waiting_area_exit_is_still_counted():
+    waits=VehicleWaits("run",RunPolicy(stop_persistence_sec=0),side=lambda p:p[1]-20)
+    waits.observe([vehicle(2,(10,15))],"GREEN",0,1,1)
+    outside=VehicleObservation(7,"car",2,(10,25),velocity_valid=True,in_region=False)
+    waits.observe([outside],"GREEN",.1,2,1)
+    row=next(iter(waits.records.values()))
+    assert row["crossed_stop_line"] and row["crossing_cycle"]==1
+
+
+def test_export_snapshot_is_frozen_while_stop_confirmation_revises_live_intervals():
+    from copy import deepcopy
+    waits=VehicleWaits("run",RunPolicy(),side=lambda p:p[1]-100)
+    waits.observe([vehicle()],"RED",0,1,1)
+    waits.observe([vehicle()],"RED",.1,2,1)
+    snapshot=waits.rows(include_intervals=True)
+    frozen=deepcopy(snapshot)
+    waits.observe([vehicle()],"RED",.2,3,1)
+    waits.observe([vehicle()],"RED",.3,4,1)
+    assert next(iter(waits.records.values()))["red_wait_sec"] == pytest.approx(.3)
+    assert snapshot == frozen

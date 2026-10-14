@@ -72,6 +72,8 @@ class SaveCustomConfigRequest(BaseModel):
     src_points_pixel: list[list[float]]
     ground_dimensions_m: GroundDimensionsModel = Field(default_factory=GroundDimensionsModel)
     description: Optional[str] = "User-Drawn Custom Calibration"
+    polygon_points_pixel: Optional[list[list[float]]] = None
+    sample_ruler: Optional[Dict[str, Any]] = None
 
 
 @app.get("/api/video/snapshot")
@@ -88,7 +90,7 @@ def get_video_snapshot(video_path: str):
 @app.post("/api/configs/save_custom")
 def save_custom_config(req: SaveCustomConfigRequest):
     try:
-        result = manager.validate_and_save_custom_config(req.model_dump())
+        result = manager.validate_and_save_custom_config(req.model_dump(exclude_none=True))
         return result
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
@@ -98,7 +100,7 @@ def save_custom_config(req: SaveCustomConfigRequest):
 
 @app.get("/", response_class=HTMLResponse)
 async def get_index():
-    index_path = STATIC_DIR / "index.html"
+    index_path = Path(os.environ.get("ATSC_UI_PATH", STATIC_DIR / "index.html"))
     if not index_path.exists():
         return HTMLResponse("<h2>ATSC Dashboard Loading...</h2>", status_code=200)
     with open(index_path, "r", encoding="utf-8") as f:
@@ -245,5 +247,8 @@ def video_feed(limit: Optional[int] = None):
 
 
 # Mount static assets if present
+from src.ui.observation_api import router as observation_router
+app.include_router(observation_router)
+
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

@@ -18,15 +18,16 @@ client = TestClient(app)
 JAMIKA_VIDEO = str(CORE_ROOT / "data/sample_videos/simpang5_jamika_h264.mp4")
 
 
-def test_get_video_snapshot():
+def test_get_video_snapshot(video_factory):
     """Verify endpoint extracts clean unannotated raw first frame JPEG."""
-    resp = client.get(f"/api/video/snapshot?video_path={JAMIKA_VIDEO}")
+    video = video_factory()
+    resp = client.get(f"/api/video/snapshot?video_path={video}")
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "image/jpeg"
     assert len(resp.content) > 1000  # Valid JPEG binary content
 
 
-def test_save_valid_custom_roi_config(tmp_path):
+def test_save_valid_custom_roi_config(tmp_path, isolated_config_output):
     """Verify custom config creation with user-drawn lamp box and corridor quad."""
     config_payload = {
         "name": "test_jamika_custom",

@@ -46,8 +46,12 @@ class HomographyEngine:
             raise ValueError("Homography requires exactly 4 control point correspondences.")
 
         # Compute Forward and Inverse Homography Matrices
-        self.H: np.ndarray = cv2.getPerspectiveTransform(self.src_points, self.dst_points)
-        self.H_inv: np.ndarray = cv2.getPerspectiveTransform(self.dst_points, self.src_points)
+        # DLT also handles valid projections with H[2, 2] == 0. The fixed-scale
+        # eight-equation solver can return a zero matrix for these geometries.
+        self.H, _ = cv2.findHomography(self.src_points, self.dst_points, method=0)
+        if self.H is None or not np.isfinite(self.H).all() or np.linalg.matrix_rank(self.H) < 3:
+            raise ValueError("Perspective anchors do not define an invertible homography.")
+        self.H_inv: np.ndarray = np.linalg.inv(self.H)
 
         # Polygon of approach corridor in pixel space for containment test (supports N >= 3 points)
         if corridor_polygon_pixel is not None and len(corridor_polygon_pixel) >= 3:

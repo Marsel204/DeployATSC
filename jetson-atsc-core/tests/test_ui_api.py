@@ -17,6 +17,36 @@ from src.ui.app import app
 client = TestClient(app)
 
 
+@pytest.fixture(scope="module", autouse=True)
+def isolated_legacy_replay_media(tmp_path_factory):
+    """Exercise API behavior with local generated media, not absent field datasets."""
+    import shutil
+    import cv2
+    import numpy as np
+    import src.ui.session_manager as sessions
+    global CORE_ROOT
+    original = CORE_ROOT
+    temporary = tmp_path_factory.mktemp("legacy-ui")
+    (temporary / "configs").mkdir()
+    for source in (original / "configs").iterdir():
+        if source.is_file():shutil.copy2(source, temporary / "configs" / source.name)
+    (temporary / "models").symlink_to(original / "models", target_is_directory=True)
+    directory = temporary / "data/sample_videos/multi_angle_test"
+    directory.mkdir(parents=True)
+    writer = cv2.VideoWriter(str(directory / "video_bandung_pasteur_h264.mp4"), cv2.VideoWriter_fourcc(*"mp4v"), 30, (1920, 1080))
+    assert writer.isOpened()
+    for _ in range(30):writer.write(np.full((1080,1920,3),40,np.uint8))
+    writer.release()
+    patch = pytest.MonkeyPatch()
+    patch.setattr(sessions, "CORE_ROOT", temporary)
+    CORE_ROOT = temporary
+    try:yield
+    finally:
+        sessions.manager.stop_session()
+        CORE_ROOT = original
+        patch.undo()
+
+
 def test_index_html():
     """Verify / serves the HTML dashboard."""
     response = client.get("/")
