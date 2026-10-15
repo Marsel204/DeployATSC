@@ -41,6 +41,8 @@ Actual green is measured from its evidence onset to the observed green-to-yellow
 
 Replay pause freezes video time. Step advances one system frame and all acquisition frames newly due at that experiment time; different FPS are aligned by timestamp, not equal frame numbers. Acquisition source time is system/experiment time plus the configured offset. Live Pause suspends observation while camera time continues; Resume discards the paused backlog, resets tracking identity epochs and records a gap. Live sources cannot Step/rewind.
 
+A pending recommendation becomes Unmatched when a live pause, acquisition outage, signal observation gap or ambiguous signal breaks observation continuity. Its captured inputs and any completed inference remain in the evidence, but it cannot be assigned to a later green. Capture a new recommendation after observation resumes. A file-replay pause preserves the pending recommendation because its source time is frozen.
+
 Stop closes both sources and the observation worker and preserves completed/partial evidence. Source failures and EOF are visible; a failed required source cannot leave a partially active startup. In live mode, stale processed road snapshots cannot predict, and capture freshness is distinct from processing lag.
 
 ## Interpret vehicle records
@@ -56,6 +58,8 @@ IDs are namespaced by run, acquisition role and tracker epoch. They stay stable 
 Stop/resume hysteresis, persistence, association timeout, gap limits, phase confirmation and color area ratio are configurable pilot settings recorded in the run manifest. Validate them against manually annotated footage; they are not universal traffic-study constants. Do not fill occlusion or lost-track intervals with assumed red/stopped time. Phase ambiguity stops red-wait credit; valid total stopped observations remain separate.
 
 The summary includes observed zero-wait tracks and exposes partial/in-progress records. The displayed observed mean/median/P95 includes incomplete lower bounds; complete journeys are reported separately. These sample populations must not be substituted for an unobserved full entering population.
+
+When a lost track returns after the association timeout, its replacement segment remains a partial arrival even if it is moving and subsequently crosses the stop line. It is retained in observed-track summaries and excluded from complete-journey statistics.
 
 ## Export and research scope
 

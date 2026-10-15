@@ -30,10 +30,15 @@ class ObservationEngine:
     def observe_acquisition(self, frame, timestamp, sequence, observations):
         with self.lock:
             self.time = max(self.time, timestamp)
+            if (self.phase.last_time is not None and sequence != self.phase.last_sequence and
+                    timestamp-self.phase.last_time > self.policy.max_gap_sec):
+                self.predictions.invalidate("observation_gap", self.phase.last_time)
             result = self.phase.observe(frame, timestamp, sequence)
             if result["duplicate"]: return
             self.processed["acquisition"] += 1
             event = result["transition"]
+            if event and event["phase"] == "UNKNOWN":
+                self.predictions.invalidate(event["reason"], event["timestamp"])
             if event and event["phase"] == "GREEN":
                 self.predictions.on_green(event["timestamp"], self.phase.cycle_id)
             cycle = self.phase.cycle_id + (1 if self.phase.phase in ("RED", "UNKNOWN") else 0)
@@ -50,6 +55,7 @@ class ObservationEngine:
             self.gaps.append({"timestamp":t,"reason":reason})
             self.phase.invalidate(t, reason)
             self.waits.invalidate(t, reason)
+            self.predictions.invalidate(reason, t)
 
     def comparisons(self):
         records = {row["cycle_id"]:row for row in self.predictions.rows() if row["cycle_id"] is not None}

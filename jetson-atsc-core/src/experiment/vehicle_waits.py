@@ -52,7 +52,7 @@ class VehicleWaits:
             "last_seen": timestamp, "red_wait_sec": 0., "total_stopped_sec": 0.,
             "unknown_sec": 0., "cycles": [], "quality_flags": [], "intervals": [],
             "wait_by_cycle": {},
-            "left_censored": sequence == self.first_sequence or (observation.velocity_valid and observation.speed_mps <= self.policy.stopped_speed_mps),
+            "left_censored": segment > 0 or sequence == self.first_sequence or (observation.velocity_valid and observation.speed_mps <= self.policy.stopped_speed_mps),
             "right_censored": True, "completed": False, "crossed_stop_line": False,
             "crossing_cycle": None, "completed_at": None, "tracking_state": "UNKNOWN"}
         self.records[key] = row
