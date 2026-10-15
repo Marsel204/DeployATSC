@@ -1,0 +1,187 @@
+{
+  "original_experiment": "/home/marsel/Documents/ChatGPT/DeploySkripsi 2/backtest-footage/counterfactual_delay_2026-10-15",
+  "original_files_sha256": {
+    "/home/marsel/Documents/ChatGPT/DeploySkripsi 2/backtest-footage/counterfactual_delay_2026-10-15/PROTOCOL.md": "e0727c5e423d2398a03a30fed6b395606762191bd2b7e62a0280993999f3d05d",
+    "/home/marsel/Documents/ChatGPT/DeploySkripsi 2/backtest-footage/counterfactual_delay_2026-10-15/prepare_data.py": "5bed56af7d5523907cda02c090821cf7eb5fa8dbb0b820a79d17f9ac493ad331",
+    "/home/marsel/Documents/ChatGPT/DeploySkripsi 2/backtest-footage/counterfactual_delay_2026-10-15/preparation.log": "c8c131b8e731afbaad2fe01925a3abf6f19cf1b44e68efd919d23153800aa44c",
+    "/home/marsel/Documents/ChatGPT/DeploySkripsi 2/backtest-footage/counterfactual_delay_2026-10-15/prepared_datasets.json": "69564e49df5f354319c7e44986ba43f9dab342efd21c03579ae0f33d65326be1",
+    "/home/marsel/Documents/ChatGPT/DeploySkripsi 2/backtest-footage/counterfactual_delay_2026-10-15/input_manifest.json": "0cd3dfb398ba19f53648a8fa8aeef2417c1f7e86b9995492ae5b8b9a36c9c80c",
+    "/home/marsel/Documents/ChatGPT/DeploySkripsi 2/backtest-footage/counterfactual_delay_2026-10-15/vehicle_inputs.csv": "e338068d24162211167fa77cb8bc0f73682eb3a0c29b434dcfac188159614f06",
+    "/home/marsel/Documents/ChatGPT/DeploySkripsi 2/backtest-footage/counterfactual_delay_2026-10-15/run_backtest.py": "356000ddb722ded85c9b286ef2392e1a5f13dc59378256ddcda79a49d1f3abc7",
+    "/home/marsel/Documents/ChatGPT/DeploySkripsi 2/backtest-footage/counterfactual_delay_2026-10-15/backtest.log": "465f3dee26748704827af4d572138e25ee6a9b6e56404022765183974ea58fe3",
+    "/home/marsel/Documents/ChatGPT/DeploySkripsi 2/backtest-footage/counterfactual_delay_2026-10-15/calibration_loss_surface.csv": "6337297543cf19d71611f1383c39a5024d3202ed980680b2514621276d72766b",
+    "/home/marsel/Documents/ChatGPT/DeploySkripsi 2/backtest-footage/counterfactual_delay_2026-10-15/fitted_parameters.json": "f846fc17736e04e89d3f52a9abb698e2e34dd4543daad8a6d6eb8b856e0604d8",
+    "/home/marsel/Documents/ChatGPT/DeploySkripsi 2/backtest-footage/counterfactual_delay_2026-10-15/verification_checks.csv": "f375b8b0582ff345ca3ca48f6ad090e0e60b0ce41771cef2cb6c64d71a39f597",
+    "/home/marsel/Documents/ChatGPT/DeploySkripsi 2/backtest-footage/counterfactual_delay_2026-10-15/vehicle_delay_comparisons.csv": "a204fab5aa253f8b5efe34f66f49e4c59b8d3992a6bb963836e08cdbc1232ea5",
+    "/home/marsel/Documents/ChatGPT/DeploySkripsi 2/backtest-footage/counterfactual_delay_2026-10-15/primary_vehicle_delays.csv": "ceac3245371c622693fdcdef121db6da06b5a52905c517708f79713061009f33",
+    "/home/marsel/Documents/ChatGPT/DeploySkripsi 2/backtest-footage/counterfactual_delay_2026-10-15/cycle_recommendations.csv": "dd403de284735a9bc1c5a91d58ef2f304e52a3ceda007d2786f73dadf7459566",
+    "/home/marsel/Documents/ChatGPT/DeploySkripsi 2/backtest-footage/counterfactual_delay_2026-10-15/scenario_summary.csv": "d54e9e041cadce5ada4cc661f36db9e21f1da54b4d4e7145a0cb73d8b1f206fc",
+    "/home/marsel/Documents/ChatGPT/DeploySkripsi 2/backtest-footage/counterfactual_delay_2026-10-15/results.json": "49a397bbc10e9c426e38c7630f7a2b2e948f52e8ab3967b003a6f6dab7d32c43",
+    "/home/marsel/Documents/ChatGPT/DeploySkripsi 2/backtest-footage/counterfactual_delay_2026-10-15/build_report.py": "2d8a88c855eef634c85068fd9b6e517924ea5cf2a60304488b50cae05fbb2b03",
+    "/home/marsel/Documents/ChatGPT/DeploySkripsi 2/backtest-footage/counterfactual_delay_2026-10-15/heldout_vehicle_delays.csv": "dabe5549c2cff9874ebf9ccab4917d92fa263094460b1e5c2530eef390352cdd",
+    "/home/marsel/Documents/ChatGPT/DeploySkripsi 2/backtest-footage/counterfactual_delay_2026-10-15/headline_results.csv": "eb8327416fb44115c706ca9835eb26b33be456195f7839089bff91a136ff1bc4",
+    "/home/marsel/Documents/ChatGPT/DeploySkripsi 2/backtest-footage/counterfactual_delay_2026-10-15/interior_cohort_sensitivity.csv": "74e7c4a2710bbf5da9c3472d3c9bcdc9845db51f94f99d9f312cd6a849cd6fd0",
+    "/home/marsel/Documents/ChatGPT/DeploySkripsi 2/backtest-footage/counterfactual_delay_2026-10-15/delay_comparison.png": "32f820df6b24bf4d8c31e3b17eb4a92bb4ec01b8f65f5e8bed35e62db6144da9",
+    "/home/marsel/Documents/ChatGPT/DeploySkripsi 2/backtest-footage/counterfactual_delay_2026-10-15/vehicle_delay_comparisons.png": "fb10fe92915af9abfded643a60054e0fc371a19a43e0a5da6369dd79caaeda20",
+    "/home/marsel/Documents/ChatGPT/DeploySkripsi 2/backtest-footage/counterfactual_delay_2026-10-15/sensitivity.png": "dc471715facb9675e6dc659162bff79d306b18d146c30ec2fa37779cbb9815f8",
+    "/home/marsel/Documents/ChatGPT/DeploySkripsi 2/backtest-footage/counterfactual_delay_2026-10-15/RESULTS.md": "6e5172be4b4491d489d383dbb866837b06da985ecf5d9bb9164b216383b84cb5",
+    "/home/marsel/Documents/ChatGPT/DeploySkripsi 2/backtest-footage/counterfactual_delay_2026-10-15/RESULTS.html": "c9fd4f0ce36a0157ae46cac4dee90d7989a3fa3a5afaca846a2006ba0a9ea6cb",
+    "/home/marsel/Documents/ChatGPT/DeploySkripsi 2/backtest-footage/counterfactual_delay_2026-10-15/DATA_CREDITS.txt": "75e0617131e50ad525f916bd8fa49383f9d323cdc462c11b97963d777266cbc0",
+    "/home/marsel/Documents/ChatGPT/DeploySkripsi 2/backtest-footage/counterfactual_delay_2026-10-15/bundle_checksums.json": "f6d093489e2ea76030c86d4bb8f5c19fa0453cc14a966c8bf2c81d37f2dc9627",
+    "/home/marsel/Documents/ChatGPT/DeploySkripsi 2/backtest-footage/counterfactual_delay_2026-10-15/AUDIT.md": "4b1ec792c5c165ff3052a41aa32174447d3936aa7ed169a0008fbb004ecdd88e"
+  },
+  "source_data_sha256": {
+    "traj/20250120_video_Traj.csv": "0cbf2c47af99ddefb423b8a2b8eabee9a16b87c8cba2a1a2d37721de4e74869c",
+    "route/20250120_video_Route.csv": "97e34494cd513145dbacdcb3dba19532df822f286824372f2dc556a39450c13a",
+    "signal/20250120_video_signal.csv": "3549df6c2f8f9ba4c91e66b14da9e1ffa489bdee34d2ccbaba8218ff55e811fe",
+    "traj/20250525_video_Traj.csv": "ff845d13053065b01c2954a2cdf586fc070214cf896b208734a703692c74c643",
+    "route/20250525_video_Route.csv": "57ee14a25cd76767a6813d6057334fadc83789eeace27bc2da8dc956ea9f23ef",
+    "signal/20250525_video_signal.csv": "cf78df9d44a201efd2ed16df3c8e403df36e28cd9f199b358a30d9231bbe3d09",
+    "traj/20250526_video_Traj.csv": "0c772f131b1cf137d87405d460f9c8b01b935b79ba62837111ffd4fa3ef2e70c",
+    "route/20250526_video_Route.csv": "d4d6bd566c36c6debe2c16d09e8213c65e2fcb5c49b19ea1b36e2b0b65716b87",
+    "signal/20250526_video_signal.csv": "4122352774a598ceaba5be1789511658ac3e0f442fb5d83945c50938f4257129"
+  },
+  "old_model_path": "/home/marsel/Documents/ChatGPT/DeploySkripsi 2/DeployATSC/jetson-atsc-core/models/anfis_sugeno.onnx",
+  "old_model_sha256": "27f3237c5225c51796f906647e3c86afbae2e853c39654db4d4c224126a578ad",
+  "new_model_path": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/professor-demo-20261015/model/candidate_anfis.onnx",
+  "new_model_sha256": "ffccea91aadc348ce4e633f4c9ab028e95332754970a83bde4c51d0aa1f3790d",
+  "new_checkpoint_sha256": "41aa2836e92f587250f1d58ea5e8d262dea4e546afbfee67f98233907f2e657c",
+  "calibration_reused_without_refitting": {
+    "parameters": {
+      "E": [
+        1.1000000000000003,
+        3.0
+      ],
+      "W": [
+        1.1000000000000003,
+        3.0
+      ]
+    },
+    "calibration_date": "20250120",
+    "training_only_geometry": {
+      "freeflow_mps": {
+        "E": 10.780500000000002,
+        "W": 11.92
+      },
+      "queue_tail_m_per_pcu": {
+        "E": 4.615217391304348,
+        "W": 5.438888888888888
+      },
+      "roi_width_m": {
+        "E": 9.48,
+        "W": 6.2625
+      }
+    },
+    "model_sha256": "27f3237c5225c51796f906647e3c86afbae2e853c39654db4d4c224126a578ad",
+    "onnxruntime": "1.31.0"
+  },
+  "scenarios": [
+    [
+      "primary",
+      1.0,
+      0.0,
+      1.0,
+      3.0,
+      1.0,
+      false
+    ],
+    [
+      "headway_minus20pct",
+      0.8,
+      0.0,
+      1.0,
+      3.0,
+      1.0,
+      false
+    ],
+    [
+      "headway_plus20pct",
+      1.2,
+      0.0,
+      1.0,
+      3.0,
+      1.0,
+      false
+    ],
+    [
+      "startup_minus1sec",
+      1.0,
+      -1.0,
+      1.0,
+      3.0,
+      1.0,
+      false
+    ],
+    [
+      "startup_plus1sec",
+      1.0,
+      1.0,
+      1.0,
+      3.0,
+      1.0,
+      false
+    ],
+    [
+      "freeflow_minus20pct",
+      1.0,
+      0.0,
+      0.8,
+      3.0,
+      1.0,
+      false
+    ],
+    [
+      "freeflow_plus20pct",
+      1.0,
+      0.0,
+      1.2,
+      3.0,
+      1.0,
+      false
+    ],
+    [
+      "no_yellow_service",
+      1.0,
+      0.0,
+      1.0,
+      0.0,
+      1.0,
+      false
+    ],
+    [
+      "roi_width_minus25pct",
+      1.0,
+      0.0,
+      1.0,
+      3.0,
+      0.75,
+      false
+    ],
+    [
+      "roi_width_plus25pct",
+      1.0,
+      0.0,
+      1.0,
+      3.0,
+      1.25,
+      false
+    ],
+    [
+      "app_default_roi_width",
+      1.0,
+      0.0,
+      1.0,
+      3.0,
+      1.0,
+      true
+    ]
+  ],
+  "adapter_definitions_source_sha256": "356000ddb722ded85c9b286ef2392e1a5f13dc59378256ddcda79a49d1f3abc7",
+  "runner_sha256": "ba66acaec2ae3589f992bfee9a3b050cf12eef2e584465a4f9f6600aa5432cd5",
+  "los_band_source": "https://ops.fhwa.dot.gov/publications/fhwahop08024/chapter3.htm",
+  "los_band_basis": "FHWA 2008 Traffic Signal Timing Manual Table 3-3 (HCM 2000)",
+  "los_note": "Indicative delay bands only; 45 m restricted-corridor proxy, selected E/W cohort, incomplete movement/acceleration/capacity coverage. No verified whole-intersection LOS.",
+  "data_note": "Previously inspected FLUID recordings reused for development comparison, not fresh confirmation.",
+  "onnxruntime": "1.31.0",
+  "elapsed_seconds": 5.080984508000256
+}

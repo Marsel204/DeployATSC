@@ -1,0 +1,40 @@
+{
+  "calibration_date": "20250120",
+  "heldout_dates": [
+    "20250525",
+    "20250526"
+  ],
+  "freeflow_mps": {
+    "E": 10.780500000000002,
+    "W": 11.92
+  },
+  "queue_tail_m_per_pcu": {
+    "E": 4.615217391304348,
+    "W": 5.438888888888888
+  },
+  "roi_width_m": {
+    "E": 9.48,
+    "W": 6.2625
+  },
+  "corridor_length_m": 45.0,
+  "baseline_validation_gate": {
+    "mae_sec_max": 5.0,
+    "fraction_within_10_sec_min": 0.8
+  },
+  "scope": "East/west straight-through route-labeled car/van/truck/bus/trailer; no motorcycles",
+  "sources": {
+    "article": "https://figshare.com/articles/dataset/29974954",
+    "file_id": 64179082
+  },
+  "sha256": {
+    "traj/20250120_video_Traj.csv": "0cbf2c47af99ddefb423b8a2b8eabee9a16b87c8cba2a1a2d37721de4e74869c",
+    "route/20250120_video_Route.csv": "97e34494cd513145dbacdcb3dba19532df822f286824372f2dc556a39450c13a",
+    "signal/20250120_video_signal.csv": "3549df6c2f8f9ba4c91e66b14da9e1ffa489bdee34d2ccbaba8218ff55e811fe",
+    "traj/20250525_video_Traj.csv": "ff845d13053065b01c2954a2cdf586fc070214cf896b208734a703692c74c643",
+    "route/20250525_video_Route.csv": "57ee14a25cd76767a6813d6057334fadc83789eeace27bc2da8dc956ea9f23ef",
+    "signal/20250525_video_signal.csv": "cf78df9d44a201efd2ed16df3c8e403df36e28cd9f199b358a30d9231bbe3d09",
+    "traj/20250526_video_Traj.csv": "0c772f131b1cf137d87405d460f9c8b01b935b79ba62837111ffd4fa3ef2e70c",
+    "route/20250526_video_Route.csv": "d4d6bd566c36c6debe2c16d09e8213c65e2fcb5c49b19ea1b36e2b0b65716b87",
+    "signal/20250526_video_signal.csv": "4122352774a598ceaba5be1789511658ac3e0f442fb5d83945c50938f4257129"
+  }
+}

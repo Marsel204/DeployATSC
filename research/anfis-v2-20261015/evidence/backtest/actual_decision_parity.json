@@ -1,0 +1,6 @@
+{
+  "status": "passed",
+  "actual_new_adapter_decision_inputs": 462,
+  "max_native_vs_rounded_onnx_difference_sec": 0.004963378906246874,
+  "tolerance_sec": 0.0055
+}

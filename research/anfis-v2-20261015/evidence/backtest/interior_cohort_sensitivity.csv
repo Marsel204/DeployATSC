@@ -1,0 +1,3 @@
+date,analysis,vehicles,baseline_mean_delay_sec,old_mean_delay_sec,new_mean_delay_sec,baseline_minus_new_sec,new_unfinished
+20250525,Same post-hoc boundary cohort as original report; no refit,13,49.830371671314886,98.58279953703165,16.994409173181815,32.83596249813307,0
+20250526,Same post-hoc boundary cohort as original report; no refit,99,49.60603538841263,58.64254450425741,43.3666049064223,6.239430481990324,0

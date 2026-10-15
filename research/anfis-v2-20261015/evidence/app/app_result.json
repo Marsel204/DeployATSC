@@ -1,0 +1,98 @@
+{
+  "status": "complete",
+  "elapsed_seconds": 438.60836311800085,
+  "video_time_sec": 399.6,
+  "processed_frames": {
+    "system": 1000,
+    "acquisition": 1000
+  },
+  "error": null,
+  "storage_error": null,
+  "prediction_statuses": {
+    "matched": 5
+  },
+  "eligible_comparisons": 4,
+  "recommendations": [
+    {
+      "cycle_id": 2,
+      "actual_green_sec": 24.8,
+      "recommended_green_sec": 17.35,
+      "difference_sec": -7.45
+    },
+    {
+      "cycle_id": 3,
+      "actual_green_sec": 9.2,
+      "recommended_green_sec": 10.0,
+      "difference_sec": 0.8
+    },
+    {
+      "cycle_id": 4,
+      "actual_green_sec": 12.0,
+      "recommended_green_sec": 10.0,
+      "difference_sec": -2.0
+    },
+    {
+      "cycle_id": 5,
+      "actual_green_sec": 24.0,
+      "recommended_green_sec": 10.0,
+      "difference_sec": -14.0
+    }
+  ],
+  "recorded_timing_agreement_mae_sec": 6.0625,
+  "summary": {
+    "operation": "observation",
+    "observed_vehicle_count": 80,
+    "complete_vehicle_count": 1,
+    "partial_vehicle_count": 79,
+    "observed_mean_red_wait_sec": 4.59,
+    "observed_median_red_wait_sec": 0.0,
+    "observed_p95_red_wait_sec": 24.06,
+    "complete_mean_red_wait_sec": 3.2,
+    "valid_cycle_comparisons": 4,
+    "sample_definition": "All observed acquisition tracks; incomplete waits are lower bounds. Complete journeys reported separately.",
+    "los": {
+      "method": null,
+      "grade": null,
+      "reason": "LOS ungraded: a selected control-delay methodology, edition and sufficient measurement coverage are required"
+    }
+  },
+  "runtime": {
+    "system": {
+      "frames": 1000,
+      "inference_total_ms": 206334.17390295654,
+      "last_inference_ms": 241.74645300081465,
+      "neural_device": "cpu",
+      "mean_inference_ms": 206.33,
+      "processed_fps": 2.28
+    },
+    "acquisition": {
+      "frames": 1000,
+      "inference_total_ms": 208384.5533360145,
+      "last_inference_ms": 197.74941300420323,
+      "neural_device": "cpu",
+      "mean_inference_ms": 208.38,
+      "processed_fps": 2.28
+    }
+  },
+  "parity": {
+    "status": "passed",
+    "inputs": 5163,
+    "max_onnx_native_difference_sec": 0.000213623046875,
+    "provider": "CPUExecutionProvider",
+    "inference_p50_ms": 0.026050001906696707,
+    "inference_p95_ms": 0.03182889849995262,
+    "fallback_count": 0,
+    "app_duration_resolution_sec": 0.01,
+    "sumo_comparison_duration_resolution_sec": 1
+  },
+  "original_app_unchanged": true,
+  "checkpoint_sha256": "41aa2836e92f587250f1d58ea5e8d262dea4e546afbfee67f98233907f2e657c",
+  "candidate_onnx_sha256": "ffccea91aadc348ce4e633f4c9ab028e95332754970a83bde4c51d0aa1f3790d",
+  "caveats": [
+    "API and real-video pipeline tested; browser interactions were not automated",
+    "Same prerecorded source for both roles; approximate partial geometry retained",
+    "Replay cannot measure traffic response to a different recommendation",
+    "Recorded signal durations are not optimal-control targets",
+    "Native model decisions use centiseconds; SUMO development comparison used integer seconds"
+  ]
+}

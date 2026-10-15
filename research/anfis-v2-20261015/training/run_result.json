@@ -1,0 +1,1073 @@
+{
+  "completed_groups_including_partial_waves": 120,
+  "completed_waves": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "contract_digest": "e60fead432b517f256ea52c373b55c57343dd320c0b3893a2937b97ebddc1c2e",
+  "development_only": true,
+  "elapsed_seconds": 5083.042031929999,
+  "evaluation_complete": true,
+  "evaluation_processes": [
+    {
+      "elapsed_seconds": 13.811732518999634,
+      "id": "rapid-v2-local-20261015-fresh-42-0",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/evaluation/logs/rapid-v2-local-20261015-fresh-42-0.log",
+      "pid": 156890,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 20.317876615998102,
+      "id": "rapid-v2-local-20261015-fresh-42-1",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/evaluation/logs/rapid-v2-local-20261015-fresh-42-1.log",
+      "pid": 157019,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 135.61355015400113,
+      "id": "rapid-v2-local-20261015-fresh-42-2",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/evaluation/logs/rapid-v2-local-20261015-fresh-42-2.log",
+      "pid": 157116,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 12.412926550998236,
+      "id": "rapid-v2-local-20261015-fresh-42-3",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/evaluation/logs/rapid-v2-local-20261015-fresh-42-3.log",
+      "pid": 157586,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 47.63500242599912,
+      "id": "rapid-v2-local-20261015-fresh-42-4",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/evaluation/logs/rapid-v2-local-20261015-fresh-42-4.log",
+      "pid": 157618,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 78.77024268999958,
+      "id": "rapid-v2-local-20261015-fresh-42-5",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/evaluation/logs/rapid-v2-local-20261015-fresh-42-5.log",
+      "pid": 157836,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 12.912236059000861,
+      "id": "rapid-v2-local-20261015-fresh-42-6",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/evaluation/logs/rapid-v2-local-20261015-fresh-42-6.log",
+      "pid": 158095,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 34.937663552998856,
+      "id": "rapid-v2-local-20261015-fresh-42-7",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/evaluation/logs/rapid-v2-local-20261015-fresh-42-7.log",
+      "pid": 158121,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 86.07422458200017,
+      "id": "rapid-v2-local-20261015-fresh-42-8",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/evaluation/logs/rapid-v2-local-20261015-fresh-42-8.log",
+      "pid": 158163,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 16.013429615999485,
+      "id": "rapid-v2-local-20261015-fresh-42-9",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/evaluation/logs/rapid-v2-local-20261015-fresh-42-9.log",
+      "pid": 158434,
+      "returncode": 0,
+      "status": "complete"
+    }
+  ],
+  "generation_processes": [
+    {
+      "elapsed_seconds": 55.944908496996504,
+      "id": "rapid-v2-local-20261015-42-w00-02",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w00-02.log",
+      "pid": 130045,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 71.85861755499718,
+      "id": "rapid-v2-local-20261015-42-w00-01",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w00-01.log",
+      "pid": 130044,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 84.87023725399922,
+      "id": "rapid-v2-local-20261015-42-w00-00",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w00-00.log",
+      "pid": 130043,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 126.1198980529989,
+      "id": "rapid-v2-local-20261015-42-w00-05",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w00-05.log",
+      "pid": 130657,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 198.4799414279987,
+      "id": "rapid-v2-local-20261015-42-w00-03",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w00-03.log",
+      "pid": 130545,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 240.4165596769999,
+      "id": "rapid-v2-local-20261015-42-w00-04",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w00-04.log",
+      "pid": 130608,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 104.28650001200003,
+      "id": "rapid-v2-local-20261015-42-w00-06",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w00-06.log",
+      "pid": 131429,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 64.87668620800105,
+      "id": "rapid-v2-local-20261015-42-w00-08",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w00-08.log",
+      "pid": 132018,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 166.778037606,
+      "id": "rapid-v2-local-20261015-42-w00-07",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w00-07.log",
+      "pid": 131699,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 135.33920825699897,
+      "id": "rapid-v2-local-20261015-42-w00-10",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w00-10.log",
+      "pid": 132374,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 203.0195020220017,
+      "id": "rapid-v2-local-20261015-42-w00-09",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w00-09.log",
+      "pid": 132038,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 48.94682568099961,
+      "id": "rapid-v2-local-20261015-42-w00-12",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w00-12.log",
+      "pid": 133080,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 153.64875442899938,
+      "id": "rapid-v2-local-20261015-42-w00-11",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w00-11.log",
+      "pid": 132542,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 89.69468411200069,
+      "id": "rapid-v2-local-20261015-42-w00-14",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w00-14.log",
+      "pid": 133368,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 96.4008570900005,
+      "id": "rapid-v2-local-20261015-42-w00-15",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w00-15.log",
+      "pid": 133418,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 197.1039427809992,
+      "id": "rapid-v2-local-20261015-42-w00-13",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w00-13.log",
+      "pid": 133146,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 73.17910779799786,
+      "id": "rapid-v2-local-20261015-42-w00-16",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w00-16.log",
+      "pid": 133904,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 173.87547220499982,
+      "id": "rapid-v2-local-20261015-42-w00-17",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w00-17.log",
+      "pid": 134092,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 151.14714297999672,
+      "id": "rapid-v2-local-20261015-42-w00-18",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w00-18.log",
+      "pid": 134246,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 40.834238643998106,
+      "id": "rapid-v2-local-20261015-42-w01-00",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w01-00.log",
+      "pid": 134898,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 85.0845215579975,
+      "id": "rapid-v2-local-20261015-42-w01-02",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w01-02.log",
+      "pid": 135323,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 257.0494570930023,
+      "id": "rapid-v2-local-20261015-42-w00-19",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w00-19.log",
+      "pid": 134343,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 132.52796560800198,
+      "id": "rapid-v2-local-20261015-42-w01-01",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w01-01.log",
+      "pid": 135194,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 61.96076577400163,
+      "id": "rapid-v2-local-20261015-42-w01-03",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w01-03.log",
+      "pid": 135724,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 53.35107720399901,
+      "id": "rapid-v2-local-20261015-42-w01-06",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w01-06.log",
+      "pid": 136157,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 128.3235233020023,
+      "id": "rapid-v2-local-20261015-42-w01-05",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w01-05.log",
+      "pid": 135887,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 149.04278200000044,
+      "id": "rapid-v2-local-20261015-42-w01-04",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w01-04.log",
+      "pid": 135785,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 58.15316617799908,
+      "id": "rapid-v2-local-20261015-42-w01-07",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w01-07.log",
+      "pid": 136515,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 41.64008711600036,
+      "id": "rapid-v2-local-20261015-42-w01-10",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w01-10.log",
+      "pid": 136857,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 74.57200451800236,
+      "id": "rapid-v2-local-20261015-42-w01-08",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w01-08.log",
+      "pid": 136667,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 133.3221368630002,
+      "id": "rapid-v2-local-20261015-42-w01-11",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w01-11.log",
+      "pid": 137129,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 194.68110594599784,
+      "id": "rapid-v2-local-20261015-42-w01-09",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w01-09.log",
+      "pid": 136682,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 132.22367581399885,
+      "id": "rapid-v2-local-20261015-42-w01-12",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w01-12.log",
+      "pid": 137187,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 91.37715044700235,
+      "id": "rapid-v2-local-20261015-42-w01-13",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w01-13.log",
+      "pid": 137809,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 97.38283380900248,
+      "id": "rapid-v2-local-20261015-42-w01-14",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w01-14.log",
+      "pid": 137827,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 94.77740630799963,
+      "id": "rapid-v2-local-20261015-42-w01-15",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w01-15.log",
+      "pid": 137870,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 55.15363786200032,
+      "id": "rapid-v2-local-20261015-42-w01-16",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w01-16.log",
+      "pid": 138335,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 87.47926311700212,
+      "id": "rapid-v2-local-20261015-42-w01-18",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w01-18.log",
+      "pid": 138587,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 184.77327806800167,
+      "id": "rapid-v2-local-20261015-42-w01-17",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w01-17.log",
+      "pid": 138463,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 140.33540135899966,
+      "id": "rapid-v2-local-20261015-42-w02-00",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w02-00.log",
+      "pid": 139055,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 54.752656102999026,
+      "id": "rapid-v2-local-20261015-42-w02-01",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w02-01.log",
+      "pid": 139444,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 241.42257065900048,
+      "id": "rapid-v2-local-20261015-42-w01-19",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w01-19.log",
+      "pid": 138763,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 116.2994653479982,
+      "id": "rapid-v2-local-20261015-42-w02-03",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w02-03.log",
+      "pid": 139784,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 163.8394970900008,
+      "id": "rapid-v2-local-20261015-42-w02-02",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w02-02.log",
+      "pid": 139775,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 48.14256876999934,
+      "id": "rapid-v2-local-20261015-42-w02-06",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w02-06.log",
+      "pid": 140698,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 91.87972299399917,
+      "id": "rapid-v2-local-20261015-42-w02-05",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w02-05.log",
+      "pid": 140553,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 169.0477291520001,
+      "id": "rapid-v2-local-20261015-42-w02-04",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w02-04.log",
+      "pid": 140106,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 79.28126298200004,
+      "id": "rapid-v2-local-20261015-42-w02-07",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w02-07.log",
+      "pid": 141030,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 92.89706177500193,
+      "id": "rapid-v2-local-20261015-42-w02-09",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w02-09.log",
+      "pid": 141074,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 80.38335102800193,
+      "id": "rapid-v2-local-20261015-42-w02-10",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w02-10.log",
+      "pid": 141531,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 170.0783295000001,
+      "id": "rapid-v2-local-20261015-42-w02-08",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w02-08.log",
+      "pid": 141035,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 99.50456678999763,
+      "id": "rapid-v2-local-20261015-42-w02-11",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w02-11.log",
+      "pid": 141628,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 47.546946319998824,
+      "id": "rapid-v2-local-20261015-42-w02-14",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w02-14.log",
+      "pid": 142268,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 185.39700512900163,
+      "id": "rapid-v2-local-20261015-42-w02-12",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w02-12.log",
+      "pid": 141979,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 187.6941327200002,
+      "id": "rapid-v2-local-20261015-42-w02-13",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w02-13.log",
+      "pid": 142012,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 149.14395692200196,
+      "id": "rapid-v2-local-20261015-42-w02-15",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w02-15.log",
+      "pid": 142506,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 52.24172607699802,
+      "id": "rapid-v2-local-20261015-42-w02-16",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w02-16.log",
+      "pid": 143013,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 56.44630206700094,
+      "id": "rapid-v2-local-20261015-42-w02-17",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w02-17.log",
+      "pid": 143083,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 68.25329778100058,
+      "id": "rapid-v2-local-20261015-42-w02-19",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w02-19.log",
+      "pid": 143405,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 69.15586623999843,
+      "id": "rapid-v2-local-20261015-42-w03-00",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w03-00.log",
+      "pid": 143508,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 190.6945461489995,
+      "id": "rapid-v2-local-20261015-42-w02-18",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w02-18.log",
+      "pid": 143399,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 126.84544804699908,
+      "id": "rapid-v2-local-20261015-42-w03-01",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w03-01.log",
+      "pid": 143890,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 62.7681923329983,
+      "id": "rapid-v2-local-20261015-42-w03-04",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w03-04.log",
+      "pid": 144413,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 178.60706179800036,
+      "id": "rapid-v2-local-20261015-42-w03-02",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w03-02.log",
+      "pid": 143943,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 51.45109025599959,
+      "id": "rapid-v2-local-20261015-42-w03-05",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w03-05.log",
+      "pid": 144800,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 79.97262478500124,
+      "id": "rapid-v2-local-20261015-42-w03-06",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w03-06.log",
+      "pid": 144841,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 219.6313214619986,
+      "id": "rapid-v2-local-20261015-42-w03-03",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w03-03.log",
+      "pid": 144406,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 110.61364623999907,
+      "id": "rapid-v2-local-20261015-42-w03-07",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w03-07.log",
+      "pid": 145188,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 125.22650597599932,
+      "id": "rapid-v2-local-20261015-42-w03-08",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w03-08.log",
+      "pid": 145478,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 63.15859261100195,
+      "id": "rapid-v2-local-20261015-42-w03-09",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w03-09.log",
+      "pid": 145872,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 88.27670303500054,
+      "id": "rapid-v2-local-20261015-42-w03-10",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w03-10.log",
+      "pid": 145951,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 95.78783449399998,
+      "id": "rapid-v2-local-20261015-42-w03-11",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w03-11.log",
+      "pid": 146172,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 61.2585581860003,
+      "id": "rapid-v2-local-20261015-42-w03-13",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w03-13.log",
+      "pid": 146486,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 129.9222454890005,
+      "id": "rapid-v2-local-20261015-42-w03-12",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w03-12.log",
+      "pid": 146179,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 61.659676754999964,
+      "id": "rapid-v2-local-20261015-42-w03-14",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w03-14.log",
+      "pid": 146870,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 49.341453373999684,
+      "id": "rapid-v2-local-20261015-42-w03-16",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w03-16.log",
+      "pid": 147059,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 145.631827661,
+      "id": "rapid-v2-local-20261015-42-w03-15",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w03-15.log",
+      "pid": 146880,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 160.84489797100105,
+      "id": "rapid-v2-local-20261015-42-w03-17",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w03-17.log",
+      "pid": 147322,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 157.54936358199848,
+      "id": "rapid-v2-local-20261015-42-w03-18",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w03-18.log",
+      "pid": 147427,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 38.83570905599845,
+      "id": "rapid-v2-local-20261015-42-w04-01",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w04-01.log",
+      "pid": 148188,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 153.04875540300054,
+      "id": "rapid-v2-local-20261015-42-w03-19",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w03-19.log",
+      "pid": 147765,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 95.69514949400036,
+      "id": "rapid-v2-local-20261015-42-w04-00",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w04-00.log",
+      "pid": 148119,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 45.94294032000107,
+      "id": "rapid-v2-local-20261015-42-w04-03",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w04-03.log",
+      "pid": 148605,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 88.08414861799974,
+      "id": "rapid-v2-local-20261015-42-w04-02",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w04-02.log",
+      "pid": 148542,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 56.052526604999,
+      "id": "rapid-v2-local-20261015-42-w04-04",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w04-04.log",
+      "pid": 148707,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 111.12153547599883,
+      "id": "rapid-v2-local-20261015-42-w04-07",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w04-07.log",
+      "pid": 149145,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 142.9539633960012,
+      "id": "rapid-v2-local-20261015-42-w04-05",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w04-05.log",
+      "pid": 149023,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 164.47422149499835,
+      "id": "rapid-v2-local-20261015-42-w04-06",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w04-06.log",
+      "pid": 149132,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 83.68107009399682,
+      "id": "rapid-v2-local-20261015-42-w04-10",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w04-10.log",
+      "pid": 149980,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 202.79523821100156,
+      "id": "rapid-v2-local-20261015-42-w04-08",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w04-08.log",
+      "pid": 149792,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 268.67128346200116,
+      "id": "rapid-v2-local-20261015-42-w04-09",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w04-09.log",
+      "pid": 149801,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 155.1585899160018,
+      "id": "rapid-v2-local-20261015-42-w04-11",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w04-11.log",
+      "pid": 150554,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 115.62044932600111,
+      "id": "rapid-v2-local-20261015-42-w04-12",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w04-12.log",
+      "pid": 150878,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 138.4414648810016,
+      "id": "rapid-v2-local-20261015-42-w04-13",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w04-13.log",
+      "pid": 151323,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 139.7437993800013,
+      "id": "rapid-v2-local-20261015-42-w04-14",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w04-14.log",
+      "pid": 151386,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 147.55042283999865,
+      "id": "rapid-v2-local-20261015-42-w04-15",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w04-15.log",
+      "pid": 151488,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 127.82121205599833,
+      "id": "rapid-v2-local-20261015-42-w04-16",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w04-16.log",
+      "pid": 152058,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 150.54836469099973,
+      "id": "rapid-v2-local-20261015-42-w04-17",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w04-17.log",
+      "pid": 152130,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 112.71922161399925,
+      "id": "rapid-v2-local-20261015-42-w04-18",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w04-18.log",
+      "pid": 152248,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 35.33125843200105,
+      "id": "rapid-v2-local-20261015-42-w05-00",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w05-00.log",
+      "pid": 152882,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 40.1351335420004,
+      "id": "rapid-v2-local-20261015-42-w05-01",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w05-01.log",
+      "pid": 152889,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 43.6385461150021,
+      "id": "rapid-v2-local-20261015-42-w05-02",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w05-02.log",
+      "pid": 153210,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 163.1567857910013,
+      "id": "rapid-v2-local-20261015-42-w04-19",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w04-19.log",
+      "pid": 152698,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 60.252058005000436,
+      "id": "rapid-v2-local-20261015-42-w05-04",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w05-04.log",
+      "pid": 153480,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 43.83367667800121,
+      "id": "rapid-v2-local-20261015-42-w05-06",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w05-06.log",
+      "pid": 153871,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 175.65518670500023,
+      "id": "rapid-v2-local-20261015-42-w05-03",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w05-03.log",
+      "pid": 153237,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 56.55279333499857,
+      "id": "rapid-v2-local-20261015-42-w05-07",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w05-07.log",
+      "pid": 154072,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 129.41391799999838,
+      "id": "rapid-v2-local-20261015-42-w05-05",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w05-05.log",
+      "pid": 153772,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 57.548860392998904,
+      "id": "rapid-v2-local-20261015-42-w05-08",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w05-08.log",
+      "pid": 154436,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 46.737361301999044,
+      "id": "rapid-v2-local-20261015-42-w05-10",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w05-10.log",
+      "pid": 154613,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 84.77025838900227,
+      "id": "rapid-v2-local-20261015-42-w05-09",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w05-09.log",
+      "pid": 154555,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 51.64376168099989,
+      "id": "rapid-v2-local-20261015-42-w05-11",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w05-11.log",
+      "pid": 154902,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 54.94691727400277,
+      "id": "rapid-v2-local-20261015-42-w05-12",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w05-12.log",
+      "pid": 155071,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 90.38675859300201,
+      "id": "rapid-v2-local-20261015-42-w05-14",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w05-14.log",
+      "pid": 155188,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 103.20137076500032,
+      "id": "rapid-v2-local-20261015-42-w05-13",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w05-13.log",
+      "pid": 155183,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 86.78595680999933,
+      "id": "rapid-v2-local-20261015-42-w05-15",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w05-15.log",
+      "pid": 155497,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 65.55259955399742,
+      "id": "rapid-v2-local-20261015-42-w05-18",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w05-18.log",
+      "pid": 156017,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 95.48213684399889,
+      "id": "rapid-v2-local-20261015-42-w05-16",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w05-16.log",
+      "pid": 155888,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 120.10023408199777,
+      "id": "rapid-v2-local-20261015-42-w05-17",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w05-17.log",
+      "pid": 155951,
+      "returncode": 0,
+      "status": "complete"
+    },
+    {
+      "elapsed_seconds": 86.06620303799718,
+      "id": "rapid-v2-local-20261015-42-w05-19",
+      "log": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/rapid-v2-local-20261015/generation/logs/rapid-v2-local-20261015-42-w05-19.log",
+      "pid": 156426,
+      "returncode": 0,
+      "status": "complete"
+    }
+  ],
+  "groups": 120,
+  "profile": "rapid_development",
+  "runtime": {
+    "packages": {
+      "atsc-experiment": "2.0.0",
+      "numpy": "2.4.6",
+      "sumolib": "1.26.0",
+      "traci": "1.26.0"
+    },
+    "sumo": "Eclipse SUMO sumo 1.26.0"
+  },
+  "status": "candidate_and_comparison_complete",
+  "wall_budget_seconds": 7200,
+  "workers": 3
+}

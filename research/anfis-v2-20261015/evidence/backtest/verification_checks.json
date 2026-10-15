@@ -1,0 +1,52 @@
+[
+  {
+    "check": "unqueued_green_arrival_has_zero_queue_delay",
+    "passed": true
+  },
+  {
+    "check": "red_arrival_waits_for_green_and_startup",
+    "passed": true
+  },
+  {
+    "date": "20250120",
+    "controller": "old",
+    "check": "identity_schedule",
+    "passed": true
+  },
+  {
+    "date": "20250120",
+    "controller": "new",
+    "check": "identity_schedule",
+    "passed": true
+  },
+  {
+    "date": "20250525",
+    "controller": "old",
+    "check": "identity_schedule",
+    "passed": true
+  },
+  {
+    "date": "20250525",
+    "controller": "new",
+    "check": "identity_schedule",
+    "passed": true
+  },
+  {
+    "date": "20250526",
+    "controller": "old",
+    "check": "identity_schedule",
+    "passed": true
+  },
+  {
+    "date": "20250526",
+    "controller": "new",
+    "check": "identity_schedule",
+    "passed": true
+  },
+  {
+    "check": "historical_all_vehicle_results_reproduced",
+    "rows": 2849,
+    "max_error_sec": 0.0,
+    "passed": true
+  }
+]

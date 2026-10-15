@@ -1,0 +1,39 @@
+1
+00:00:00,565 --> 00:00:10,568
+A fresh application replay and a separate vehicle-by-vehicle queue backtest. No training or field actuation is performed in this recording.
+
+2
+00:00:10,618 --> 00:00:22,618
+Existing calibration is reviewed. The same prepared Bellevue source is used in two camera roles, with approximate partial-road geometry.
+
+3
+00:00:25,563 --> 00:00:37,563
+Actual application on a local PC CPU. YOLO and independent trackers supply V_w, Q and L. Recommendations do not change the recorded signal.
+
+4
+00:09:27,478 --> 00:09:39,478
+All 2,000 role-frames are retained. Partial waits remain visible. Video replay cannot establish a treatment effect or full-intersection LOS.
+
+5
+00:09:51,474 --> 00:10:01,889
+The frozen model and calibration are rerun against FLUID arrivals. All eleven scenarios and unfinished journeys remain included.
+
+6
+00:10:01,939 --> 00:10:13,939
+Prioritize 26 May, whose baseline screen passes. The 25 May baseline failed; its large apparent gain is exploratory.
+
+7
+00:10:19,957 --> 00:10:31,957
+Every scored vehicle is shown. Positive savings mean less estimated new-model delay. Pause on any page to inspect the vehicle IDs.
+
+8
+00:11:33,133 --> 00:11:45,133
+All prespecified sensitivity scenarios are retained. These ranges are not statistical confidence intervals.
+
+9
+00:11:47,342 --> 00:11:59,342
+Promising development evidence. Competing traffic, motorcycle-rich flow, complete measurement coverage and whole-intersection LOS require further validation.
+
+10
+00:12:03,280 --> 00:12:15,280
+The same fresh-run results, shown again with every row fully visible. Pause on any page to inspect all 136 vehicle IDs, delays and censoring flags.

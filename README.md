@@ -99,3 +99,10 @@ For full mathematical derivations, PKJI 2014 formulation, RS-485 serial protocol
 ## 📄 License
 
 MIT License. Designed for academic research and intelligent transportation systems deployment.
+
+## ANFIS development candidate and vehicle backtest
+
+The [October 2026 research bundle](research/anfis-v2-20261015/README.md) contains
+the candidate ONNX/PyTorch checkpoints, frozen prepared FLUID inputs, per-vehicle
+evidence, and a portable CPU rerun command. It is kept separate from the app
+default model. See its report for development-data and LOS limitations.
