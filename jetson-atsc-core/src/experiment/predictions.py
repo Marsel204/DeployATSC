@@ -90,6 +90,13 @@ class PredictionBook:
                 self._classify(record)
                 self.pending = None
 
+    def invalidate(self, reason, timestamp):
+        with self.lock:
+            if self.pending:
+                self.records[self.pending].update(status="unmatched", eligible=False,
+                                                  invalidated_at=timestamp, invalidation_reason=reason)
+                self.pending = None
+
     def cancel(self, request_id):
         with self.lock:
             if request_id not in self.records: raise KeyError(request_id)
