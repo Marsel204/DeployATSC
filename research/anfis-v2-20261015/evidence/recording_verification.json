@@ -1,0 +1,67 @@
+{
+  "status": "verified_complete",
+  "video": "/home/marsel/Projects/Orchestrator/experiments/retraining_v2/professor-demo-20261015/recordings/ANFIS_full_experiment.mp4",
+  "duration_seconds": 793.8399999999999,
+  "width": 1920,
+  "height": 1080,
+  "codec": "h264",
+  "encoder": "libx264",
+  "video_sha256": "7b227358ec0ea2d153e953c45d9a989076717042a0318434099fd8b7b6914b4c",
+  "raw_recording_sha256": "f6e4281cff408d59a372bedd053f00d57b3fde4a275c0d4f548aa001f2282789",
+  "ledger_recording_sha256": "a4e8a18964c9cc5eb98c1b1deb31f7085b7b445d09df1bda8b88ee3fa84a5bc8",
+  "readable_ledger_rows_verified": 136,
+  "complete_video_decode": "passed",
+  "english_subtitles": "embedded and external SRT",
+  "audio": "silent; speaker notes supplied",
+  "chapters": [
+    {
+      "start": "00:01",
+      "title": "Introduction"
+    },
+    {
+      "start": "00:11",
+      "title": "Application setup"
+    },
+    {
+      "start": "00:26",
+      "title": "Full application replay"
+    },
+    {
+      "start": "09:27",
+      "title": "Application evidence and measurement limits"
+    },
+    {
+      "start": "09:51",
+      "title": "Fresh vehicle backtest"
+    },
+    {
+      "start": "10:02",
+      "title": "Backtest summary"
+    },
+    {
+      "start": "10:20",
+      "title": "All 136 vehicle results"
+    },
+    {
+      "start": "11:33",
+      "title": "All eleven sensitivity scenarios"
+    },
+    {
+      "start": "11:47",
+      "title": "Conclusion and limitations"
+    },
+    {
+      "start": "12:03",
+      "title": "Readable vehicle ledger appendix"
+    }
+  ],
+  "app_run_id": "run_9add98e58f194313",
+  "app_frames": {
+    "system": 1000,
+    "acquisition": 1000
+  },
+  "all_vehicle_ids_shown": 136,
+  "source_app_unchanged": true,
+  "model_unchanged": true,
+  "encoding_seconds": 118.69021461100056
+}

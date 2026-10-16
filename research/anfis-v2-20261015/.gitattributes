@@ -1,0 +1,4 @@
+# Preserve artifact bytes across checkouts: hashes and exact replay use original bytes.
+* -text
+# CSV exports intentionally retain the Python CSV writer's CRLF record endings.
+*.csv whitespace=cr-at-eol

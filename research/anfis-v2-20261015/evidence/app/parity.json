@@ -1,0 +1,11 @@
+{
+  "status": "passed",
+  "inputs": 5163,
+  "max_onnx_native_difference_sec": 0.000213623046875,
+  "provider": "CPUExecutionProvider",
+  "inference_p50_ms": 0.026050001906696707,
+  "inference_p95_ms": 0.03182889849995262,
+  "fallback_count": 0,
+  "app_duration_resolution_sec": 0.01,
+  "sumo_comparison_duration_resolution_sec": 1
+}

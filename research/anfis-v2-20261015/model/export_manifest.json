@@ -1,0 +1,15 @@
+{
+  "development_only": true,
+  "feature_names": [
+    "V_w",
+    "Q",
+    "L"
+  ],
+  "contract_digest": "e60fead432b517f256ea52c373b55c57343dd320c0b3893a2937b97ebddc1c2e",
+  "dataset_sha256": "7f7c4726437dc8c1ba67578746ed96f06b0ae1ca9edaa86e8405aafd68d9bed6",
+  "checkpoint_sha256": "41aa2836e92f587250f1d58ea5e8d262dea4e546afbfee67f98233907f2e657c",
+  "onnx_sha256": "ffccea91aadc348ce4e633f4c9ab028e95332754970a83bde4c51d0aa1f3790d",
+  "exporter_source_sha256": "813db951896b41de1897ede67cb94e318ead9a585c5966430e56e471abeb704a",
+  "torch_version": "2.14.1+cpu",
+  "note": "Separate development export for isolated application testing; deployed model unchanged."
+}

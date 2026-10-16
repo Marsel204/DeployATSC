@@ -1,0 +1,24 @@
+{
+  "checks": [
+    {
+      "check": "relocated_bundle_with_independent_cwd_and_no_external_inputs",
+      "passed": true
+    },
+    {
+      "check": "prepared_data_rerun_does_not_claim_raw_source_verification",
+      "passed": true
+    },
+    {
+      "check": "existing_outputs_refused_without_modification",
+      "passed": true
+    },
+    {
+      "check": "corrupt_prepared_data_refused_before_output_creation",
+      "passed": true
+    },
+    {
+      "check": "native_checkpoint_dataset_and_original_deployed_model_identity",
+      "passed": true
+    }
+  ]
+}
