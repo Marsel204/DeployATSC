@@ -100,6 +100,11 @@ For full mathematical derivations, PKJI 2014 formulation, RS-485 serial protocol
 
 MIT License. Designed for academic research and intelligent transportation systems deployment.
 
+## NVIDIA PC runtime
+
+For the Linux NVIDIA PC runtime, see the [PC GPU setup](jetson-atsc-core/PC_GPU.md)
+and its separate `requirements-pc.txt` dependency set.
+
 ## ANFIS development candidate and vehicle backtest
 
 The [October 2026 research bundle](research/anfis-v2-20261015/README.md) contains

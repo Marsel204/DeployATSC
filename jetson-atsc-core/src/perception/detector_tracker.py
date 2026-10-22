@@ -90,7 +90,7 @@ class DetectorTracker:
         conf_threshold: float = 0.30,
         iou_threshold: float = 0.50,
         imgsz: int = 640,
-        device: str = "cuda:0",
+        device: str = "auto",
     ) -> None:
         """
         Args:
@@ -98,12 +98,15 @@ class DetectorTracker:
             conf_threshold: Minimum detection confidence threshold.
             iou_threshold: NMS IoU threshold.
             imgsz: Input resolution size.
-            device: 'cuda:0' or 'cpu'.
+            device: 'auto' selects CUDA when available; 'cuda:0' or 'cpu' selects explicitly.
         """
         self.model_path = model_path
         self.conf_threshold = conf_threshold
         self.iou_threshold = iou_threshold
         self.imgsz = imgsz
+        if device == "auto":
+            import torch
+            device = "cuda:0" if torch.cuda.is_available() else "cpu"
         self.device = device
 
         self.is_tensorrt: bool = str(model_path).endswith(".engine")
@@ -193,6 +196,7 @@ class DetectorTracker:
                 conf=self.conf_threshold,
                 iou=self.iou_threshold,
                 imgsz=self.imgsz,
+                device=self.device,
                 persist=True,
                 tracker="bytetrack.yaml",
                 verbose=False,
@@ -205,6 +209,7 @@ class DetectorTracker:
                 conf=self.conf_threshold,
                 iou=self.iou_threshold,
                 imgsz=self.imgsz,
+                device=self.device,
                 verbose=False,
             )
 

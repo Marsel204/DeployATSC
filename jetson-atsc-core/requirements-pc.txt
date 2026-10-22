@@ -1,0 +1,16 @@
+# Linux x86_64 NVIDIA PC runtime, separate from Jetson/JetPack dependencies.
+# The local CUDA version suffixes keep these packages on the official CUDA index.
+--extra-index-url https://download.pytorch.org/whl/cu130
+torch==2.12.0+cu130
+torchvision==0.27.0+cu130
+ultralytics==8.4.177
+numpy==1.26.4
+opencv-python==4.11.0.86
+onnxruntime==1.31.0
+fastapi>=0.110.0
+uvicorn>=0.28.0
+python-multipart>=0.0.9
+pyserial>=3.5
+requests>=2.31.0
+psutil>=5.9.0
+yt-dlp>=2024.3.10

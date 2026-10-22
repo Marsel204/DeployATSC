@@ -1,0 +1,110 @@
+{
+  "benchmark": {
+    "torch": "2.12.0+cu130",
+    "cuda": "13.0",
+    "gpu": "NVIDIA GeForce RTX 5060 Ti",
+    "capability": [
+      12,
+      0
+    ],
+    "architectures": [
+      "sm_75",
+      "sm_80",
+      "sm_86",
+      "sm_90",
+      "sm_100",
+      "sm_120"
+    ],
+    "model_sha256": "2d8a4420d5304758e53e3bae6acaaa8e637a40bcbea0339f526d2df1d3b9ee49",
+    "benchmark": {
+      "cpu": {
+        "selected_device": "cpu",
+        "predictor_device": "cpu",
+        "inference_model_device": "cpu",
+        "samples": 20,
+        "mean_ms": 226.9252809000136,
+        "median_ms": 241.16090699999404,
+        "p95_ms": 265.6144473000495,
+        "last_vehicle_count": 14
+      },
+      "auto": {
+        "selected_device": "cuda:0",
+        "predictor_device": "cuda:0",
+        "inference_model_device": "cuda:0",
+        "samples": 20,
+        "mean_ms": 10.062555050035371,
+        "median_ms": 9.794822000003478,
+        "p95_ms": 12.092725649972635,
+        "last_vehicle_count": 14
+      }
+    },
+    "median_speedup": 24.621264888724717
+  },
+  "app_smoke": {
+    "run_id": "run_0fdd63593f9f4298",
+    "state": "stopped",
+    "error": null,
+    "storage_error": null,
+    "runtime": {
+      "system": {
+        "frames": 21,
+        "inference_total_ms": 3841.41905299839,
+        "last_inference_ms": 11.419759999625967,
+        "neural_device": "cuda:0",
+        "mean_inference_ms": 182.92,
+        "processed_fps": 1.5
+      },
+      "acquisition": {
+        "frames": 21,
+        "inference_total_ms": 390.4751979998764,
+        "last_inference_ms": 13.15896400001293,
+        "neural_device": "cuda:0",
+        "mean_inference_ms": 18.59,
+        "processed_fps": 1.5
+      }
+    },
+    "processed_frames": {
+      "system": 21,
+      "acquisition": 21
+    },
+    "app_gpu_processes": [
+      {
+        "pid": 35425,
+        "process": "observation app Python",
+        "memory": "558 MiB"
+      }
+    ],
+    "package_versions": {
+      "torch": "2.12.0+cu130",
+      "ultralytics": "8.4.177",
+      "onnxruntime": "1.31.0",
+      "opencv-python": "4.11.0.86"
+    }
+  },
+  "detector_source_sha256": "3275e4e9b69b3568eb108f1c96cfe962e3f14f7b14e3fdd68204515210c88139",
+  "checks": {
+    "cuda_kernel_computation": true,
+    "pip_check": true,
+    "pc_requirements_satisfied": true
+  },
+  "tests": {
+    "focused": {
+      "passed": 15,
+      "skipped": 1
+    },
+    "full_working_tree": {
+      "passed": 192,
+      "failed": 76,
+      "skipped": 1,
+      "missing_legacy_asset_failures": 75,
+      "preexisting_untracked_research_failure": 1
+    },
+    "branch_tracked_test_set": {
+      "passed": 187,
+      "failed": 75,
+      "skipped": 1,
+      "all_failures": "Missing pre-existing legacy media, trace and YOLO fixtures"
+    }
+  },
+  "review_mode": "self-review"
+}
