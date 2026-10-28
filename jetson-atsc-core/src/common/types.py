@@ -8,6 +8,7 @@ to guarantee type safety, eliminate KeyError runtime crashes, and enable instant
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from copy import deepcopy
 import json
 import time
 from typing import Any, Dict, Optional
@@ -21,15 +22,16 @@ class TrafficSnapshot:
     """
     timestamp: float = field(default_factory=time.time)
     v_w_pcu: float = 0.0          # Weighted vehicle count (MC:0.4, LV:1.0, HV:1.6)
-    queue_meters: float = 0.0     # Maximum longitudinal distance of stopped vehicles (<= 1.0 m/s)
+    queue_meters: Optional[float] = 0.0  # None means unavailable, never measured zero
     occupancy_pct: float = 0.0    # Fixed-area perspective-invariant lane occupancy [0.0, 100.0]
     n_mc: int = 0                 # Motorcycle count inside approach corridor
     n_lv: int = 0                 # Light vehicle count inside approach corridor
     n_hv: int = 0                 # Heavy vehicle (bus/truck) count inside approach corridor
     total_vehicles: int = 0       # Total active tracked vehicles in corridor
-    stopped_vehicles: int = 0     # Vehicles with speed <= 1.0 m/s
+    stopped_vehicles: Optional[int] = 0  # Vehicles with speed <= 1.0 m/s; None = unknown (single still image)
     occupied_area_m2: float = 0.0 # Physical road surface area occupied (m^2)
     camera_source: str = "KameraSistem"
+    quality: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any], timestamp: Optional[float] = None) -> TrafficSnapshot:
@@ -37,15 +39,17 @@ class TrafficSnapshot:
         return cls(
             timestamp=timestamp if timestamp is not None else time.time(),
             v_w_pcu=float(d.get("V_w", 0.0)),
-            queue_meters=float(d.get("Q", 0.0)),
+            queue_meters=float(d.get("Q", 0.0)) if d.get("Q", 0.0) is not None else None,
             occupancy_pct=float(d.get("L", 0.0)),
             n_mc=int(d.get("n_mc", 0)),
             n_lv=int(d.get("n_lv", 0)),
             n_hv=int(d.get("n_hv", 0)),
             total_vehicles=int(d.get("total_corridor_vehicles", 0)),
-            stopped_vehicles=int(d.get("stopped_vehicles_count", 0)),
+            # None: stopped state unknown (single still image), never a fabricated zero.
+            stopped_vehicles=int(d.get("stopped_vehicles_count", 0)) if d.get("stopped_vehicles_count", 0) is not None else None,
             occupied_area_m2=float(d.get("occupied_area_m2", 0.0)),
             camera_source=str(d.get("camera_source", "KameraSistem")),
+            quality=deepcopy(d.get("quality") or {}),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -67,6 +71,7 @@ class ActuationDecision:
     inference_latency_ms: float = 0.0
     failsafe_active: bool = False
     timestamp_iso: str = ""
+    inference_diagnostics: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         """Serializes decision to dictionary."""

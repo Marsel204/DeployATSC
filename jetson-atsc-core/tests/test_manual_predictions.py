@@ -59,3 +59,25 @@ def test_anfis_backend_fallback_cannot_be_an_eligible_recommendation():
     assert book.rows()[0]["status"]=="failed"
     assert not book.rows()[0]["eligible"]
     book.close()
+
+
+@pytest.mark.parametrize('raw,failure',[(-5.,False),(10.,False),(10.004,False),(30.,True)])
+def test_capture_retains_per_call_diagnostics_even_on_backend_fallback(raw,failure):
+    from test_decision_engine import synthetic_anfis
+    from src.control.decision_engine import ATSCDecisionEngine
+    decision=ATSCDecisionEngine(synthetic_anfis(raw,failure))
+    book=PredictionBook('diagnostics',RunPolicy(),decision.evaluate,clock=lambda:0)
+    try:
+        book.capture(TrafficSnapshot(timestamp=0),0,'RED','capture')
+        book.await_idle();book.on_green(1,1)
+        row=book.rows()[0]
+        data=row['inference_diagnostics']
+        assert data['raw_green_sec']==(None if failure else raw)
+        assert data['backend_fallback']==failure
+        assert data['model_domain']=='unknown'
+        assert row['eligible']==(not failure)
+        assert row['status']==('failed' if failure else 'matched')
+        if raw==-5:assert data['clipping_applied']
+        if raw==10:assert data['bound_touch_min'] and not data['clipping_applied']
+        if raw==10.004:assert data['rounding_applied'] and data['rounded_to_bound'] and not data['bound_touch_min']
+    finally:book.close()

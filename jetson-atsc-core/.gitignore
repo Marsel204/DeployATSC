@@ -8,3 +8,5 @@ recordings/*.mp4
 data/
 .agents/
 models/yolo11s.pt
+models/*.engine
+models/*.engine.json

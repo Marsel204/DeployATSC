@@ -118,3 +118,42 @@ def test_new_moving_arrival_can_still_be_a_complete_journey():
     waits.observe([vehicle(2, (10, 10))], "GREEN", .1, 2, 1)
     waits.observe([vehicle(2, (10, 25))], "GREEN", .2, 3, 1)
     assert summarize(waits.rows(), [], None)["complete_vehicle_count"] == 1
+
+
+@pytest.mark.parametrize('outside',[False,True])
+def test_unknown_crossing_retains_evidence_without_guessed_cycle(outside):
+    waits=VehicleWaits('run',RunPolicy(stop_persistence_sec=0),side=lambda p:p[1]-20)
+    waits.observe([vehicle(2,(10,10))],'GREEN',0,1,1)
+    crossing=VehicleObservation(7,'car',2,(10,25),velocity_valid=True,in_region=not outside)
+    waits.observe([crossing],'UNKNOWN',.1,2,2) # even a legacy caller's guessed cycle is ignored
+    waits.observe([vehicle(2,(10,30))],'GREEN',.2,3,2)
+    row=waits.rows()[0]
+    assert row['crossed_stop_line'] and row['crossing_cycle'] is None
+    assert row['crossing_phase']=='UNKNOWN' and row['crossing_direction']==1
+    assert row['completed_at']==.1 and row['crossing_at']==.1
+    assert 2 not in row['cycles']
+    assert 'crossing_phase_unknown' in row['quality_flags']
+
+
+def test_unknown_phase_keeps_known_stopped_time_but_no_red_or_cycle_credit():
+    waits=VehicleWaits('run',RunPolicy(stop_persistence_sec=0),side=lambda p:-1)
+    for seq,(t,phase) in enumerate([(0,'UNKNOWN'),(.1,'UNKNOWN'),(.2,'GREEN')],1):
+        waits.observe([vehicle()],phase,t,seq,2)
+    row=waits.rows(include_intervals=True)[0]
+    assert row['total_stopped_sec']==pytest.approx(.2)
+    assert row['red_wait_sec']==0
+    assert row['phase_unknown_sec']==pytest.approx(.2)
+    assert row['unknown_sec']==0 # motion coverage remains independently known
+    assert 'None' not in row['wait_by_cycle'] and not row['wait_by_cycle']
+    assert row['unattributed_stopped_sec']==pytest.approx(.2)
+
+
+def test_skipped_intervals_have_unknown_phase_coverage_without_cycle_credit():
+    waits=VehicleWaits('run',RunPolicy(stop_persistence_sec=0),side=lambda p:-1)
+    for seq,t in [(1,0),(2,.1),(4,.3),(5,1)]:
+        waits.observe([vehicle()],'RED',t,seq,1)
+    row=waits.rows(include_intervals=True)[0]
+    assert row['red_wait_sec']==pytest.approx(.1)
+    assert row['unknown_sec']==pytest.approx(.9)
+    assert row['phase_unknown_sec']==pytest.approx(.9)
+    assert all(i['phase']=='UNKNOWN' and i['cycle_id'] is None for i in row['intervals'] if not i['valid'])

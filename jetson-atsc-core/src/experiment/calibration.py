@@ -9,6 +9,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from src.common.source_identity import public_data, public_source, resolve_source
 from src.analytics.homography_engine import HomographyEngine
 from src.perception.lens_rectifier import LensRectifier
 
@@ -47,6 +48,9 @@ def legacy_system_payload(config, source, image_size):
 class CameraCalibration:
     def __init__(self, payload, root=ROOT):
         data = deepcopy(payload)
+        self.source = resolve_source(data.get("source", ""))
+        data["source"] = public_source(self.source)
+        data = public_data(data)
         if data.get("role") not in ("system", "acquisition"):
             raise ValueError("Camera role must be system or acquisition")
         self.role = data["role"]
@@ -63,10 +67,15 @@ class CameraCalibration:
         if path:
             resolved = Path(path)
             if not resolved.is_absolute(): resolved = Path(root) / resolved
+            actual_digest = hashlib.sha256(resolved.read_bytes()).hexdigest()
+            if data.get("rectification_digest") not in (None, actual_digest):
+                raise ValueError("Lens content digest changed; review geometry and create a new binding")
             self.rectifier = LensRectifier(str(resolved))
             if self.rectifier.dim != self.size:
                 raise ValueError("Lens calibration dimensions differ from this camera")
-            data["rectification_digest"] = hashlib.sha256(resolved.read_bytes()).hexdigest()
+            data["rectification_digest"] = actual_digest
+        elif data.get("rectification_digest"):
+            raise ValueError("Lens digest requires its calibration file")
 
         def points(key, count=None):
             raw = data.get(key)
@@ -108,11 +117,18 @@ class CameraCalibration:
         self.homography = HomographyEngine(anchors, ground, width, length, polygon)
         if np.linalg.cond(self.homography.H) > 1e7:
             raise ValueError("Perspective geometry is ill-conditioned")
+        # Explicit dimension evidence selects the dimension transform; a ruler
+        # left in an older draft must not silently rescale that measurement.
+        if (data.get("scale_evidence") or {}).get("method") == "measured_dimensions":
+            data.pop("ruler", None)
         if data.get("ruler"):
             ruler = data["ruler"]
             ruler_points = {"ruler_points": [ruler["p1"], ruler["p2"]]}
             data.update(ruler_points); points("ruler_points", 2)
-            self.homography.calibrate_from_sample_ruler(ruler["p1"], ruler["p2"], _finite(ruler["length_m"]))
+            ruler_length = _finite(ruler["length_m"])
+            if ruler_length <= 0 or np.linalg.norm(np.subtract(ruler["p1"], ruler["p2"])) < 1:
+                raise ValueError("Ruler needs distinct endpoints and positive length")
+            self.homography.calibrate_from_sample_ruler(ruler["p1"], ruler["p2"], ruler_length)
             data.pop("ruler_points")
         self.roi = None
         self.lamp_rois = {}
@@ -130,6 +146,36 @@ class CameraCalibration:
             self.stop_line = points("stop_line", 2)
             if np.linalg.norm(np.subtract(*self.stop_line)) < 1: raise ValueError("Stop line has zero length")
             if self.crossing_direction not in (-1, 1): raise ValueError("Crossing direction must be -1 or 1")
+        evidence = data.get("scale_evidence") or {}
+        method = evidence.get("method")
+        if evidence and (method not in ("measured_dimensions", "ruler") or not str(evidence.get("reference", "")).strip()):
+            raise ValueError("Scale evidence needs a measurement method and reference")
+        if method == "measured_dimensions" and not all(key in data for key in ("road_width_m", "road_length_m")):
+            raise ValueError("Measured dimensions must be explicitly supplied")
+        if method == "ruler" and not data.get("ruler"):
+            raise ValueError("Ruler scale evidence requires ruler endpoints and length")
+        binding = data.get("binding") or {}
+        geometry_keys = ("role", "source", "image_size", "rectification_digest", "anchors", "polygon",
+                         "road_width_m", "road_length_m", "ruler", "signal_roi", "lamp_rois", "stop_line", "crossing_direction")
+        geometry = {key:data.get(key) for key in geometry_keys}
+        geometry.update(road_width_m=width, road_length_m=length,
+                        lamp_rois=data.get("lamp_rois") or {}, crossing_direction=self.crossing_direction)
+        def canonical(value):
+            # JSON 8 and 8.0 / API tuple-to-list conversion do not change geometry.
+            if isinstance(value, (int,float)) and not isinstance(value,bool):return float(value)
+            if isinstance(value, dict):return {key:canonical(item) for key,item in value.items()}
+            if isinstance(value, (list,tuple)):return [canonical(item) for item in value]
+            return value
+        geometry_digest = hashlib.sha256(json.dumps(canonical(geometry),
+            sort_keys=True, allow_nan=False).encode()).hexdigest()
+        if binding.get("geometry_digest") not in (None, geometry_digest):
+            raise ValueError("Geometry binding changed; review and create a new binding")
+        if binding.get("reviewed") is True:
+            data["binding"] = {"reviewed":True, "geometry_digest":geometry_digest}
+        reasons = []
+        if not evidence:reasons.append("scale_evidence_missing")
+        if binding.get("reviewed") is not True:reasons.append("geometry_binding_unreviewed")
+        self.scale_status = {"state":"review_required" if reasons else "verified", "method":method, "reasons":reasons}
         self.payload = data
         self.revision = hashlib.sha256(json.dumps(data, sort_keys=True, allow_nan=False).encode()).hexdigest()[:16]
 

@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
 import logging
+import math
 import os
 from pathlib import Path
 import shutil
 import time
 from typing import Any, Dict, Optional
+from urllib.parse import urlsplit
+
+from src.ui.runtime_ownership import RuntimeConflict
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,7 +29,27 @@ CORE_ROOT = Path(__file__).resolve().parent.parent.parent
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
+@asynccontextmanager
+async def lifespan(application):
+    from src.ui import observation_api
+    try:timeout=float(os.environ.get("ATSC_SHUTDOWN_TIMEOUT_SEC","5"))
+    except ValueError as error:raise ValueError("Invalid shutdown deadline") from error
+    if not math.isfinite(timeout) or timeout<0:raise ValueError("Invalid shutdown deadline")
+    # Reopening an application lifespan allows a new serving interval.
+    if hasattr(observation_api.observations,"closing"):observation_api.observations.closing=False
+    if hasattr(manager,"closing"):manager.closing=False
+    try:yield
+    finally:
+        deadline=time.monotonic()+max(0,timeout)
+        async def close(owner):
+            try:return await asyncio.to_thread(lambda:owner.shutdown(max(0,deadline-time.monotonic())))
+            except Exception as error:return {"resources_released":False,"finalized":False,"error":str(error)}
+        legacy,observation=await asyncio.gather(close(manager),close(observation_api.observations))
+        application.state.shutdown_report={"legacy":legacy,"observation":observation}
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title="ATSC Edge Control & Replay Dashboard",
     description="Adaptive Traffic Signal Controller Interactive Perception & ANFIS Dashboard",
     version="1.0.0",
@@ -31,11 +57,35 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["http://localhost:8000","http://127.0.0.1:8000","http://[::1]:8000"],
+    allow_credentials=False,
+    allow_methods=["GET","POST","OPTIONS"],
+    allow_headers=["Content-Type"],
 )
+
+
+app.state.operation="legacy"  # Direct app imports retain the legacy compatibility entrypoint.
+app.state.allowed_hosts={"localhost","127.0.0.1","::1","testserver"}
+app.state.allowed_origins={"http://localhost:8000","http://127.0.0.1:8000","http://[::1]:8000"}
+
+
+@app.middleware("http")
+async def http_boundaries(request,call_next):
+    try:
+        authority=urlsplit("//"+request.headers.get("host",""))
+        authority.port  # Validate numeric port syntax as well as the hostname.
+        host=authority.hostname if not (authority.username or authority.password or authority.path or authority.query or authority.fragment) else None
+    except ValueError:host=None
+    if host not in app.state.allowed_hosts:
+        return JSONResponse({"detail":"Untrusted Host"},status_code=400)
+    origin=request.headers.get("origin")
+    same_origin=f"{request.url.scheme}://{request.headers.get('host','')}"
+    if origin is not None and origin not in app.state.allowed_origins and origin!=same_origin:
+        return JSONResponse({"detail":"Untrusted Origin"},status_code=403)
+    path=request.url.path
+    if app.state.operation=="observation" and (path.startswith("/api/session/") or path=="/stream/video_feed"):
+        return JSONResponse({"detail":"Legacy runtime routes are disabled in observation mode"},status_code=409)
+    return await call_next(request)
 
 
 class StartSessionRequest(BaseModel):
@@ -83,6 +133,8 @@ def get_video_snapshot(video_path: str):
         return Response(content=jpeg_bytes, media_type="image/jpeg")
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeConflict as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -173,6 +225,8 @@ async def start_session(req: StartSessionRequest):
             "total_frames": session.total_frames,
             "fps": session.native_fps,
         }
+    except RuntimeConflict as e:
+        raise HTTPException(status_code=409,detail=str(e))
     except Exception as e:
         logger.error(f"Session start failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))

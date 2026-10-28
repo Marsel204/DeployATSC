@@ -17,6 +17,7 @@ from collections import deque
 from typing import Optional, Tuple
 import cv2
 import numpy as np
+from src.common.source_identity import public_source
 
 
 class FrameGrabber:
@@ -63,6 +64,9 @@ class FrameGrabber:
         # Thread synchronization
         self._lock = threading.Lock()
         self._running = False
+        self._lifecycle_lock = threading.RLock()
+        self._released = threading.Event()
+        self._stop_requested = False
         self._thread: Optional[threading.Thread] = None
 
         self._latest_frame: Optional[np.ndarray] = None
@@ -74,7 +78,13 @@ class FrameGrabber:
         self._is_opened: bool = False
 
         self.cap: Optional[cv2.VideoCapture] = None
-        self._init_capture()
+        try:self._init_capture()
+        except BaseException as error:
+            self._stop_requested=True
+            error.resource_owner=self
+            try:self._release_capture()
+            except Exception:pass
+            raise
 
     def _inspect_source_type(self) -> None:
         """Detects whether source is a file, RTSP stream, or V4L2 device."""
@@ -140,6 +150,7 @@ class FrameGrabber:
             else:
                 if self.cap:
                     self.cap.release()
+                    self.cap = None
                 print(f"[{self.name}] GStreamer pipeline unavailable. Falling back to standard backend...")
 
         # Fallback to standard OpenCV capture
@@ -153,55 +164,79 @@ class FrameGrabber:
 
         self._is_opened = self.cap.isOpened()
         if self._is_opened:
-            print(f"[{self.name}] Opened standard capture device: {self.source}")
+            print(f"[{self.name}] Opened standard capture device: {public_source(self.source)}")
         else:
-            print(f"[{self.name}] WARNING: Failed to open capture source: {self.source}")
+            print(f"[{self.name}] WARNING: Failed to open capture source: {public_source(self.source)}")
 
     def start(self) -> FrameGrabber:
         """Starts the background acquisition thread."""
-        if self._running:
-            return self
-
-        self._running = True
-        self._thread = threading.Thread(target=self._capture_worker, daemon=True, name=f"Grabber-{self.name}")
-        self._thread.start()
+        with self._lifecycle_lock:
+            if self._stop_requested:raise RuntimeError("Capture has been stopped")
+            if self._running:return self
+            self._running = True
+            self._thread = threading.Thread(target=self._capture_worker, daemon=True, name=f"Grabber-{self.name}")
+            try:self._thread.start()
+            except BaseException as error:
+                self._running = False
+                self._stop_requested = True
+                error.resource_owner=self
+                try:self._release_capture()
+                except Exception:pass
+                raise
         return self
+
+    def _release_capture(self):
+        with self._lifecycle_lock:
+            if self._released.is_set():return
+            if self.cap is not None:self.cap.release()
+            self._is_opened = False
+            self._released.set()
+
+    @property
+    def resources_released(self):
+        return self._released.is_set()
 
     def _capture_worker(self) -> None:
         """Continuously pulls frames from the device into the latest frame buffer."""
-        while self._running:
-            if self.cap is None or not self.cap.isOpened():
-                time.sleep(0.1)
-                continue
-
-            ret, frame = self.cap.read()
-            now = time.time()
-            acquired = time.monotonic()
-
-            if not ret or frame is None:
-                if self.is_file and self.auto_loop:
-                    # Auto-loop video file for continuous testing
-                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    time.sleep(0.01)
-                    continue
-                else:
-                    # Temporary read glitch or stream disconnect
-                    time.sleep(0.02)
+        try:
+            while self._running:
+                if self.cap is None or not self.cap.isOpened():
+                    time.sleep(0.1)
                     continue
 
-            with self._lock:
-                self._latest_frame = frame
-                self._latest_timestamp = now
-                self._frame_count += 1
-                self._latest_monotonic = acquired
-                if len(self._observation_queue) == self._observation_queue.maxlen:
-                    self._dropped_frames += 1
-                self._observation_queue.append({"sequence":self._frame_count,
-                    "timestamp":acquired,"frame":frame})
+                ret, frame = self.cap.read()
+                now = time.time()
+                acquired = time.monotonic()
 
-            # Prevent 100% CPU spinning on fast disk reads
-            if self.is_file:
-                time.sleep(1.0 / (self.fps * 1.5))
+                if not ret or frame is None:
+                    if self.is_file and self.auto_loop:
+                        # Auto-loop video file for continuous testing
+                        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        time.sleep(0.01)
+                        continue
+                    else:
+                        # Temporary read glitch or stream disconnect
+                        time.sleep(0.02)
+                        continue
+
+                with self._lock:
+                    self._latest_frame = frame
+                    self._latest_timestamp = now
+                    self._frame_count += 1
+                    self._latest_monotonic = acquired
+                    if len(self._observation_queue) == self._observation_queue.maxlen:
+                        self._dropped_frames += 1
+                    self._observation_queue.append({"sequence":self._frame_count,
+                        "timestamp":acquired,"frame":frame})
+
+                # Prevent 100% CPU spinning on fast disk reads
+                if self.is_file:
+                    time.sleep(1.0 / (self.fps * 1.5))
+        finally:
+            self._running = False
+            # A failed release stays unconfirmed; stop() retries it and reports the error to its caller.
+            try:self._release_capture()
+            except Exception:pass
 
     def read(self) -> Tuple[bool, Optional[np.ndarray], float]:
         """
@@ -232,19 +267,23 @@ class FrameGrabber:
             age = time.monotonic()-self._latest_monotonic if self._latest_monotonic else None
             return {"state":"ready" if age is not None and age<=1 else "stale",
                     "age_sec":age,"sequence":self._frame_count,
+                    "release_pending":self._stop_requested and not self.resources_released,
+                    "resources_released":self.resources_released,
+                    "timestamp_origin":"host_monotonic_receive","timestamp_fallback_count":0,
                     "dropped_frames":self._dropped_frames,"queue_depth":len(self._observation_queue),
                     "image_size":[self.width,self.height],"fps":self.fps}
 
-    def stop(self) -> None:
-        """Stops the grabber thread and releases hardware resources."""
-        self._running = False
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=1.0)
-        if self.cap:
-            self.cap.release()
-            self.cap = None
-        self._is_opened = False
-        print(f"[{self.name}] Capture pipeline released.")
+    def stop(self, timeout=1.0) -> None:
+        """Request exit; only the read owner releases a started capture."""
+        with self._lifecycle_lock:
+            self._stop_requested = True
+            self._running = False
+            thread = self._thread
+            if thread is None or thread.ident is None:
+                self._release_capture()
+                return
+        if thread is not threading.current_thread():thread.join(timeout=max(0,timeout))
+        if not thread.is_alive():self._release_capture()
 
 
 if __name__ == "__main__":

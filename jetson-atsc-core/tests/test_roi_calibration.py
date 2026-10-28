@@ -18,7 +18,18 @@ client = TestClient(app)
 JAMIKA_VIDEO = str(CORE_ROOT / "data/sample_videos/simpang5_jamika_h264.mp4")
 
 
-def test_get_video_snapshot(video_factory):
+@pytest.fixture
+def snapshot_runtime(monkeypatch):
+    """Each independent HTTP test owns a live manager, rather than a closed ASGI singleton."""
+    import src.ui.app as application
+    from src.ui.session_manager import SessionManager
+    manager=SessionManager()
+    monkeypatch.setattr(application,"manager",manager)
+    try:yield manager
+    finally:assert manager.shutdown(timeout=1)["resources_released"]
+
+
+def test_get_video_snapshot(video_factory,snapshot_runtime):
     """Verify endpoint extracts clean unannotated raw first frame JPEG."""
     video = video_factory()
     resp = client.get(f"/api/video/snapshot?video_path={video}")

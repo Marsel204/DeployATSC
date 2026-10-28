@@ -7,10 +7,31 @@ on input traffic metrics [V_w, Q, L], enforcing strict green duration bounds [10
 
 from __future__ import annotations
 
+from dataclasses import dataclass, asdict
 import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
+
+
+@dataclass(frozen=True)
+class ANFISResult:
+    raw_green_sec: float | None
+    bounded_green_sec: float
+    rounded_green_sec: float
+    clipping_applied: bool | None
+    bound_touch_min: bool
+    bound_touch_max: bool
+    rounding_applied: bool
+    rounded_to_bound: bool
+    backend_fallback: bool
+    backend_error: str | None
+    provider: str
+    inference_latency_ms: float
+    model_domain: str = "unknown"
+
+    def to_dict(self):
+        return asdict(self)
 
 
 class ANFISInferenceEngine:
@@ -74,41 +95,36 @@ class ANFISInferenceEngine:
         )
 
     def evaluate_green_time(self, V_w: float, Q: float, L: float) -> float:
-        """
-        Executes forward pass for given traffic parameters.
+        """Compatible scalar API. Structured consumers use the result of their call."""
+        return self.evaluate_green_time_result(V_w, Q, L).rounded_green_sec
 
-        Args:
-            V_w: Weighted vehicle count in PCU.
-            Q: Queue length in meters [0.0, 45.0].
-            L: Fixed-area lane occupancy ratio in percent [0.0, 100.0].
-
-        Returns:
-            Optimal green duration t_ANFIS clamped to [min_green_sec, max_green_sec].
-        """
+    def evaluate_green_time_result(self, V_w: float, Q: float, L: float) -> ANFISResult:
         t0 = time.perf_counter()
-        self.last_error = None
-
-        # Input tensor of shape (1, 3)
-        input_tensor = np.array([[float(V_w), float(Q), float(L)]], dtype=np.float32)
-
+        raw = None
+        error = None
         try:
-            raw_output = self.session.run(
-                [self.output_name],
-                {self.input_name: input_tensor},
-            )[0]
-            val = float(raw_output[0, 0])
-            if not np.isfinite(val):
+            inputs = np.array([[float(V_w), float(Q), float(L)]], dtype=np.float32)
+            output = self.session.run([self.output_name], {self.input_name:inputs})[0]
+            value = float(output[0, 0])
+            if not np.isfinite(value):
                 raise ValueError("ANFIS returned a non-finite green duration")
-        except Exception as e:
-            self.last_error = str(e)
-            print(f"[ANFIS Inference] Forward pass error: {e}. Applying failsafe green duration 30.0s")
-            val = 30.0
-
-        self.last_inference_ms = (time.perf_counter() - t0) * 1000.0
-
-        # Enforce strict safety clamping bounds [10.0, 120.0]
-        t_anfis = max(self.min_green, min(self.max_green, val))
-        return round(float(t_anfis), 2)
+            raw = value
+        except Exception as failure:
+            # Native errors can echo input URLs/settings. Persist only a safe category.
+            error = "ANFIS backend failure (" + type(failure).__name__ + ")"
+            value = 30.0
+        bounded = max(self.min_green, min(self.max_green, value))
+        rounded = round(float(bounded), 2)
+        elapsed = (time.perf_counter()-t0)*1000
+        result = ANFISResult(raw, bounded, rounded,
+            raw != bounded if raw is not None else None,
+            bounded == self.min_green, bounded == self.max_green,
+            rounded != bounded, rounded != bounded and rounded in (self.min_green,self.max_green),
+            error is not None, error, self.active_provider, elapsed)
+        # Retained for legacy scalar callers only; structured consumers never read these.
+        self.last_error = error
+        self.last_inference_ms = elapsed
+        return result
 
 
 if __name__ == "__main__":

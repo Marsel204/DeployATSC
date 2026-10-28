@@ -17,6 +17,7 @@ Extracts:
 from __future__ import annotations
 
 import json
+import math
 from typing import Any, Dict, List, Optional, Set, Tuple
 import cv2
 import numpy as np
@@ -39,12 +40,14 @@ class TrafficMetricsExtractor:
         stopped_speed_threshold_mps: float = 1.0,
         stop_line_tripwire_y: int = 980,
         min_stopped_observations: int = 5,
+        strict_motion: bool = False,
     ) -> None:
         self.homography = homography
         self.physical_road_area = physical_road_area_m2
         self.stopped_speed_threshold = stopped_speed_threshold_mps
         self.stop_line_tripwire_y = stop_line_tripwire_y
         self.min_stopped_observations = min_stopped_observations
+        self.strict_motion = strict_motion
 
         # PKJI 2014 PCU weights
         self.pcu_weights = pcu_weights or {
@@ -72,6 +75,7 @@ class TrafficMetricsExtractor:
         cls,
         config_dict: Dict[str, Any],
         homography: HomographyEngine,
+        strict_motion: bool = False,
     ) -> TrafficMetricsExtractor:
         """Instantiates extractor using intersection_roi.json parameters."""
         lane_cfg = config_dict.get("lane_metrics", {})
@@ -83,6 +87,7 @@ class TrafficMetricsExtractor:
             stopped_speed_threshold_mps=float(lane_cfg.get("stopped_speed_threshold_mps", 1.0)),
             stop_line_tripwire_y=int(lane_cfg.get("stop_line_tripwire_y_pixel", 980)),
             min_stopped_observations=int(lane_cfg.get("min_stopped_observations", 5)),
+            strict_motion=strict_motion,
         )
 
     def extract_approach_metrics(
@@ -104,6 +109,7 @@ class TrafficMetricsExtractor:
 
         stopped_distances: List[float] = []
         corridor_vehicles: List[TrackedVehicle] = []
+        motion_unknown = 0
 
         for v in vehicles:
             u, v_px = v.bottom_center
@@ -131,6 +137,13 @@ class TrafficMetricsExtractor:
                 _, y_m = self.homography.pixel_to_ground(u, v_px)
 
             is_persistent = getattr(v, "obs_count", 5) >= self.min_stopped_observations
+            motion_valid = (is_persistent and getattr(v,"stable_id",False) and
+                            getattr(v,"velocity_valid",False) and
+                            v.velocity_mps is not None and math.isfinite(v.velocity_mps) and
+                            v.velocity_mps >= 0 and math.isfinite(y_m))
+            if self.strict_motion and not motion_valid:
+                motion_unknown += 1
+                continue
             if is_persistent and v.velocity_mps <= self.stopped_speed_threshold:
                 stopped_distances.append(y_m)
 
@@ -138,6 +151,23 @@ class TrafficMetricsExtractor:
         Q = max(stopped_distances) if stopped_distances else 0.0
         # Physical bounds clamp [0.0, 45.0m]
         Q = max(0.0, min(self.homography.ground_length, float(Q)))
+        complete = self.strict_motion and motion_unknown == 0
+        if self.strict_motion and motion_unknown:
+            Q = Q if stopped_distances else None
+        q_state = ("legacy_unverified" if not self.strict_motion else
+                   "partial" if motion_unknown and stopped_distances else
+                   "unavailable" if motion_unknown else "measured_zero" if Q == 0 else "measured")
+        quality = {
+            "V_w":{"available":True,"complete":True,"state":"observed_count"},
+            "L":{"available":self.physical_road_area>0,"complete":self.physical_road_area>0,
+                 "state":"footprint_estimate"},
+            "Q":{"available":Q is not None,"complete":complete,"state":q_state,
+                 "observed_vehicle_count":len(corridor_vehicles),
+                 "motion_valid_vehicle_count":len(corridor_vehicles)-motion_unknown if self.strict_motion else None,
+                 "motion_unknown_vehicle_count":motion_unknown if self.strict_motion else None,
+                 "reasons":["motion_unknown"] if motion_unknown else [] if self.strict_motion else ["strict_motion_disabled"]},
+            "scale":{"state":"unverified"},
+        }
 
         # 4. Weighted Vehicle Count (V_w): PKJI 2014
         V_w = (
@@ -160,7 +190,8 @@ class TrafficMetricsExtractor:
 
         return {
             "V_w": round(float(V_w), 2),
-            "Q": round(float(Q), 2),
+            "Q": round(float(Q), 2) if Q is not None else None,
+            "quality": quality,
             "L": round(float(L), 2),
             "n_mc": n_mc,
             "n_lv": n_lv,
@@ -170,6 +201,54 @@ class TrafficMetricsExtractor:
             "occupied_area_m2": round(occupied_area_m2, 2),
             "corridor_vehicles": corridor_vehicles,
         }
+
+    def extract_single_frame_metrics(
+        self,
+        vehicles: List[TrackedVehicle],
+    ) -> Dict[str, Any]:
+        """Counts, footprint occupancy and a labelled spatial queue proxy from ONE still image.
+
+        A single image has no motion evidence: speed and stopped state are unknown, so Q is
+        the farthest visible corridor vehicle from the stop line (an incomplete diagnostic
+        proxy), never a measured stopped queue. Stopped count is unknown (None), not zero.
+        """
+        n = {"mc":0, "lv":0, "hv":0}
+        corridor: List[TrackedVehicle] = []
+        extents: List[float] = []
+        for v in vehicles:
+            u, v_px = v.bottom_center
+            if not self.homography.is_in_approach_corridor(u, v_px):
+                continue
+            corridor.append(v)
+            c_name = v.class_name.lower()
+            key = "mc" if "motorcycle" in c_name or "bike" in c_name else "hv" if "truck" in c_name or "bus" in c_name else "lv"
+            n[key] += 1
+            _, y_m = self.homography.pixel_to_ground(u, v_px)
+            if math.isfinite(y_m):
+                extents.append(y_m)
+        q = max(0.0, min(self.homography.ground_length, float(max(extents)))) if extents else 0.0
+        V_w = (n["mc"] * self.pcu_weights.get("motorcycle", 0.4) + n["lv"] * self.pcu_weights.get("car", 1.0)
+               + n["hv"] * self.pcu_weights.get("truck", 1.6))
+        area = (n["mc"] * self.footprints.get("motorcycle", 2.0) + n["lv"] * self.footprints.get("car", 8.0)
+                + n["hv"] * self.footprints.get("truck", 24.0))
+        L = min(100.0, max(0.0, area / self.physical_road_area * 100.0)) if self.physical_road_area > 0 else 0.0
+        reasons = ["single_frame_no_motion_evidence", "stopped_state_unknown"]
+        if not corridor:
+            reasons.append("no_visible_corridor_vehicles")
+        quality = {
+            "V_w":{"available":True,"complete":True,"state":"observed_count"},
+            "L":{"available":self.physical_road_area>0,"complete":self.physical_road_area>0,
+                 "state":"footprint_estimate"},
+            "Q":{"available":True, "complete":False, "measured":False,
+                 "state":"single_frame_spatial_proxy", "method":"single_frame_spatial_extent",
+                 "definition":"farthest visible approach-corridor vehicle from the stop line in one still image",
+                 "observed_vehicle_count":len(corridor), "motion_valid_vehicle_count":0,
+                 "motion_unknown_vehicle_count":len(corridor), "reasons":reasons},
+            "scale":{"state":"unverified"},
+        }
+        return {"V_w":round(float(V_w), 2), "Q":round(q, 2), "quality":quality, "L":round(float(L), 2),
+                "n_mc":n["mc"], "n_lv":n["lv"], "n_hv":n["hv"], "total_corridor_vehicles":len(corridor),
+                "stopped_vehicles_count":None, "occupied_area_m2":round(area, 2), "corridor_vehicles":corridor}
 
     def update_discharge_tripwire(
         self,

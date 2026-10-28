@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import time
+from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
@@ -35,6 +36,25 @@ CANONICAL_VEHICLE_MAP = {
     "bus": "bus",
     "truck": "truck",
 }
+
+
+@lru_cache(maxsize=1)
+def _still_predictor_type():
+    """Camera 1's dedicated predictor must forward the real image only once.
+
+    Installed Ultralytics warms CUDA by forwarding the first supplied image,
+    then forwards it again for inference. Warmup is an optional optimization:
+    skip it for still captures, leaving the continuous Camera 2 predictor alone.
+    Cache the class so YOLO reuses its backend on subsequent clicks.
+    """
+    from ultralytics.models.yolo.detect.predict import DetectionPredictor
+
+    class StillImagePredictor(DetectionPredictor):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.done_warmup = True
+
+    return StillImagePredictor
 
 
 class TrackedVehicle:
@@ -91,6 +111,7 @@ class DetectorTracker:
         iou_threshold: float = 0.50,
         imgsz: int = 640,
         device: str = "cuda:0",
+        max_gap_sec: float = 5.0,
     ) -> None:
         """
         Args:
@@ -105,6 +126,7 @@ class DetectorTracker:
         self.iou_threshold = iou_threshold
         self.imgsz = imgsz
         self.device = device
+        self.max_gap_sec = max_gap_sec
 
         self.is_tensorrt: bool = str(model_path).endswith(".engine")
         self.model = None
@@ -144,6 +166,10 @@ class DetectorTracker:
 
         print(f"[Detector] Initializing YOLO from: {self.model_path} (TensorRT: {self.is_tensorrt})")
         self.model = YOLO(self.model_path, task="detect")
+        import torch
+        self.inference_device=self.device
+        if not self.is_tensorrt and self.device!="cpu" and not torch.cuda.is_available():
+            self.inference_device="cpu"
 
     def map_class(self, class_id: int) -> Optional[str]:
         """
@@ -185,6 +211,8 @@ class DetectorTracker:
 
         if not frames:
             return []
+        if self.is_tensorrt and len(frames)!=1:
+            raise ValueError("This TensorRT engine accepts exactly one frame per call")
 
         # Batched inference via Ultralytics track
         try:
@@ -193,6 +221,7 @@ class DetectorTracker:
                 conf=self.conf_threshold,
                 iou=self.iou_threshold,
                 imgsz=self.imgsz,
+                device=getattr(self,"inference_device",self.device),
                 persist=True,
                 tracker="bytetrack.yaml",
                 verbose=False,
@@ -205,6 +234,7 @@ class DetectorTracker:
                 conf=self.conf_threshold,
                 iou=self.iou_threshold,
                 imgsz=self.imgsz,
+                device=getattr(self,"inference_device",self.device),
                 verbose=False,
             )
 
@@ -231,7 +261,7 @@ class DetectorTracker:
                         continue  # Skip non-vehicles (e.g. traffic light #114 class_9, pedestrians)
 
                     tid = int(id_arr[i])
-                    current_obs = self.track_obs_counts.get(tid, 0)
+                    current_obs = self.track_obs_counts.get(tid, 0) if boxes.id is not None else 0
                     v = TrackedVehicle(
                         track_id=tid,
                         class_id=c_id,
@@ -248,6 +278,45 @@ class DetectorTracker:
             batch_outputs.append(frame_vehicles)
 
         return batch_outputs
+
+    def detect_once(
+        self,
+        frame: np.ndarray,
+        timestamp: Optional[float] = None,
+    ) -> List[TrackedVehicle]:
+        """One native still-image forward on exactly this frame; no tracker, history or velocity.
+
+        Use a dedicated instance: a predictor previously used by track() carries tracker callbacks.
+        """
+        if timestamp is None:
+            timestamp = time.time()
+        results = self.model.predict(
+            source=frame,
+            predictor=_still_predictor_type(),
+            conf=self.conf_threshold,
+            iou=self.iou_threshold,
+            imgsz=self.imgsz,
+            device=getattr(self,"inference_device",getattr(self,"device","cuda:0")),
+            verbose=False,
+        )
+        vehicles: List[TrackedVehicle] = []
+        for res in results[:1]:
+            boxes = getattr(res, "boxes", None)
+            if boxes is None or len(boxes) == 0:
+                continue
+            xyxy_arr = boxes.xyxy.cpu().numpy()
+            conf_arr = boxes.conf.cpu().numpy()
+            cls_arr = boxes.cls.cpu().numpy().astype(int)
+            for i in range(len(boxes)):
+                c_name = self.map_class(int(cls_arr[i]))
+                if c_name is None:
+                    continue
+                vehicles.append(TrackedVehicle(
+                    track_id=i, class_id=int(cls_arr[i]), class_name=c_name,
+                    bbox=xyxy_arr[i].tolist(), confidence=float(conf_arr[i]),
+                    timestamp=timestamp, obs_count=0, stable_id=False, epoch=self.epoch,
+                ))
+        return vehicles
 
     def update_velocities(
         self,
@@ -271,19 +340,29 @@ class DetectorTracker:
             ref_time = self.last_seen_timestamp
         else:
             ref_time = time.time()
-        self.last_seen_timestamp = ref_time
+        self.last_seen_timestamp = max(self.last_seen_timestamp, ref_time)
 
         active_ids = set()
 
         for v in vehicles:
-            active_ids.add(v.track_id)
             gx, gy = homography_func(v.bottom_center[0], v.bottom_center[1])
             v.ground_pos = (gx, gy)
-
-            if v.track_id not in self.track_trajectories:
-                self.track_trajectories[v.track_id] = []
-
-            traj = self.track_trajectories[v.track_id]
+            v.velocity_valid = False
+            v.velocity_mps = 0.0
+            v.obs_count = 0
+            # Each instance is camera-local; reset clears its epoch's namespace.
+            # Detector-only array indices must never read or write stable history.
+            if not v.stable_id or v.epoch != getattr(self,"epoch",0) or not np.isfinite([v.timestamp,gx,gy]).all():
+                continue
+            active_ids.add(v.track_id)
+            traj = self.track_trajectories.setdefault(v.track_id, [])
+            if traj and v.timestamp <= traj[-1][0]:
+                continue
+            # Check on return as well as during pruning: no update may have run
+            # during the gap. All continuity decisions use source timestamps.
+            if traj and v.timestamp-traj[-1][0] > getattr(self,"max_gap_sec",5.0):
+                traj.clear()
+                self.track_obs_counts.pop(v.track_id, None)
             traj.append((v.timestamp, gx, gy))
 
             if len(traj) > self.max_history_len:
@@ -308,9 +387,9 @@ class DetectorTracker:
             else:
                 v.velocity_mps = 0.0
 
-        # Prune stale trajectories older than 5.0 seconds using replay/wall reference time
+        # Prune using the same source-time continuity policy as returning tracks.
         for tid in list(self.track_trajectories.keys()):
             if tid not in active_ids:
-                if self.track_trajectories[tid] and (ref_time - self.track_trajectories[tid][-1][0] > 5.0):
+                if self.track_trajectories[tid] and (ref_time - self.track_trajectories[tid][-1][0] > getattr(self,"max_gap_sec",5.0)):
                     del self.track_trajectories[tid]
                     self.track_obs_counts.pop(tid, None)
