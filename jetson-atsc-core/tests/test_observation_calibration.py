@@ -71,3 +71,56 @@ def test_self_intersecting_waiting_polygon_rejected():
     data["polygon"]=[[20,30],[290,200],[20,200],[250,30]]
     with pytest.raises(ValueError,match="intersect"):
         CameraCalibration(data)
+
+
+def test_saved_lens_digest_rejects_same_size_content_replacement(tmp_path):
+    lens=tmp_path/'lens.npz'
+    def write(value):
+        np.savez(lens,K=np.array([[200.,0,160],[0,200.,120],[0,0,1]]),D=np.array([value,0.,0.,0.]),dim=[320,240])
+    write(.01)
+    data=payload();data['rectification_path']=str(lens)
+    saved=CameraCalibration(data).payload
+    write(.02)
+    with pytest.raises(ValueError,match='digest|content'):
+        CameraCalibration(saved)
+
+
+@pytest.mark.parametrize('method',['measured_dimensions','ruler'])
+def test_explicit_scale_and_reviewed_binding_roundtrip(method):
+    data=payload()
+    data['scale_evidence']={'method':method,'reference':'synthetic measured fixture'}
+    data['binding']={'reviewed':True}
+    if method=='ruler':data['ruler']={'p1':[30,180],'p2':[280,180],'length_m':6}
+    calibrated=CameraCalibration(data)
+    assert calibrated.scale_status['state']=='verified'
+    assert calibrated.payload['binding']['geometry_digest']
+    assert CameraCalibration(calibrated.payload).revision==calibrated.revision
+    changed=deepcopy(calibrated.payload);changed['road_width_m']=9
+    with pytest.raises(ValueError,match='binding'):
+        CameraCalibration(changed)
+
+
+def test_default_dimensions_and_legacy_save_remain_review_required():
+    data=payload()
+    first=CameraCalibration(data)
+    second=CameraCalibration(first.payload)
+    assert first.scale_status['state']==second.scale_status['state']=='review_required'
+    assert 'scale_evidence_missing' in second.scale_status['reasons']
+
+
+def test_ruler_scale_requires_actual_ruler():
+    data=payload();data.update(scale_evidence={'method':'ruler','reference':'fixture'},binding={'reviewed':True})
+    with pytest.raises(ValueError,match='ruler'):CameraCalibration(data)
+
+
+def test_run_preflight_checks_saved_lens_content_again(video_factory,tmp_path):
+    from src.ui.observation_session import ObservationSession
+    from test_observation_sessions import run_payload,FakeDetector,FakeANFIS
+    lens=tmp_path/'lens.npz'
+    def write(value):np.savez(lens,K=np.array([[200.,0,160],[0,200.,120],[0,0,1]]),D=np.array([value,0.,0.,0.]),dim=[320,240])
+    write(.01)
+    data=run_payload(video_factory);data['system']['rectification_path']=str(lens)
+    data['system']=CameraCalibration(data['system']).payload
+    write(.02)
+    with pytest.raises(ValueError,match='digest'):
+        ObservationSession.preflight(data,tmp_path/'runs',FakeDetector,FakeANFIS)

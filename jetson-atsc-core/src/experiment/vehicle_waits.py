@@ -16,17 +16,24 @@ class VehicleWaits:
         self.last_sequence = None
         self.first_sequence = None
         self.last_time = None
+        # Derived lookup of identities whose rows were archived and evicted.
+        self.archived = None
 
     def _flag(self, row, flag):
         if flag not in row["quality_flags"]: row["quality_flags"].append(flag)
 
     def _account(self, row, interval, multiplier=1):
         duration = interval["end"]-interval["start"]
+        if interval["phase"] == "UNKNOWN":
+            row["phase_unknown_sec"] += multiplier*duration
         if not interval["valid"]:
             row["unknown_sec"] += multiplier*duration
         elif interval["stopped"]:
             row["total_stopped_sec"] += multiplier*duration
             if interval["phase"] == "RED": row["red_wait_sec"] += multiplier*duration
+            if interval["cycle_id"] is None:
+                row["unattributed_stopped_sec"] += multiplier*duration
+                return
             cycle = row["wait_by_cycle"].setdefault(str(interval["cycle_id"]), {"red_wait_sec":0., "total_stopped_sec":0.})
             cycle["total_stopped_sec"] += multiplier*duration
             if interval["phase"] == "RED":cycle["red_wait_sec"] += multiplier*duration
@@ -39,40 +46,72 @@ class VehicleWaits:
                 interval["stopped"] = stopped
                 self._account(row, interval)
 
-    def _new(self, observation, timestamp, sequence):
+    def _new(self, observation, timestamp, sequence, segment=0):
         identity = (observation.epoch, observation.local_id)
         base = vehicle_key(self.run_id, *identity)
-        key = base
-        segment = 0
-        while key in self.records:
-            segment += 1; key = f"{base}:segment-{segment}"
+        # The identity's own row count, as in the full-history oracle.
+        key = base if segment == 0 else f"{base}:segment-{segment}"
         row = {"vehicle_id": key, "local_id": observation.local_id,
             "camera": "acquisition", "tracker_epoch": observation.epoch,
             "class_name": observation.class_name, "first_seen": timestamp,
             "last_seen": timestamp, "red_wait_sec": 0., "total_stopped_sec": 0.,
-            "unknown_sec": 0., "cycles": [], "quality_flags": [], "intervals": [],
+            "unknown_sec": 0., "phase_unknown_sec":0., "unattributed_stopped_sec":0.,
+            "cycles": [], "quality_flags": [], "intervals": [],
             "wait_by_cycle": {},
             "left_censored": segment > 0 or sequence == self.first_sequence or (observation.velocity_valid and observation.speed_mps <= self.policy.stopped_speed_mps),
             "right_censored": True, "completed": False, "crossed_stop_line": False,
-            "crossing_cycle": None, "completed_at": None, "tracking_state": "UNKNOWN"}
+            "crossing_cycle": None, "crossing_at":None,"crossing_phase":None,
+            "crossing_direction":None,"crossing_evidence":None,
+            "completed_at": None, "tracking_state": "UNKNOWN"}
         self.records[key] = row
         state = {"row": row, "previous": None, "stopped": False,
-                 "stop_candidate": None, "move_candidate": None}
+                 "stop_candidate": None, "move_candidate": None, "segments": segment+1}
         self.active[identity] = state
         return state
+
+    def _restore(self, identity, timestamp):
+        """Memory forgot an archived identity; its derived history still counts."""
+        base = vehicle_key(self.run_id, *identity)
+        found = self.archived(base)
+        if found is None:return None
+        segments, crossed = found
+        row = {"vehicle_id": base if segments == 1 else f"{base}:segment-{segments-1}",
+               "completed": True, "crossed_stop_line": crossed, "last_seen": timestamp}
+        state = {"row": row, "previous": None, "stopped": False, "stop_candidate": None,
+                 "move_candidate": None, "segments": segments, "_last_seen": timestamp}
+        self.active[identity] = state
+        return state
+
+    def _cross(self, row, previous, observation, phase, timestamp, cycle_id):
+        crossing_phase = str(phase) if previous["phase"] != "UNKNOWN" else "UNKNOWN"
+        attributed = cycle_id if crossing_phase != "UNKNOWN" else None
+        row.update(crossed_stop_line=True,crossing_cycle=attributed,
+                   crossing_at=timestamp,crossing_phase=crossing_phase,crossing_direction=1,
+                   crossing_evidence={"from_point":previous["point"],"to_point":observation.point,
+                                      "from_time":previous["time"],"to_time":timestamp,
+                                      "from_side":self.side(previous["point"]),"to_side":self.side(observation.point)},
+                   completed=True,completed_at=timestamp,right_censored=False,tracking_state="SERVED")
+        if attributed is None:self._flag(row,"crossing_phase_unknown")
 
     def observe(self, observations, phase, timestamp, sequence, cycle_id):
         if sequence == self.last_sequence or (self.last_time is not None and timestamp <= self.last_time): return
         if self.first_sequence is None: self.first_sequence = sequence
         self.last_sequence = sequence; self.last_time = timestamp
+        if phase == "UNKNOWN":cycle_id = None
         present = set()
         for observation in observations:
             if observation.local_id is None or not observation.stable_id: continue
             identity = (observation.epoch, observation.local_id)
             present.add(identity)
             state = self.active.get(identity)
+            if state is None and observation.in_region and self.archived is not None:
+                state = self._restore(identity, timestamp)
+            segment = 0
             if state and state["row"]["completed"]:
-                if state["row"]["crossed_stop_line"]: continue
+                if state["row"]["crossed_stop_line"]:
+                    state["_last_seen"]=timestamp
+                    continue
+                segment = state["segments"]
                 state = None
             if not observation.in_region:
                 if state and not state["row"]["completed"]:
@@ -80,16 +119,17 @@ class VehicleWaits:
                     crossing=bool(previous and previous["sequence"]==sequence-1 and
                         0<timestamp-previous["time"]<=self.policy.max_gap_sec and
                         self.side(previous["point"])<0<=self.side(observation.point))
-                    row.update(completed=True, completed_at=timestamp, tracking_state="SERVED" if crossing else "EXITED", right_censored=False,
-                               crossed_stop_line=crossing,crossing_cycle=cycle_id if crossing else None)
+                    if crossing:self._cross(row,previous,observation,phase,timestamp,cycle_id)
+                    else:row.update(completed=True,completed_at=timestamp,tracking_state="EXITED",right_censored=False)
                 continue
-            if state is None: state = self._new(observation, timestamp, sequence)
+            if state is None: state = self._new(observation, timestamp, sequence, segment)
             row = state["row"]; previous = state["previous"]
             valid_motion = observation.velocity_valid and observation.speed_mps is not None
             continuous = previous is not None and previous["sequence"] == sequence-1 and 0 < timestamp-previous["time"] <= self.policy.max_gap_sec
             if previous is not None:
                 interval = {"start": previous["time"], "end": timestamp,
-                            "phase": previous["phase"], "cycle_id": previous["cycle"],
+                            "phase": previous["phase"] if continuous else "UNKNOWN",
+                            "cycle_id": previous["cycle"] if continuous else None,
                             "valid": bool(continuous and previous["valid_motion"] and valid_motion),
                             "stopped": state["stopped"]}
                 row["intervals"].append(interval); self._account(row, interval)
@@ -97,8 +137,7 @@ class VehicleWaits:
                     self._flag(row, "observation_gap")
                     state["stop_candidate"] = state["move_candidate"] = None
                 if continuous and self.side(previous["point"]) < 0 <= self.side(observation.point):
-                    row.update(crossed_stop_line=True, crossing_cycle=cycle_id,
-                               completed=True, completed_at=timestamp, right_censored=False, tracking_state="SERVED")
+                    self._cross(row,previous,observation,phase,timestamp,cycle_id)
             if valid_motion:
                 speed = observation.speed_mps
                 if not state["stopped"]:
@@ -123,13 +162,16 @@ class VehicleWaits:
                 state["stop_candidate"] = state["move_candidate"] = None
                 if not row["completed"]: row["tracking_state"] = "UNKNOWN"
             if phase == "UNKNOWN": self._flag(row, "phase_unknown")
-            if cycle_id not in row["cycles"]: row["cycles"].append(cycle_id)
+            if cycle_id is not None and cycle_id not in row["cycles"]: row["cycles"].append(cycle_id)
             row["last_seen"] = timestamp
             state["previous"] = {"time": timestamp, "sequence": sequence,
                 "phase": str(phase), "cycle": cycle_id, "valid_motion": valid_motion,
                 "point": observation.point}
-        for identity, state in self.active.items():
+        for identity, state in list(self.active.items()):
             row = state["row"]
+            if row["vehicle_id"] not in self.records and identity not in present and timestamp-state.get("_last_seen",row["last_seen"])>self.policy.association_gap_sec:
+                del self.active[identity]
+                continue
             if identity not in present and not row["completed"]:
                 row["tracking_state"] = "LOST"
                 if timestamp-row["last_seen"] > self.policy.association_gap_sec:

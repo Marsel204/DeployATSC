@@ -25,6 +25,9 @@ def isolated_legacy_replay_media(tmp_path_factory):
     import numpy as np
     import src.ui.session_manager as sessions
     global CORE_ROOT
+    import src.ui.app as application
+    original_operation=application.app.state.operation
+    application.app.state.operation="legacy"
     original = CORE_ROOT
     temporary = tmp_path_factory.mktemp("legacy-ui")
     (temporary / "configs").mkdir()
@@ -39,10 +42,17 @@ def isolated_legacy_replay_media(tmp_path_factory):
     writer.release()
     patch = pytest.MonkeyPatch()
     patch.setattr(sessions, "CORE_ROOT", temporary)
+    from test_observation_sessions import FakeDetector,FakeANFIS
+    patch.setattr(sessions,"DetectorTracker",FakeDetector)
+    patch.setattr(sessions,"ANFISInferenceEngine",FakeANFIS)
+    original_closing=sessions.manager.closing
+    sessions.manager.closing=False
     CORE_ROOT = temporary
     try:yield
     finally:
         sessions.manager.stop_session()
+        sessions.manager.closing=original_closing
+        application.app.state.operation=original_operation
         CORE_ROOT = original
         patch.undo()
 

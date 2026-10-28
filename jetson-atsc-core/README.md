@@ -1,9 +1,25 @@
-# Adaptive Traffic Signal Controller (ATSC) Production Edge Runtime
+# DeployATSC edge runtime and observation app
 
-Production-grade edge runtime for real-time Adaptive Traffic Signal Control (ATSC) deployed on the **NVIDIA Jetson Orin Nano (8GB, JetPack 6.x)**.
+The default app is a local, two-camera, **recommendation-only observation workspace** for the NVIDIA Jetson Orin Nano. Each camera has independent calibration and tracking. Capture ANFIS recommendations manually, compare them with observed timing, and retain separate runs for browsing and export after restart. Software checks do not establish paired-camera field accuracy or real-time performance.
 
-Coordinates computer vision perception (YOLO11 + ByteTrack), metric homography (PKJI 2014), a 126-parameter Sugeno ANFIS control engine, hardware RS-485 cabinet actuation, and non-blocking asynchronous audit sinks.
+```bash
+cd jetson-atsc-core  # from the repository root
+.venv/bin/python scripts/launch_ui.py --host 127.0.0.1 --port 8000
+```
 
+Open `http://localhost:8000`. Save each camera's calibration, review its physical scale evidence, then start a run. Saving a profile does not start playback. **Saved runs** provides vehicles, predictions, cycle comparisons, generation-bound pages, exact durable quantiles and ZIP export. New runs use `motion-phase-scale-v2`; timing eligibility, scale qualification and durability are separate. Old/missing qualification stays unknown.
+
+For the prepared real-footage demonstration, run `.venv/bin/python scripts/launch_demo.py --preset data/demo_real/preset.json --device cuda:0 --port 8001` and open `http://localhost:8001`. Both camera profiles are loaded automatically; YOLO/ByteTrack and ANFIS run on real intersection video. The approximate shared-recording preset uses isolated storage. An optional generated scene is also available. See the [demo walkthrough and footage credits](docs/DEMO.md).
+
+Observation sessions automatically use a verified local TensorRT FP16 engine when available. Build it on the target Jetson with `.venv/bin/python scripts/export_observation_engine.py`; the source `models/Final.pt` is preserved. The engine is bound to its weights, TensorRT version and GPU capability. Use `--backend pytorch` on either launcher for rollback, or `--backend tensorrt` to require the engine and reject an incompatible installation. Binaries are generated locally rather than committed. See [backend setup and validation](docs/TENSORRT_OBSERVATION.md).
+
+Runtime evidence lives in `jetson-atsc-core/data/experiments/<run_id>/`; profiles live in `data/observation_profiles/`. The app's `src/experiment/` is its runtime measurement/storage backend. It does not modify the repository's `research/`, datasets, training, weights or experiment methodology. Original Jamika geometry is preserved; saves create separate profile revisions. Private source handles expire at process restart: re-enter the source locally and review/rebind before starting it again.
+
+Both observation launchers bind to loopback, use one worker, reject reload and exclude legacy runtime routes. LAN remains disabled pending owner-provisioned gateway configuration and its conditional access checks. Legacy cabinet control requires explicit `--operation legacy-control` and is outside the observation workflow.
+
+If storage fails, new measurement/capture admission stops and the last durable revision remains visible. Repair storage, then use the dashboard retry action or `POST /api/observation/recover?run_id=<id>` to finalize the interrupted run before explicitly starting another. Browsing/exporting saved evidence never resumes it. Native resource cleanup may outlast a stop timeout; check resource release and durable finalization separately.
+
+See the [operator guide](docs/TWO_CAMERA_OBSERVATION.md) and [dated validation results and limits](docs/OBSERVATION_VALIDATION.md). The architecture and calibration tutorial below describe the legacy control/replay tools.
 ---
 
 ## 1. System Architecture
@@ -87,9 +103,9 @@ pip install -r requirements-edge.txt
 
 ## 4. Usage
 
-### 1. Launching Production Edge Daemon (Live Cameras)
+### 1. Legacy control daemon (explicit cabinet operation)
 ```bash
-python3 edge_daemon.py \
+python3 edge_daemon.py --operation legacy-control \
     --mode DUAL_CAM \
     --source_sys /dev/video0 \
     --source_acq /dev/video1 \
@@ -98,7 +114,7 @@ python3 edge_daemon.py \
 
 ### 2. Running Field Simulation (Offline MP4 Video with Loop)
 ```bash
-python3 edge_daemon.py \
+python3 edge_daemon.py --operation legacy-control \
     --mode DUAL_CAM \
     --source_sys /path/to/approach.mp4 \
     --source_acq /path/to/discharge.mp4 \
@@ -122,24 +138,28 @@ python3 scripts/replay_debug.py \
 
 ### 4. Running the Test Suite
 ```bash
-pytest tests/ -v
+.venv/bin/python -m pip install -r requirements-dev-observation.txt
+CUDA_VISIBLE_DEVICES='' YOLO_OFFLINE=true YOLO_AUTOINSTALL=false \
+  .venv/bin/python -m pytest tests/ -q
 ```
+
+Browser checks use pytest Playwright with system Chromium at `/usr/bin/chromium`, serve the shipped HTML/JavaScript through an isolated local API, and use generated clips and fake inference. The full suite also requires benchmark media/trace assets and `models/yolo11s.pt`, which are absent in this checkout. The [validation report](docs/OBSERVATION_VALIDATION.md) separates those failures from the deterministic software gate. Tests do not download weights or qualify real cameras/GPU performance.
 
 ---
 
 ## 5. Web Dashboard & Interactive Calibration Tutorial
 
-The system features an interactive real-time calibration dashboard accessible from any browser:
+The observation dashboard runs locally. Use the operator guide above for its current save/review workflow:
 
 ```bash
 # Launch ATSC Web Dashboard on port 8000
-python3 scripts/launch_ui.py --host 0.0.0.0 --port 8000
+python3 scripts/launch_ui.py --host 127.0.0.1 --port 8000
 ```
 Open **`http://localhost:8000`** in your browser.
 
 ---
 
-### Step-by-Step Interactive Calibration Tutorial
+### Historical legacy calibration tutorial
 
 To calibrate a new camera angle or intersection, click **🎯 DRAW YELLOW BOXES & CORRIDOR** on the dashboard.
 

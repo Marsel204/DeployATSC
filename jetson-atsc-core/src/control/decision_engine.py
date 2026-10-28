@@ -46,18 +46,29 @@ class ATSCDecisionEngine:
         now_iso = datetime.now(timezone.utc).isoformat()
         t0 = time.perf_counter()
 
+        diagnostics = {}
         try:
-            green_time = self.anfis.evaluate_green_time(
-                V_w=traffic.v_w_pcu,
-                Q=traffic.queue_meters,
-                L=traffic.occupancy_pct,
-            )
+            structured = getattr(self.anfis, "evaluate_green_time_result", None)
+            if structured is not None:
+                result = structured(V_w=traffic.v_w_pcu, Q=traffic.queue_meters, L=traffic.occupancy_pct)
+                diagnostics = result.to_dict()
+                green_time = result.rounded_green_sec
+                failsafe = result.backend_fallback
+            else:
+                green_time = self.anfis.evaluate_green_time(
+                    V_w=traffic.v_w_pcu, Q=traffic.queue_meters, L=traffic.occupancy_pct)
+                failsafe = bool(getattr(self.anfis, "last_error", None))
+                diagnostics = {"raw_green_sec":None, "bounded_green_sec":None,
+                    "rounded_green_sec":round(green_time,2), "backend_fallback":failsafe,
+                    "diagnostics_state":"legacy_scalar", "model_domain":"unknown"}
             latency_ms = (time.perf_counter() - t0) * 1000.0
-            failsafe = bool(getattr(self.anfis, "last_error", None))
-        except Exception as e:
+        except Exception as error:
             green_time = self.fallback_green
             latency_ms = (time.perf_counter() - t0) * 1000.0
             failsafe = True
+            diagnostics = {"raw_green_sec":None, "bounded_green_sec":None,
+                "rounded_green_sec":round(green_time,2), "backend_fallback":True,
+                "backend_error":"ANFIS backend failure ("+type(error).__name__+")", "model_domain":"unknown"}
 
         # Clamp check metadata
         is_clamped_min = abs(green_time - self.min_green) < 1e-3
@@ -73,4 +84,5 @@ class ATSCDecisionEngine:
             inference_latency_ms=round(latency_ms, 3),
             failsafe_active=failsafe,
             timestamp_iso=now_iso,
+            inference_diagnostics=diagnostics,
         )

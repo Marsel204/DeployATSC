@@ -445,7 +445,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--operation", choices=["observation", "legacy-control"], default="observation",
                         help="Observation never constructs cabinet hardware; controller operation is explicit")
     parser.add_argument("--source-mode", choices=["replay", "live"], default=None)
-    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--mode", type=str, choices=["SINGLE_CAM", "DUAL_CAM"], default=None, help="Operating camera mode")
     parser.add_argument("--source_sys", type=str, default=None, help="Kamera Sistem source path, MP4 file, or RTSP URL")

@@ -105,3 +105,48 @@ def test_homography_and_metrics_calculation():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
+
+
+class IdentityGeometry:
+    ground_length=45
+    def is_in_approach_corridor(self,*point):return True
+    def pixel_to_ground(self,x,y):return x,y
+
+
+def metric_track(tid=7,valid=False,stable=False,y=25,speed=0):
+    v=TrackedVehicle(tid,1,'car',[0,y-4,10,y],1,0,stable_id=stable)
+    v.velocity_valid=valid;v.velocity_mps=speed
+    return v
+
+
+def test_strict_queue_rejects_invalid_motion_and_preserves_legacy_default():
+    track=metric_track()
+    assert TrafficMetricsExtractor(IdentityGeometry()).extract_approach_metrics([track])['Q']==25
+    metrics=TrafficMetricsExtractor(IdentityGeometry(),strict_motion=True)
+    raw=metrics.extract_approach_metrics([track])
+    assert raw['Q'] is None and raw['stopped_vehicles_count']==0
+    assert raw['quality']['Q']['state']=='unavailable'
+    assert raw['V_w']==1 and raw['L']>0
+    stable_warmup=metric_track(stable=True)
+    assert metrics.extract_approach_metrics([stable_warmup])['Q'] is None
+    partial=metrics.extract_approach_metrics([track,metric_track(8,True,True,y=10)])
+    assert partial['Q']==10 and partial['quality']['Q']['state']=='partial'
+    assert not partial['quality']['Q']['complete']
+    for tracks in [[],[metric_track(valid=True,stable=True,speed=2)]]:
+        raw=metrics.extract_approach_metrics(tracks)
+        assert raw['Q']==0 and raw['quality']['Q']['state']=='measured_zero'
+        assert raw['quality']['Q']['complete']
+
+
+def test_quality_and_unknown_queue_survive_all_snapshot_serializations():
+    from dataclasses import asdict
+    import json
+    from src.common.types import TrafficSnapshot
+    raw=TrafficMetricsExtractor(IdentityGeometry(),strict_motion=True).extract_approach_metrics([metric_track()])
+    snap=TrafficSnapshot.from_dict(raw,timestamp=0)
+    assert snap.queue_meters is None
+    assert snap.quality==raw['quality']
+    raw['quality']['Q']['state']='tampered'
+    assert snap.quality['Q']['state']=='unavailable'
+    assert json.loads(json.dumps(asdict(snap),allow_nan=False))==snap.to_dict()
+    assert TrafficSnapshot(timestamp=0).quality=={}

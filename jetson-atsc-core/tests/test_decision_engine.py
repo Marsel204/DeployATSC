@@ -57,3 +57,51 @@ def test_decision_engine_fallback():
     assert dec.cycle_id == 99
     assert dec.green_seconds == 30.0
     assert dec.failsafe_active is True
+
+
+def synthetic_anfis(raw=10.,failure=False):
+    import numpy as np
+    class Session:
+        def run(self,*args):
+            if failure:raise RuntimeError('synthetic backend failure')
+            return [np.array([[raw]],dtype=np.float64)]
+    engine=object.__new__(ANFISInferenceEngine)
+    engine.session=Session();engine.input_name='x';engine.output_name='y'
+    engine.min_green=10.;engine.max_green=120.;engine.active_provider='SyntheticExecutionProvider'
+    return engine
+
+
+@pytest.mark.parametrize('raw,bounded,rounded,clipped,touch,rounding',[
+    (10.,10.,10.,False,True,False),(-5.,10.,10.,True,True,False),
+    (10.004,10.004,10.,False,False,True),(121.,120.,120.,True,False,False)])
+def test_per_call_raw_bounded_and_rounded_diagnostics(raw,bounded,rounded,clipped,touch,rounding):
+    engine=synthetic_anfis(raw)
+    decision=ATSCDecisionEngine(engine).evaluate(TrafficSnapshot(),7)
+    data=decision.inference_diagnostics
+    assert data['raw_green_sec']==raw
+    assert data['bounded_green_sec']==bounded and data['rounded_green_sec']==rounded
+    assert data['clipping_applied']==clipped and data['bound_touch_min']==touch
+    assert data['rounding_applied']==rounding
+    assert not data['backend_fallback'] and data['model_domain']=='unknown'
+    assert engine.evaluate_green_time(0,0,0)==rounded  # legacy scalar API
+
+
+def test_backend_failure_has_no_fabricated_raw_model_output():
+    decision=ATSCDecisionEngine(synthetic_anfis(failure=True)).evaluate(TrafficSnapshot(),0)
+    assert decision.green_seconds==30 and decision.failsafe_active
+    data=decision.inference_diagnostics
+    assert data['raw_green_sec'] is None and data['backend_fallback']
+    assert data['backend_error'] and data['rounded_green_sec']==30
+
+
+def test_decision_uses_returned_call_result_instead_of_last_error():
+    engine=synthetic_anfis(10.004)
+    original=engine.evaluate_green_time_result
+    def poison(**kwargs):
+        result=original(**kwargs)
+        engine.last_error='different concurrent call failed'
+        return result
+    engine.evaluate_green_time_result=poison
+    decision=ATSCDecisionEngine(engine).evaluate(TrafficSnapshot(),1)
+    assert not decision.failsafe_active
+    assert decision.inference_diagnostics['raw_green_sec']==10.004

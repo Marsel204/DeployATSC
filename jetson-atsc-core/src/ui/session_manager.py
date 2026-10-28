@@ -16,6 +16,8 @@ import numpy as np
 
 CORE_ROOT = Path(__file__).resolve().parent.parent.parent
 
+from src.ui.runtime_ownership import runtime_ownership, RuntimeConflict
+from src.common.exception_cleanup import clear_exception_frames
 from src.common.types import TrafficSnapshot, ActuationDecision
 from src.perception.lens_rectifier import LensRectifier
 from src.perception.phase_monitor import OpticalPhaseMonitor
@@ -43,76 +45,84 @@ class ReplaySession:
         step_mode: bool = False,
     ) -> None:
         self.session_id = session_id
-        self.video_path = os.path.abspath(video_path)
-        self.config_path = os.path.abspath(config_path)
+        # Lifecycle ownership exists before the first allocation; every component starts absent.
+        self._released=threading.Event();self._release_lock=threading.Lock();self.release_error=None
+        self.cap=self.detector=self.anfis=self.decision_engine=None
+        try:
+            self.video_path = os.path.abspath(video_path)
+            self.config_path = os.path.abspath(config_path)
 
-        with open(self.config_path, "r", encoding="utf-8") as f:
-            self.config = json.load(f)
+            with open(self.config_path, "r", encoding="utf-8") as f:
+                self.config = json.load(f)
 
-        # Calibration & Models
-        sys_cfg = self.config.get("system", {})
-        default_calib = os.path.join(CORE_ROOT, "configs/rectilinear_calib.npz")
-        self.calib_path = calib_path or sys_cfg.get("calibration_path", default_calib)
-        if not os.path.isabs(self.calib_path):
-            self.calib_path = os.path.join(CORE_ROOT, self.calib_path)
+            # Calibration & Models
+            sys_cfg = self.config.get("system", {})
+            default_calib = os.path.join(CORE_ROOT, "configs/rectilinear_calib.npz")
+            self.calib_path = calib_path or sys_cfg.get("calibration_path", default_calib)
+            if not os.path.isabs(self.calib_path):
+                self.calib_path = os.path.join(CORE_ROOT, self.calib_path)
 
-        default_model = os.path.join(CORE_ROOT, "models/Final.pt")
-        self.model_path = model_path or sys_cfg.get("model_path", default_model)
-        if not os.path.isabs(self.model_path):
-            self.model_path = os.path.join(CORE_ROOT, self.model_path)
+            default_model = os.path.join(CORE_ROOT, "models/Final.pt")
+            self.model_path = model_path or sys_cfg.get("model_path", default_model)
+            if not os.path.isabs(self.model_path):
+                self.model_path = os.path.join(CORE_ROOT, self.model_path)
 
-        self.anfis_path = anfis_path or os.path.join(CORE_ROOT, "models/anfis_sugeno.onnx")
-        self.trigger_interval_sec = trigger_interval_sec
+            self.anfis_path = anfis_path or os.path.join(CORE_ROOT, "models/anfis_sugeno.onnx")
+            self.trigger_interval_sec = trigger_interval_sec
 
-        # Pipeline components
-        self.rectifier = LensRectifier(self.calib_path)
-        self.phase_monitor = OpticalPhaseMonitor.from_config(self.config)
-        self.homography = HomographyEngine.from_config(self.config)
-        self.metrics_extractor = TrafficMetricsExtractor.from_config(self.config, self.homography)
-        self.detector = DetectorTracker(self.model_path, conf_threshold=0.28, imgsz=640)
+            # Pipeline components
+            self.rectifier = LensRectifier(self.calib_path)
+            self.phase_monitor = OpticalPhaseMonitor.from_config(self.config)
+            self.homography = HomographyEngine.from_config(self.config)
+            self.metrics_extractor = TrafficMetricsExtractor.from_config(self.config, self.homography)
+            self.detector = DetectorTracker(self.model_path, conf_threshold=0.28, imgsz=640)
 
-        bounds = self.config.get("lane_metrics", {}).get("green_time_bounds_sec", [10.0, 120.0])
-        self.anfis = ANFISInferenceEngine(
-            self.anfis_path,
-            prefer_cuda=False,
-            min_green_sec=bounds[0],
-            max_green_sec=bounds[1],
-        )
-        self.decision_engine = ATSCDecisionEngine(self.anfis)
+            bounds = self.config.get("lane_metrics", {}).get("green_time_bounds_sec", [10.0, 120.0])
+            self.anfis = ANFISInferenceEngine(
+                self.anfis_path,
+                prefer_cuda=False,
+                min_green_sec=bounds[0],
+                max_green_sec=bounds[1],
+            )
+            self.decision_engine = ATSCDecisionEngine(self.anfis)
 
-        # Video capture
-        self.cap = cv2.VideoCapture(self.video_path)
-        if not self.cap.isOpened():
-            raise RuntimeError(f"Cannot open video source: {self.video_path}")
+            # Video capture
+            self.cap = cv2.VideoCapture(self.video_path)
+            if not self.cap.isOpened():
+                raise RuntimeError(f"Cannot open video source: {self.video_path}")
 
-        self.native_fps = self.cap.get(cv2.CAP_PROP_FPS) or 30.0
-        self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            self.native_fps = self.cap.get(cv2.CAP_PROP_FPS) or 30.0
+            self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-        # Runtime State
-        self.frame_idx = 0
-        self.cycle_count = 0
-        self.last_trigger_timestamp = 0.0
-        self.last_decision: Optional[ActuationDecision] = None
-        self.current_snapshot: Optional[TrafficSnapshot] = None
-        self.history_decisions: List[Dict[str, Any]] = []
+            # Runtime State
+            self.frame_idx = 0
+            self.cycle_count = 0
+            self.last_trigger_timestamp = 0.0
+            self.last_decision: Optional[ActuationDecision] = None
+            self.current_snapshot: Optional[TrafficSnapshot] = None
+            self.history_decisions: List[Dict[str, Any]] = []
 
-        self.latest_jpeg: Optional[bytes] = None
-        self.state: str = "paused" if step_mode else "running"
-        self._is_stopped = False
+            self.latest_jpeg: Optional[bytes] = None
+            self.state: str = "paused" if step_mode else "running"
+            self._is_stopped = False
 
-        # Threading controls
-        self._lock = threading.Lock()
-        self._proc_lock = threading.Lock()
-        self._step_event = threading.Event()
-        self._play_event = threading.Event()
-        if not step_mode:
-            self._play_event.set()
+            # Threading controls
+            self._lock = threading.Lock()
+            self._proc_lock = threading.Lock()
+            self._step_event = threading.Event()
+            self._play_event = threading.Event()
+            if not step_mode:
+                self._play_event.set()
 
-        # Generate initial frame synchronously before worker thread starts
-        self._process_single_frame()
-
-        self._thread = threading.Thread(target=self._worker_loop, daemon=True)
-        self._thread.start()
+            # Generate initial frame synchronously before worker thread starts
+            self._process_single_frame()
+            self._thread = threading.Thread(target=self._worker_loop, daemon=True)
+            self._thread.start()
+        except Exception as error:
+            # Exited frames (e.g. a failed first track call) would otherwise retain model owners.
+            clear_exception_frames(error)
+            self._release_resources();error.session_owner=self
+            raise
 
     def _process_single_frame(self) -> bool:
         """Processes one video frame and updates internal state."""
@@ -177,24 +187,31 @@ class ReplaySession:
 
     def _worker_loop(self) -> None:
         """Background playback loop."""
-        while not self._is_stopped:
-            if self.state == "paused":
-                # Wait for step event or play event
-                self._step_event.wait(timeout=0.1)
-                if self._step_event.is_set():
-                    self._step_event.clear()
+        try:
+            while not self._is_stopped:
+                if self.state == "paused":
+                    # Wait for step event or play event
+                    self._step_event.wait(timeout=0.1)
+                    if self._step_event.is_set():
+                        self._step_event.clear()
+                        has_more = self._process_single_frame()
+                        if not has_more:
+                            break
+                    elif self._play_event.is_set():
+                        self.state = "running"
+                elif self.state == "running":
                     has_more = self._process_single_frame()
                     if not has_more:
                         break
-                elif self._play_event.is_set():
-                    self.state = "running"
-            elif self.state == "running":
-                has_more = self._process_single_frame()
-                if not has_more:
+                    time.sleep(max(0.01, 1.0 / self.native_fps))
+                elif self.state == "completed":
                     break
-                time.sleep(max(0.01, 1.0 / self.native_fps))
-            elif self.state == "completed":
-                break
+        except Exception as error:
+            # The same ownership rule applies after startup if an unhandled worker error
+            # is retained by an excepthook: exited native-model frames must be cleared.
+            clear_exception_frames(error)
+            raise
+        finally:self._release_resources()
 
     def _render_frame(
         self,
@@ -259,16 +276,33 @@ class ReplaySession:
         self._play_event.clear()
         self._step_event.set()
 
-    def stop(self) -> None:
+    def _release_resources(self):
+        with self._release_lock:
+            if self._released.is_set():return
+            # Callers run after the inference worker exited its calls, so model owners are
+            # dropped even when the capture release fails; that failure keeps ownership.
+            for name in ("detector","anfis","decision_engine"):setattr(self,name,None)
+            try:
+                if getattr(self,"cap",None) is not None:self.cap.release()
+            except Exception as error:
+                self.release_error=str(error);return
+            self.release_error=None;self._released.set()
+
+    @property
+    def resources_released(self):
+        return self._released.is_set()
+
+    def stop(self,timeout=1.) -> None:
         self._is_stopped = True
         self.state = "stopped"
-        self._play_event.set()
-        self._step_event.set()
-        if hasattr(self, "_thread") and self._thread.is_alive():
-            self._thread.join(timeout=1.0)
-        with self._proc_lock:
-            if hasattr(self, "cap") and self.cap.isOpened():
-                self.cap.release()
+        for name in ("_play_event","_step_event"):
+            if hasattr(self,name):getattr(self,name).set()
+        if hasattr(self,"_thread") and self._thread.ident is not None:
+            if self._thread is not threading.current_thread():self._thread.join(timeout=max(0,timeout))
+            # Retry a release that failed after the worker exited.
+            if not self._thread.is_alive():self._release_resources()
+        else:self._release_resources()
+        if not self.resources_released:raise RuntimeError("Legacy replay is stopping; resources remain owned")
 
     def get_telemetry(self) -> Dict[str, Any]:
         """Returns instantaneous snapshot telemetry for the UI."""
@@ -311,7 +345,9 @@ class SessionManager:
 
     def __init__(self) -> None:
         self.active_session: Optional[ReplaySession] = None
+        self.closing=False;self.starting=False;self.start_complete=threading.Event();self.start_complete.set()
         self._session_lock = threading.Lock()
+        self._preview_manager=None
 
     def list_configs(self) -> List[Dict[str, Any]]:
         configs_dir = CORE_ROOT / "configs"
@@ -365,25 +401,56 @@ class SessionManager:
         trigger_interval_sec: float = 15.0,
         step_mode: bool = False,
     ) -> ReplaySession:
-        with self._session_lock:
-            if self.active_session:
-                self.active_session.stop()
+        with runtime_ownership.reserve("legacy"):
+            with self._session_lock:
+                # Admission and shutdown's closing decision are atomic; nothing waits under this lock.
+                if self.closing:raise RuntimeConflict("Legacy manager is shutting down")
+                self.starting=True;self.start_complete.clear()
+            try:
+                _,owner=runtime_ownership.current_owner()
+                if owner is not None and owner is not self.active_session and not owner.resources_released:
+                    raise RuntimeConflict("Another runtime owner still owns resources")
+                try:self.stop_session()
+                except RuntimeError as error:raise RuntimeConflict(str(error)) from error
+                session_id = f"sess_{int(time.time())}"
+                try:session=ReplaySession(session_id=session_id,video_path=video_path,config_path=config_path,
+                                          trigger_interval_sec=trigger_interval_sec,step_mode=step_mode)
+                except Exception as error:
+                    failed=getattr(error,"session_owner",None)
+                    if failed is not None and not failed.resources_released:
+                        # A failed startup that still owns a resource stays registered until released.
+                        self.active_session=failed;runtime_ownership.claim("legacy",failed)
+                    raise
+                self.active_session=session;runtime_ownership.claim("legacy",session)
+                if self.closing:
+                    session.stop(timeout=0)
+                    raise RuntimeConflict("Shutdown requested during legacy startup")
+                return session
+            finally:self.starting=False;self.start_complete.set()
 
-            session_id = f"sess_{int(time.time())}"
-            self.active_session = ReplaySession(
-                session_id=session_id,
-                video_path=video_path,
-                config_path=config_path,
-                trigger_interval_sec=trigger_interval_sec,
-                step_mode=step_mode,
-            )
-            return self.active_session
+    def stop_session(self,timeout=1.) -> None:
+        with self._session_lock:session=self.active_session
+        if session:
+            session.stop(timeout=timeout)
+            if not session.resources_released:raise RuntimeConflict("Legacy replay still owns resources")
+            with self._session_lock:
+                if self.active_session is session:self.active_session=None
 
-    def stop_session(self) -> None:
+    def shutdown(self,timeout=5.):
+        deadline=time.monotonic()+max(0,timeout)
         with self._session_lock:
-            if self.active_session:
-                self.active_session.stop()
-                self.active_session = None
+            self.closing=True;preview_manager=self._preview_manager
+        if preview_manager is not None:preview_manager.shutdown(max(0,deadline-time.monotonic()))
+        self.start_complete.wait(max(0,deadline-time.monotonic()))
+        previews_released=runtime_ownership.stop_previews(max(0,deadline-time.monotonic()))
+        try:self.stop_session(timeout=max(0,deadline-time.monotonic()))
+        except RuntimeError as error:
+            result={"resources_released":False,"finalized":False,"error":str(error),"start_pending":self.starting}
+            if not previews_released:result["preview_release_pending"]=True
+            return result
+        if not previews_released:
+            return {"resources_released":False,"finalized":False,"start_pending":self.starting,"preview_release_pending":True}
+        return {"resources_released":not self.starting,"finalized":not self.starting,"start_pending":self.starting}
 
     def download_youtube_video(self, url: str, section_duration_sec: int = 30) -> str:
         """Downloads YouTube clip and transcodes to standard H.264 MP4."""
@@ -428,19 +495,14 @@ class SessionManager:
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"Video file not found: {video_path}")
 
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            raise RuntimeError(f"Failed to open video: {video_path}")
-
-        ret, frame = cap.read()
-        cap.release()
-        if not ret or frame is None:
-            raise RuntimeError(f"Failed to read frame from: {video_path}")
-
-        ret_enc, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
-        if not ret_enc:
-            raise RuntimeError("Failed to encode frame snapshot to JPEG")
-        return jpeg.tobytes()
+        with self._session_lock:
+            if self.closing:raise RuntimeConflict("Legacy manager is shutting down")
+            if self._preview_manager is None:
+                from src.ui.observation_session import ObservationManager
+                self._preview_manager=ObservationManager()
+            previews=self._preview_manager
+        # Both HTTP snapshot entrypoints use the same clean-frame/ownership protocol.
+        return previews.preview("system",video_path)
 
     def validate_and_save_custom_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Validates user-drawn ROI coordinates and saves custom configuration JSON."""

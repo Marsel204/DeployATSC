@@ -47,3 +47,17 @@ def test_legacy_mock_flag_is_applied_before_serial_connection(tmp_path,monkeypat
                          source_sys=None,source_acq=None,ledger=str(tmp_path/'ledger.csv'),mock_hardware=True)
     import pytest
     with pytest.raises(ReachedHardware):edge_daemon.EdgeDaemon(args)
+
+
+def test_launchers_default_loopback_and_observation_rejects_reload(monkeypatch):
+    import pytest
+    monkeypatch.setattr(sys,'argv',['launch_ui.py'])
+    assert launch_ui.parse_args().host=='127.0.0.1'
+    monkeypatch.setattr(sys,'argv',['edge_daemon.py'])
+    assert edge_daemon.parse_arguments().host=='127.0.0.1'
+    calls=[]
+    monkeypatch.setattr(launch_ui.uvicorn,'run',lambda *args,**kwargs:calls.append(kwargs))
+    launch_ui.serve_observation()
+    assert calls[0]['host']=='127.0.0.1' and calls[0]['workers']==1 and not calls[0]['reload']
+    with pytest.raises(ValueError,match='reload'):launch_ui.serve_observation(reload=True)
+    assert len(calls)==1
