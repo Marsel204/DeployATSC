@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from src.common.json_data import clone
+
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import asdict
@@ -255,14 +257,14 @@ class PredictionBook:
             return deepcopy(record)
 
     def rows(self):
-        with self.lock: return deepcopy(list(self.records.values()))
+        with self.lock: return clone(list(self.records.values()))
 
     def view(self):
         """One atomic input for all representations of a telemetry snapshot."""
         with self.lock:
-            return {"rows":deepcopy(list(self.records.values())),
+            return {"rows":clone(list(self.records.values())),
                     "busy":bool(self.pending or self.in_flight),"revision":self.revision,
-                    "last_analysis":deepcopy(self.last_analysis)}
+                    "last_analysis":clone(self.last_analysis)}
 
     @property
     def resources_released(self):

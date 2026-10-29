@@ -353,3 +353,6 @@ CUDA_VISIBLE_DEVICES='' YOLO_OFFLINE=true YOLO_AUTOINSTALL=false \
 ```
 
 These tests use generated media, temporary runs/profiles and injected inference. Browser requests exercise the shipped source through an isolated real API at 1440px and 390px. The repeated-run API check restarts the manager and verifies read/export/quantile access without changing evidence bytes. The paired timing oracle retains its no-actuation spies. See the dated validation report for exact results, the combined gate's explicit legacy-daemon adapters, and unavailable asset-dependent checks. A passing synthetic run does not establish field accuracy, a qualified GPU stack, or real-time paired-input throughput.
+
+Preview overlays/JPEGs use one bounded background encoder: pending previews coalesce per camera; measurement frames and full-resolution Camera 1 capture candidates do not. While running, streams serve the latest completed preview. Paused/stepped JPEG reads wait up to 250 ms for their pending preview. Unchanged MJPEG frames are resent at most once per second.
+Telemetry adds `preview_encoded_frames`, `preview_coalesced_frames`, and `preview_errors`. Execution provenance is sampled on the first three acquisition frames, after controls, then every 75 frames or five source seconds, and before final release; sampling is excluded from inference latency.

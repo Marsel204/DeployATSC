@@ -78,7 +78,7 @@ def test_single_frame_engine_guard_and_device_selection(monkeypatch):
     assert calls[0]['device']=='cuda:0'
 
 
-def test_throttled_camera1_preview_does_not_throttle_capture_frame(monkeypatch):
+def test_throttled_camera1_preview_does_not_throttle_capture_frame(monkeypatch,request):
     import src.ui.observation_session as module
     from src.ui.observation_session import ObservationSession
     session=ObservationSession.__new__(ObservationSession)
@@ -88,6 +88,7 @@ def test_throttled_camera1_preview_does_not_throttle_capture_frame(monkeypatch):
     session.runtime={'system':{'preview_frames':0}}
     session.engine=SimpleNamespace(observe_system_frame=lambda *a,**kw:True)
     session._render=lambda role,frame,tracks:frame.copy()
+    session.run_id='throttled-preview';session._start_previews();request.addfinalizer(session._stop_previews)
     clock=[0.];monkeypatch.setattr(module.time,'monotonic',lambda:clock[0])
     encodes=[];original=module.cv2.imencode
     monkeypatch.setattr(module.cv2,'imencode',lambda *a,**kw:encodes.append(a[1].shape) or original(*a,**kw))
@@ -96,6 +97,7 @@ def test_throttled_camera1_preview_does_not_throttle_capture_frame(monkeypatch):
         packet=SimpleNamespace(role='system',frame=np.full((540,960,3),seq,np.uint8),
             sequence=seq,timestamp=seq/30,source_timestamp=seq/30,timestamp_origin='presentation_time')
         session._observe_camera1(packet,packet.frame,0)
+    with session.preview_condition:assert session.preview_condition.wait_for(lambda:session.preview_completed.get('system',0)>=1,timeout=2)
     assert len(encodes)==1
     assert encodes[0]==(360,640,3)
     assert session.camera1_latest['sequence']==6

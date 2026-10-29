@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from typing import Any, Literal
 
+from fastapi.encoders import jsonable_encoder
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse, JSONResponse
 from fastapi.exceptions import RequestValidationError
@@ -17,6 +19,11 @@ from src.experiment.contracts import RunPolicy
 from src.experiment.predictions import PredictionConflict
 from src.ui.observation_session import ObservationManager, RuntimeConflict
 from src.ui.session_manager import manager as legacy_manager
+
+class TelemetryResponse(JSONResponse):
+    def render(self,content):
+        return json.dumps(content,ensure_ascii=False,allow_nan=False,separators=(",",":"),default=jsonable_encoder).encode("utf-8")
+
 
 class PublicErrorsRoute(APIRoute):
     def get_route_handler(self):
@@ -219,8 +226,8 @@ def cancel_prediction(request_id:str,run_id:str):
 @router.get("/api/observation/telemetry")
 def telemetry(offset:int=Query(0,ge=0),limit:int=Query(100,ge=1,le=200)):
     handoff={"start_pending":observations.starting,"last_start":observations.last_start}
-    if observations.current is None:return {"state":"idle","operation":"observation",**handoff}
-    return {**observations.current.telemetry(offset,limit),**handoff}
+    if observations.current is None:return TelemetryResponse({"state":"idle","operation":"observation",**handoff})
+    return TelemetryResponse({**observations.current.telemetry(offset,limit),**handoff})
 
 
 @router.get("/api/observation/export")
@@ -284,10 +291,12 @@ def stream(role:Literal["system","acquisition"],limit:int|None=Query(None,ge=1,l
     try:run=observations.require()
     except Exception as error:translate(error)
     async def frames():
-        count=0
+        count=0;previous=None;last_sent=0.
         while limit is None or count<limit:
-            jpeg=run.jpeg(role)
-            if jpeg:
+            jpeg=run.jpeg(role) if run.state=="running" else await asyncio.to_thread(run.jpeg,role)
+            now=time.monotonic()
+            if jpeg and (jpeg is not previous or now-last_sent>=1):
+                previous=jpeg;last_sent=now
                 yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"+jpeg+b"\r\n"
                 count+=1
             if run.state in ("ended","stopped","error"):break

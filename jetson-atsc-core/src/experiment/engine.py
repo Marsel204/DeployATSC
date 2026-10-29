@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from copy import deepcopy
+from src.common.json_data import clone as deepcopy
 from dataclasses import asdict
 import threading
 
@@ -23,6 +23,7 @@ class ObservationEngine:
         self.revision = 0
         self.generation = 0
         self.retention = None
+        self._summary_cache = None
 
     def update_system(self, snapshot, *, generation=None):
         with self.lock:
@@ -142,14 +143,18 @@ class ObservationEngine:
     def snapshot(self, offset=0, limit=100, evidence=False):
         with self.lock:
             view = self.predictions.view()
-            comparisons = self.comparisons(view)
-            summary = (self.retention.summary if self.retention else summarize)(self.waits.records.values(), comparisons, self.policy.los_method, view["rows"])
-            if self.retention:self.retention.visited_records+=self.comparison_visits
+            key=(self.revision,view["revision"],self.retention.acknowledged if self.retention else None,evidence,offset,limit,view["rows"])
+            if self._summary_cache is None or self._summary_cache[0]!=key:
+                comparisons = self.comparisons(view)
+                summary = (self.retention.summary if self.retention else summarize)(self.waits.records.values(), comparisons, self.policy.los_method, view["rows"])
+                if self.retention:self.retention.visited_records+=self.comparison_visits
+                self._summary_cache=(deepcopy(key),deepcopy(comparisons),deepcopy(summary))
+            else:comparisons,summary=deepcopy(self._summary_cache[1:])
             vehicles=self.waits.rows(0,len(self.waits.records),evidence)
             if self.retention:
                 if not evidence:
                     for row in vehicles:row["history"]=deepcopy(self.retention.progress.get(row["vehicle_id"],{}))
-                vehicles=list(deepcopy(self.retention.recent))+vehicles
+                vehicles=deepcopy(list(self.retention.recent))+vehicles
             vehicles.sort(key=lambda r:(r["first_seen"],r["vehicle_id"]))
             result = {"schema_version":2, "run_id":self.run_id,
                 "movement_id":self.policy.movement_id, "operation":"observation",
@@ -179,12 +184,13 @@ class ObservationEngine:
         from src.experiment.retention import Retention
         with self.lock:
             self.retention=Retention(budget,directory)
+            self._summary_cache=None
             self.waits.archived=self.retention.identity
 
     def retention_due(self):
         with self.lock:
             if self.retention is None or self.closed:return False
-            work=sum(len(r["intervals"])+int(r["completed"]) for r in self.waits.records.values())
+            work=self.waits.work
             work+=max(0,len(self.phase.events)-self.retention.budget)+max(0,len(self.gaps)-self.retention.budget)
             return work>=self.retention.budget
 

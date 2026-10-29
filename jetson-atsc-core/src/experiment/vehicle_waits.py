@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from copy import deepcopy
+from src.common.json_data import clone as deepcopy
 
 from src.experiment.contracts import RunPolicy, vehicle_key
 
@@ -11,7 +11,7 @@ class VehicleWaits:
         self.run_id = run_id
         self.policy = policy
         self.side = side
-        self.records = {}
+        self.records = {}; self.work = 0
         self.active = {}
         self.last_sequence = None
         self.first_sequence = None
@@ -85,6 +85,7 @@ class VehicleWaits:
     def _cross(self, row, previous, observation, phase, timestamp, cycle_id):
         crossing_phase = str(phase) if previous["phase"] != "UNKNOWN" else "UNKNOWN"
         attributed = cycle_id if crossing_phase != "UNKNOWN" else None
+        if not row["completed"]:self.work+=1
         row.update(crossed_stop_line=True,crossing_cycle=attributed,
                    crossing_at=timestamp,crossing_phase=crossing_phase,crossing_direction=1,
                    crossing_evidence={"from_point":previous["point"],"to_point":observation.point,
@@ -120,7 +121,8 @@ class VehicleWaits:
                         0<timestamp-previous["time"]<=self.policy.max_gap_sec and
                         self.side(previous["point"])<0<=self.side(observation.point))
                     if crossing:self._cross(row,previous,observation,phase,timestamp,cycle_id)
-                    else:row.update(completed=True,completed_at=timestamp,tracking_state="EXITED",right_censored=False)
+                    else:
+                        row.update(completed=True,completed_at=timestamp,tracking_state="EXITED",right_censored=False);self.work+=1
                 continue
             if state is None: state = self._new(observation, timestamp, sequence, segment)
             row = state["row"]; previous = state["previous"]
@@ -132,7 +134,7 @@ class VehicleWaits:
                             "cycle_id": previous["cycle"] if continuous else None,
                             "valid": bool(continuous and previous["valid_motion"] and valid_motion),
                             "stopped": state["stopped"]}
-                row["intervals"].append(interval); self._account(row, interval)
+                row["intervals"].append(interval); self.work+=1; self._account(row, interval)
                 if not continuous:
                     self._flag(row, "observation_gap")
                     state["stop_candidate"] = state["move_candidate"] = None
@@ -175,7 +177,7 @@ class VehicleWaits:
             if identity not in present and not row["completed"]:
                 row["tracking_state"] = "LOST"
                 if timestamp-row["last_seen"] > self.policy.association_gap_sec:
-                    row.update(completed=True, completed_at=timestamp)
+                    row.update(completed=True, completed_at=timestamp);self.work+=1
                     self._flag(row, "tracking_lost")
 
     def invalidate(self, timestamp, reason):
@@ -190,7 +192,7 @@ class VehicleWaits:
     def close(self, timestamp, reason="recording_end"):
         self.invalidate(timestamp, reason)
         for row in self.records.values():
-            if not row["completed"]: row.update(completed=True, completed_at=timestamp)
+            if not row["completed"]: row.update(completed=True, completed_at=timestamp);self.work+=1
 
     def rows(self, offset=0, limit=100, include_intervals=False):
         rows = list(self.records.values())

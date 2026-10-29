@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections import deque
-from copy import deepcopy
+from src.common.json_data import clone as deepcopy
 from dataclasses import asdict
 from datetime import datetime, timezone
 from functools import lru_cache, partial
@@ -24,7 +24,7 @@ from src.ui.runtime_metrics import AcquisitionRates
 from src.common.exception_cleanup import clear_exception_frames
 from src.analytics.traffic_metrics import TrafficMetricsExtractor
 from src.common.types import TrafficSnapshot
-from src.common.source_identity import public_data, public_source, resolve_source, safe_text
+from src.common.source_identity import public_data, public_source, resolve_source, safe_text, PublicDataCache
 from src.control.anfis_inference import ANFISInferenceEngine
 from src.control.decision_engine import ATSCDecisionEngine
 from src.experiment.calibration import CameraCalibration, legacy_system_payload
@@ -118,11 +118,14 @@ class ObservationSession:
         self.error=None;self.storage_error=None;self.jpeg_frames={};self.clean_frames={}
         self.clean_jpeg_cache={};self.acquisition_rates=AcquisitionRates()
         self.preview_width=640;self.preview_published_at={}
+        self.preview_thread=None;self.preview_encoded_frames=0;self.preview_coalesced_frames=0;self.preview_errors=0
         self.frame_times={};self.steps=0;self.created_monotonic=time.monotonic()
         # Camera 1 "frames" counts one-shot still-image inferences; its decoded frames are preview_frames.
         self.runtime={role:{"frames":0,"inference_total_ms":0.,"last_inference_ms":0.,"preview_frames":0,
             "inference_mode":"on_demand_single_frame" if role=="system" else "continuous"} for role in self.calibrations}
         self.camera1_latest=None
+        self.public_cache=PublicDataCache();self._telemetry_static=None
+        self._execution_frames=0;self._execution_resample=True;self._execution_sample_frame=0;self._execution_sample_time=0.
         self.initializing=True;self.ready=threading.Event();self.startup_error=None
         self.durable_revision=None;self.durable_generation=None
         self.pending_commit=None;self.storage_suspended=False;self.commit_sequence=0
@@ -174,6 +177,7 @@ class ObservationSession:
             manifest["source_hashes"]={str(path.relative_to(ROOT)):file_digest(str(path),path.stat().st_mtime_ns)
                 for path in sorted((ROOT/"src").rglob("*.py"))}
             self.store=ExperimentStore(storage_root,self.run_id,manifest)
+            self._start_previews()
             self.thread=threading.Thread(target=self._worker,daemon=True,name="Observation-"+self.run_id)
             self.thread.start()
         except Exception as error:
@@ -209,8 +213,8 @@ class ObservationSession:
             tracks=detector.track([frame],timestamp=packet.timestamp)[0]
             if self.stopping.is_set():break
             detector.update_velocities(tracks,calibration.homography.pixel_to_ground,timestamp=packet.timestamp)
-            self._read_execution_provenance()
             elapsed=(time.perf_counter()-started)*1000
+            self._sample_execution_provenance(packet.timestamp)
             predictor=getattr(getattr(detector,"model",None),"predictor",None)
             neural_device=str(getattr(predictor,"device","injected/unknown"))
             with self.lock:
@@ -253,15 +257,15 @@ class ObservationSession:
         if packet.role=="system" and getattr(self,"applied_state",None)=="running":
             previous=self.preview_published_at.get(packet.role)
             if previous is not None and now-previous<.1:return
-        visual=self._render(packet.role,frame,tracks)
-        width=getattr(self,"preview_width",640)
-        if visual.shape[1]>width:
-            visual=cv2.resize(visual,(width,round(visual.shape[0]*width/visual.shape[1])),interpolation=cv2.INTER_LINEAR)
-        ok,jpeg=cv2.imencode(".jpg",visual,[cv2.IMWRITE_JPEG_QUALITY,82])
-        with self.lock:
-            if ok:self.jpeg_frames[packet.role]=jpeg.tobytes()
-            if hasattr(self,"preview_published_at"):self.preview_published_at[packet.role]=now
+        labels=self._preview_labels(packet.role,tracks)
+        with self.preview_condition:
+            self.preview_serial+=1
+            if packet.role in self.preview_jobs:self.preview_coalesced_frames+=1
+            self.preview_jobs[packet.role]=(packet.role,frame,labels,packet.timestamp,self.preview_serial)
+            self.preview_submitted[packet.role]=self.preview_serial
+            self.preview_published_at[packet.role]=now
             self.frame_times[packet.role]=packet.timestamp
+            self.preview_condition.notify_all()
         # Routine commits never wait behind another commit; packets keep flowing.
         if not self.storage_suspended and self.engine.retention_due() and self.persist(wait=False) is not None:
             self.last_persisted=self.engine.time
@@ -315,6 +319,60 @@ class ObservationSession:
             "inference_api":"detect_once" if detect else "track_single_frame_fallback",
             "latency_ms":round(elapsed,3),"detections":len(vehicles),"neural_device":device}
 
+    def _start_previews(self):
+        self.preview_condition=threading.Condition(self.lock);self.preview_jobs={}
+        self.preview_submitted={};self.preview_completed={};self.preview_serial=0;self.preview_stopping=False
+        self.preview_encoded_frames=0;self.preview_coalesced_frames=0;self.preview_errors=0
+        self.preview_thread=threading.Thread(target=self._preview_worker,daemon=True,name="Observation-previews-"+self.run_id)
+        self.preview_thread.start()
+
+    def _preview_worker(self):
+        while True:
+            with self.preview_condition:
+                self.preview_condition.wait_for(lambda:self.preview_jobs or self.preview_stopping)
+                if not self.preview_jobs:return
+                job=self.preview_jobs.pop(next(iter(self.preview_jobs)))
+            role,frame,labels,timestamp,serial=job
+            try:
+                visual=self._render(role,frame,labels)
+                width=self.preview_width
+                if visual.shape[1]>width:
+                    visual=cv2.resize(visual,(width,round(visual.shape[0]*width/visual.shape[1])),interpolation=cv2.INTER_LINEAR)
+                ok,jpeg=cv2.imencode(".jpg",visual,[cv2.IMWRITE_JPEG_QUALITY,82])
+                if not ok:raise ValueError("Preview JPEG encoding failed")
+                result=jpeg.tobytes()
+                with self.preview_condition:
+                    self.jpeg_frames[role]=result;self.preview_encoded_frames+=1
+            except Exception:
+                with self.preview_condition:self.preview_errors+=1
+            finally:
+                with self.preview_condition:
+                    self.preview_completed[role]=serial;self.preview_condition.notify_all()
+            # Do not retain a full-resolution frame after encoding while idle.
+            del job,frame,labels
+            if 'visual' in locals():del visual
+
+    def _stop_previews(self):
+        thread=self.preview_thread
+        if thread is None or thread.ident is None:return True
+        with self.preview_condition:
+            self.preview_stopping=True;self.preview_condition.notify_all()
+        thread.join(timeout=.02)
+        return not thread.is_alive()
+
+    def _preview_labels(self,role,tracks):
+        if not tracks:return ()
+        labels=[]
+        with self.engine.lock:
+            for v in tracks:
+                p=tuple(int(x) for x in v.bbox)
+                label=f"#{v.track_id} {v.class_name}" if getattr(v,"stable_id",False) else v.class_name+" (ID unknown)"
+                if role=="acquisition":
+                    state=self.engine.waits.active.get((getattr(v,"epoch",0),v.track_id))
+                    if state and "red_wait_sec" in state["row"]:label+=f" | red wait {state['row']['red_wait_sec']:.1f}s"
+                labels.append((p,label))
+        return tuple(labels)
+
     def _render(self,role,frame,tracks):
         visual=frame.copy();calibration=self.calibrations[role]
         color=(220,210,90) if role=="system" else (70,200,235)
@@ -322,13 +380,8 @@ class ObservationSession:
         if role=="acquisition":
             line=np.array(calibration.stop_line,np.int32)
             cv2.line(visual,tuple(line[0]),tuple(line[1]),(240,240,240),2)
-        for v in tracks:
-            p=tuple(int(x) for x in v.bbox)
+        for p,label in tracks:
             cv2.rectangle(visual,p[:2],p[2:],color,2)
-            label=f"#{v.track_id} {v.class_name}" if getattr(v,"stable_id",False) else v.class_name+" (ID unknown)"
-            if role=="acquisition":
-                state=self.engine.waits.active.get((getattr(v,"epoch",0),v.track_id))
-                if state and "red_wait_sec" in state["row"]:label+=f" | red wait {state['row']['red_wait_sec']:.1f}s"
             cv2.putText(visual,label,(p[0],max(16,p[1]-6)),cv2.FONT_HERSHEY_SIMPLEX,.45,color,1)
         cv2.putText(visual,"CAMERA 1 / SYSTEM - YOLO on demand" if role=="system" else "CAMERA 2 / ACQUISITION",(12,24),cv2.FONT_HERSHEY_SIMPLEX,.6,color,2)
         return visual
@@ -343,6 +396,7 @@ class ObservationSession:
             with self.lock:
                 if not self.controls:return
                 sequence,action=self.controls.popleft()
+                self._execution_resample=True
                 if action!="play" or self.applied_state!="running":
                     self.acquisition_rates.reset_playback()
             if action=="pause":
@@ -412,8 +466,9 @@ class ObservationSession:
                 steps=[] if self._captures_released() else [self.pair.close]
                 if self._predictions_released() and (self.detectors or self.decision is not None):steps.append(self._release_models)
                 errors=self._attempt(*steps)
+                previews_released=self._stop_previews()
                 if errors:self.release_error="; ".join(errors)
-                elif self._captures_released() and self._predictions_released() and not self.detectors and self.decision is None:break
+                elif self._captures_released() and self._predictions_released() and not self.detectors and self.decision is None and previews_released:break
                 # Paced; stop() wakes a retry, a persistent failure backs off.
                 self.wake.wait(delay if errors else .02);self.wake.clear()
                 delay=min(.5,delay*2) if errors else .02
@@ -434,7 +489,10 @@ class ObservationSession:
 
     def _seal(self):
         if hasattr(self,"engine"):
-            self.engine.close("recording_end" if self.state=="ended" else "session_error" if self.state=="error" else "operator_stop")
+            try:
+                # Optional final catch-up must never suspend sealing or finalization.
+                if self.detectors:self._attempt(self._read_execution_provenance)
+            finally:self.engine.close("recording_end" if self.state=="ended" else "session_error" if self.state=="error" else "operator_stop")
 
     def _release_models(self):
         # Keep local/bound method references inside this scope, which exits before
@@ -557,12 +615,17 @@ class ObservationSession:
                     age=max(0,time.monotonic()-self.pair.origin-self.frame_times[role]-(self.policy.offset_sec if role=="acquisition" else 0))
                     health[role]["processed_frame_age_sec"]=age
                     if age>self.policy.freshness_sec and health[role]["state"]=="ready":health[role]["state"]="lagging"
+            static_key=(tuple((role,c.revision) for role,c in self.calibrations.items()),self.policy)
+            if (self._telemetry_static is None or self._telemetry_static_key!=static_key or
+                    self._telemetry_static["detector_selection"]!=getattr(self,"model_selection",None)):
+                self._telemetry_static_key=static_key
+                self._telemetry_static={"camera_calibrations":{role:deepcopy(c.payload) for role,c in self.calibrations.items()},
+                    "policy":asdict(self.policy),"detector_selection":deepcopy(getattr(self,"model_selection",None))}
+            snapshot.update(self._telemetry_static)
             snapshot.update(**self._control_status(),lifecycle=self.lifecycle(),error=self.error,storage_error=self.storage_error,
                 source_mode=self.source_mode,shared_source_test=self.shared_test,
-                camera_calibrations={role:deepcopy(c.payload) for role,c in self.calibrations.items()},
-                policy=asdict(self.policy),
-                cameras=health,runtime=runtime,frame_times=dict(self.frame_times),
-                detector_selection=deepcopy(getattr(self,"model_selection",None)))
+                preview_encoded_frames=self.preview_encoded_frames,preview_coalesced_frames=self.preview_coalesced_frames,preview_errors=self.preview_errors,
+                cameras=health,runtime=runtime,frame_times=dict(self.frame_times))
             # Camera 1 metrics are the last analysed still image, never a live measurement.
             age,problem=self._camera1_frame_status() if hasattr(self,"engine") else (None,"Camera 1 is unavailable")
             last=snapshot.pop("camera1_last_analysis",None)
@@ -575,13 +638,23 @@ class ObservationSession:
                     "frame_sequence":last["frame"].get("sequence"),"frame_timestamp":last["frame"].get("timestamp"),
                     "completed_at":last["completed_at"],"age_sec":max(0.,now-last["frame"]["timestamp"])}}
             snapshot["snapshot_fresh"]=problem is None
-        snapshot.update(execution=self.execution_provenance(),clock_provenance=self.clock_provenance())
-        return public_data(snapshot)
+        if getattr(self,"last_execution",None) is None:self.execution_provenance()
+        snapshot.update(execution=self.last_execution,clock_provenance=self.clock_provenance())
+        return self.public_cache.render(snapshot,(*self._telemetry_static,"execution"))
 
     def execution_provenance(self):
         # Sample models only on their owner thread, never concurrently with release.
         if getattr(self,"last_execution",None) is None:self._read_execution_provenance()
         return deepcopy(self.last_execution)
+
+    def _sample_execution_provenance(self,timestamp):
+        # First 3 frames and controls warm up promptly; later changes appear within 75 frames / 5 source seconds.
+        self._execution_frames+=1
+        if (self._execution_frames<=3 or self._execution_resample or
+                self._execution_frames-self._execution_sample_frame>=75 or timestamp-self._execution_sample_time>=5):
+            self._read_execution_provenance()
+            self._execution_sample_frame=self._execution_frames;self._execution_sample_time=timestamp
+            self._execution_resample=False
 
     def _read_execution_provenance(self):
         def artifact(component):
@@ -613,12 +686,14 @@ class ObservationSession:
             "providers":providers,"requested_prefer_cuda":False,"model":artifact(anfis),
             "min_green_sec":getattr(anfis,"min_green",None),"max_green_sec":getattr(anfis,"max_green",None),
             "model_domain":"unknown"}})
-        self.last_execution=deepcopy(result)
+        with self.lock:self.last_execution=result
         return result
 
     def clock_provenance(self):
         health=self.pair.health() if self.pair is not None else {}
-        with self.lock:processed=deepcopy(self.runtime)
+        with self.lock:
+            processed={role:{key:stats.get(key) for key in ("last_source_timestamp","last_mapped_timestamp","last_sequence") } |
+                {"last_timestamp_origin":stats.get("last_timestamp_origin","unknown")} for role,stats in self.runtime.items()}
         result={}
         for role in ("system","acquisition"):
             values=health.get(role,{})
@@ -636,7 +711,11 @@ class ObservationSession:
 
     def jpeg(self,role,clean=False):
         with self.lock:
-            if not clean:return self.jpeg_frames.get(role)
+            if not clean:
+                if self.applied_state!="running":
+                    target=self.preview_submitted.get(role,0)
+                    self.preview_condition.wait_for(lambda:self.preview_completed.get(role,0)>=target,timeout=.25)
+                return self.jpeg_frames.get(role)
             frame=self.clean_frames.get(role)
             cached=self.clean_jpeg_cache.get(role)
             if cached is not None or frame is None:return cached
