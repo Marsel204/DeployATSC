@@ -105,6 +105,7 @@ class StartObservation(StrictModel):
     step_mode:bool=False
     shared_test:bool=False
     retention_budget:int=Field(default=64,ge=1,le=4096)
+    persist_mode:Literal["inline","background"]="inline"
     policy:dict[str,Any]=Field(default_factory=dict)
 
     @field_validator("policy")

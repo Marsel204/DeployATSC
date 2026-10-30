@@ -320,6 +320,8 @@
     else $('quantileStatus').textContent=currentQuantileStatus;
     $('waitCoverage').textContent=`${summary.observed_wait_sample_count ?? 'unknown'} samples · ${summary.partial_vehicle_count ?? 'unknown'} partial · ${summary.complete_wait_sample_count ?? 'unknown'} complete · ${summary.unattributed_crossing_count ?? 'unknown'} unattributed crossings. Unknown motion ${fmt(summary.motion_unknown_sec)} / phase ${fmt(summary.phase_unknown_sec)} vehicle-seconds (may overlap).`;
     const runtime=roles.map(role=>role==='system' ? `C1: ${data.runtime[role].frames} on-demand inference attempt(s), mean ${fmt(data.runtime[role].mean_inference_ms)}ms` : `C2: ${fmt(data.runtime[role].processed_fps)} FPS · source ${fmt(data.runtime[role].source_fps)} FPS · ${fmt(data.runtime[role].realtime_factor,2)}× playback · ${fmt(data.runtime[role].steady_inference_ms)}ms steady inference${data.detector_selection?.backend==='tensorrt' ? ' · TensorRT FP16' : ''}`).join(' · ');
+    $('performanceAdvice').textContent=data.performance_advice?.[0] || '';
+    $('performanceAdvice').hidden=!data.performance_advice?.length;
     $('runtimeStatus').textContent=runtime+' · timestamps follow source time; partial observations remain visible.';
     if(data.error)show(data.error,'error');else if(data.storage_error)show('Evidence storage error: '+data.storage_error,'error');
     else if(last?.error)show('Recommendation failed: '+last.error,'error');

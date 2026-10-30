@@ -21,6 +21,7 @@ import numpy as np
 
 from src.ui.runtime_ownership import runtime_ownership, RuntimeConflict
 from src.ui.runtime_metrics import AcquisitionRates
+from src.common.runtime_tuning import host_provenance, performance_advice
 from src.common.exception_cleanup import clear_exception_frames
 from src.analytics.traffic_metrics import TrafficMetricsExtractor
 from src.common.types import TrafficSnapshot
@@ -69,6 +70,7 @@ class ObservationSession:
         """Validate static inputs without opening video devices or allocating models."""
         RunPolicy(**payload.get("policy",{}))
         validate_budget(payload.get("retention_budget",64))
+        if payload.get("persist_mode","inline") not in ("inline","background"):raise ValueError("Persist mode must be inline or background")
         mode=payload.get("source_mode","replay")
         if mode not in ("live","replay"):raise ValueError("Source mode must be replay or live")
         calibrations={role:CameraCalibration(payload[role]) for role in ("system","acquisition")}
@@ -97,9 +99,13 @@ class ObservationSession:
         with tempfile.TemporaryFile(dir=root) as probe:probe.write(b"preflight");probe.flush()
         return calibrations
 
-    def __init__(self,payload,storage_root,detector_factory=None,anfis_factory=None):
+    def __init__(self,payload,storage_root,detector_factory=None,anfis_factory=None,*,sysfs_root="/sys"):
+        self.sysfs_root=sysfs_root
         self.preflight(payload,storage_root,detector_factory,anfis_factory)
         self.policy=RunPolicy(**payload.get("policy",{}))
+        self.persist_mode=payload.get("persist_mode","inline")
+        self.persist_condition=threading.Condition();self.persist_thread=None;self.persist_pending=False;self.persist_inflight=False;self.persist_stopping=False
+        self.persist_background_requests=0;self.persist_background_commits=0;self.persist_coalesced_requests=0;self.persist_worker_errors=0
         self.source_mode=payload.get("source_mode","replay")
         if self.source_mode not in ("replay","live"):raise ValueError("Source mode must be replay or live")
         self.calibrations={role:CameraCalibration(payload[role]) for role in ("system","acquisition")}
@@ -172,12 +178,14 @@ class ObservationSession:
                 "package_versions":versions, "execution":self.execution_provenance(),
                 "media_identity":self.pair.media_identity() if hasattr(self.pair,"media_identity") else {"state":"unknown"},
                 "clock_provenance":self.clock_provenance()}
+            manifest["host"]=manifest["execution"]["host"]
             manifest["inference_components"]={"detector":getattr(detector_factory,"__name__",type(detector_factory).__name__),
                 "anfis":getattr(anfis_factory,"__name__",type(anfis_factory).__name__)}
             manifest["source_hashes"]={str(path.relative_to(ROOT)):file_digest(str(path),path.stat().st_mtime_ns)
                 for path in sorted((ROOT/"src").rglob("*.py"))}
             self.store=ExperimentStore(storage_root,self.run_id,manifest)
             self._start_previews()
+            self._start_persist_worker()
             self.thread=threading.Thread(target=self._worker,daemon=True,name="Observation-"+self.run_id)
             self.thread.start()
         except Exception as error:
@@ -195,11 +203,13 @@ class ObservationSession:
             raise self.startup_error
 
     def _process_batch(self):
+        if getattr(self,"persist_mode","inline")=="background" and self.storage_suspended:return False
         if not self.packets:self.packets.extend(self.pair.step())
         had_packets=bool(self.packets)
         while self.packets:
             self._apply_controls()
             if not self.packets or self.stopping.is_set() or (self.applied_state=="paused" and not self.steps and not self.initializing):break
+            if getattr(self,"persist_mode","inline")=="background" and self.storage_suspended:break
             packet=self.packets.popleft()
             generation=self.engine.generation
             calibration=self.calibrations[packet.role]
@@ -211,7 +221,7 @@ class ObservationSession:
             detector=self.detectors[packet.role]
             started=time.perf_counter()
             tracks=detector.track([frame],timestamp=packet.timestamp)[0]
-            if self.stopping.is_set():break
+            if self.stopping.is_set() or (getattr(self,"persist_mode","inline")=="background" and self.storage_suspended):break
             detector.update_velocities(tracks,calibration.homography.pixel_to_ground,timestamp=packet.timestamp)
             elapsed=(time.perf_counter()-started)*1000
             self._sample_execution_provenance(packet.timestamp)
@@ -242,8 +252,7 @@ class ObservationSession:
             if stale and not self.live_stale:self.engine.invalidate("acquisition_stale")
             self.live_stale=stale
         if not self.storage_suspended and (self.engine.time-self.last_persisted>=5 or
-                self.engine.retention_due()) and self.persist(wait=False) is not None:
-            self.last_persisted=self.engine.time
+                self.engine.retention_due()):self._request_persist()
         return had_packets
 
     def _publish_frame(self,packet,frame,tracks):
@@ -267,8 +276,52 @@ class ObservationSession:
             self.frame_times[packet.role]=packet.timestamp
             self.preview_condition.notify_all()
         # Routine commits never wait behind another commit; packets keep flowing.
-        if not self.storage_suspended and self.engine.retention_due() and self.persist(wait=False) is not None:
-            self.last_persisted=self.engine.time
+        if not self.storage_suspended and self.engine.retention_due():self._request_persist()
+
+    def _start_persist_worker(self):
+        if self.persist_mode!="background":return
+        self.persist_thread=threading.Thread(target=self._persist_worker,daemon=True,name="Observation-persist-"+self.run_id)
+        self.persist_thread.start()
+
+    def _request_persist(self):
+        if (getattr(self,"persist_mode","inline")=="background" and self.applied_state=="running" and
+                not self.stopping.is_set() and not self.storage_suspended):
+            with self.persist_condition:
+                self.persist_background_requests+=1
+                if self.persist_pending:self.persist_coalesced_requests+=1
+                self.persist_pending=True;self.last_persisted=self.engine.time
+                self.persist_condition.notify()
+        elif self.persist(wait=False) is not None:self.last_persisted=self.engine.time
+
+    def _persist_worker(self):
+        while True:
+            with self.persist_condition:
+                self.persist_condition.wait_for(lambda:self.persist_pending or self.persist_stopping)
+                if not self.persist_pending:return
+                self.persist_pending=False;self.persist_inflight=True
+            succeeded=False;failed=False
+            try:succeeded=self.persist(wait=True)
+            except Exception as error:
+                clear_exception_frames(error);failed=True
+            finally:
+                with self.persist_condition:
+                    self.persist_background_commits+=int(bool(succeeded))
+                    self.persist_worker_errors+=int(failed)
+                    if self.storage_suspended:self.persist_pending=False
+                    self.persist_inflight=False;self.persist_condition.notify_all()
+
+    def _stop_persist_worker(self):
+        thread=getattr(self,"persist_thread",None)
+        if thread is None:return True
+        with self.persist_condition:
+            self.persist_stopping=True;self.persist_condition.notify_all()
+        if thread.ident is not None:thread.join(timeout=.02)
+        return not thread.is_alive()
+
+    def _persist_counters(self):
+        with self.persist_condition:
+            return {key:getattr(self,key) for key in ("persist_background_requests","persist_background_commits",
+                "persist_coalesced_requests","persist_worker_errors")}
 
     def _observe_camera1(self,packet,frame,generation):
         with self.lock:
@@ -467,8 +520,9 @@ class ObservationSession:
                 if self._predictions_released() and (self.detectors or self.decision is not None):steps.append(self._release_models)
                 errors=self._attempt(*steps)
                 previews_released=self._stop_previews()
+                persist_released=self._stop_persist_worker()
                 if errors:self.release_error="; ".join(errors)
-                elif self._captures_released() and self._predictions_released() and not self.detectors and self.decision is None and previews_released:break
+                elif self._captures_released() and self._predictions_released() and not self.detectors and self.decision is None and previews_released and persist_released:break
                 # Paced; stop() wakes a retry, a persistent failure backs off.
                 self.wake.wait(delay if errors else .02);self.wake.clear()
                 delay=min(.5,delay*2) if errors else .02
@@ -624,6 +678,7 @@ class ObservationSession:
             snapshot.update(self._telemetry_static)
             snapshot.update(**self._control_status(),lifecycle=self.lifecycle(),error=self.error,storage_error=self.storage_error,
                 source_mode=self.source_mode,shared_source_test=self.shared_test,
+                **self._persist_counters(),
                 preview_encoded_frames=self.preview_encoded_frames,preview_coalesced_frames=self.preview_coalesced_frames,preview_errors=self.preview_errors,
                 cameras=health,runtime=runtime,frame_times=dict(self.frame_times))
             # Camera 1 metrics are the last analysed still image, never a live measurement.
@@ -639,7 +694,8 @@ class ObservationSession:
                     "completed_at":last["completed_at"],"age_sec":max(0.,now-last["frame"]["timestamp"])}}
             snapshot["snapshot_fresh"]=problem is None
         if getattr(self,"last_execution",None) is None:self.execution_provenance()
-        snapshot.update(execution=self.last_execution,clock_provenance=self.clock_provenance())
+        snapshot.update(execution=self.last_execution,clock_provenance=self.clock_provenance(),
+            performance_advice=performance_advice(self.last_execution.get("host",{})))
         return self.public_cache.render(snapshot,(*self._telemetry_static,"execution"))
 
     def execution_provenance(self):
@@ -682,7 +738,7 @@ class ObservationSession:
         anfis=getattr(self.decision,"anfis",None)
         session=getattr(anfis,"session",None)
         providers=session.get_providers() if callable(getattr(session,"get_providers",None)) else ([anfis.active_provider] if getattr(anfis,"active_provider",None) else [])
-        result=public_data({"detectors":detectors,"anfis":{"component":type(anfis).__name__,
+        result=public_data({"host":host_provenance(getattr(self,"sysfs_root","/sys")),"detectors":detectors,"anfis":{"component":type(anfis).__name__,
             "providers":providers,"requested_prefer_cuda":False,"model":artifact(anfis),
             "min_green_sec":getattr(anfis,"min_green",None),"max_green_sec":getattr(anfis,"max_green",None),
             "model_domain":"unknown"}})

@@ -15,7 +15,7 @@ def test_telemetry_equals_original_and_is_mutation_isolated(video_factory,tmp_pa
         with monkeypatch.context() as clock:
             clock.setattr(time,'monotonic',lambda:session.created_monotonic+1)
             old=OriginalSessionMethods.telemetry(session,evidence=True);new=session.telemetry(evidence=True)
-            old.update({key:new[key] for key in ("preview_encoded_frames","preview_coalesced_frames","preview_errors")})
+            old.update({key:new[key] for key in ("preview_encoded_frames","preview_coalesced_frames","preview_errors","performance_advice","persist_background_requests","persist_background_commits","persist_coalesced_requests","persist_worker_errors")})
             assert new==old
             saved=deepcopy(new)
             new['camera_calibrations']['system']['anchors'][0][0]=-999;new['policy']['movement_id']='bad'
@@ -28,7 +28,7 @@ def test_telemetry_equals_original_and_is_mutation_isolated(video_factory,tmp_pa
         with monkeypatch.context() as clock:
             clock.setattr(time,'monotonic',lambda:session.created_monotonic+1)
             current=session.telemetry();original=OriginalSessionMethods.telemetry(session)
-            original.update({key:current[key] for key in ("preview_encoded_frames","preview_coalesced_frames","preview_errors")})
+            original.update({key:current[key] for key in ("preview_encoded_frames","preview_coalesced_frames","preview_errors","performance_advice","persist_background_requests","persist_background_commits","persist_coalesced_requests","persist_worker_errors")})
             assert current==original
     finally:session.stop()
 
@@ -77,6 +77,6 @@ def test_static_telemetry_refreshes_on_calibration_revision_and_selection(video_
         with monkeypatch.context() as clock:
             clock.setattr(time,'monotonic',lambda:session.created_monotonic+1)
             value=session.telemetry();expected=OriginalSessionMethods.telemetry(session)
-            expected.update({key:value[key] for key in ('preview_encoded_frames','preview_coalesced_frames','preview_errors')})
+            expected.update({key:value[key] for key in ('preview_encoded_frames','preview_coalesced_frames','preview_errors','performance_advice','persist_background_requests','persist_background_commits','persist_coalesced_requests','persist_worker_errors')})
             assert value==expected
     finally:session.stop()

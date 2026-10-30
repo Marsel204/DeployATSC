@@ -37,3 +37,31 @@ Open **http://localhost:8001**. The demo opens paused at 3 seconds with two sepa
 The demo uses **generated videos and scripted vehicle tracks**, clearly labelled on the dashboard. It exercises the normal observation engine, manual prediction, the actual deployed CPU ANFIS model, calibration, storage, history and exports. It does **not** demonstrate real YOLO detection, camera accuracy, hardware actuation, validated traffic measurements or LOS grading.
 
 Demo media, profiles and runs are isolated under `data/demo/`; the reproducible start payload is `data/demo/preset.json`. Existing experiment evidence, research, weights and camera configuration are unchanged. The normal launcher remains `scripts/launch_ui.py`. The demo detector is injected only by `launch_demo.py`; ordinary app operation is unaffected. To regenerate only the assets/preset without starting a server, use `--prepare-only`.
+
+## Real-time setup on Jetson
+
+Before launching, pin clocks with `sudo jetson_clocks`. Revert with
+`sudo jetson_clocks --restore`; clock settings reset at reboot. This stage never
+changes clocks automatically. Schedutil under-clocks the bursty pipeline; an
+uncapped OpenBLAS pool can otherwise prop up clocks by spinning.
+
+The launchers apply `ATSC_BLAS_THREADS=auto` (default) **before numerical imports**:
+cap OpenBLAS at one thread only when every online CPU policy is pinned (equal
+min/max frequency or performance governor). Unknown/unpinned clocks leave BLAS
+alone. `ATSC_BLAS_THREADS=default` disables tuning; a positive integer requests
+that cap. An existing `OPENBLAS_NUM_THREADS` always wins. Restart after changes.
+Telemetry/manifest host facts record this decision; `performance_advice` explains
+unpinned clocks or uncapped BLAS, with the first advice beside Camera 2 runtime.
+
+Start payload `persist_mode` defaults to `inline`. Opt-in `background` coalesces
+routine commits while running, keeping disk IO off the measurement thread.
+Paused/stepped commits and HTTP persists retain their existing behavior. Stop
+waits for the worker before final persistence. A crash can lose measurements
+since the last durable commit; the existing interrupted-run recovery still applies.
+
+One-board measurements (Stage 3, pinned clocks, optimized tree): default BLAS →
+one thread improved playback 0.949× → 0.986×, late frames 12.5% → 7.0–7.1%,
+track p50/p95/p99 41.8/56.8/77.1 → 37.5/40.4/45.6 ms, CPU 0.352 → 0.054
+CPU-s/frame (−85%), device power 8.39 → 7.76 W; tracker outputs were bit-identical.
+Without pinned clocks the cap worsened playback by 1.3% as clocks fell to ~850 MHz.
+These are one-board results, not performance guarantees for other clips/hardware.
