@@ -40,28 +40,52 @@ Demo media, profiles and runs are isolated under `data/demo/`; the reproducible 
 
 ## Real-time setup on Jetson
 
+### Validated recipe
+
 Before launching, pin clocks with `sudo jetson_clocks`. Revert with
 `sudo jetson_clocks --restore`; clock settings reset at reboot. This stage never
 changes clocks automatically. Schedutil under-clocks the bursty pipeline; an
 uncapped OpenBLAS pool can otherwise prop up clocks by spinning.
 
-The launchers apply `ATSC_BLAS_THREADS=auto` (default) **before numerical imports**:
-cap OpenBLAS at one thread only when every online CPU policy is pinned (equal
+Leave `ATSC_BLAS_THREADS=auto` (default) for this recipe. The launchers apply it
+**before numerical imports**, capping OpenBLAS at one thread only when every
+online CPU policy is pinned (equal
 min/max frequency or performance governor). Unknown/unpinned clocks leave BLAS
 alone. `ATSC_BLAS_THREADS=default` disables tuning; a positive integer requests
 that cap. An existing `OPENBLAS_NUM_THREADS` always wins. Restart after changes.
 Telemetry/manifest host facts record this decision; `performance_advice` explains
 unpinned clocks or uncapped BLAS, with the first advice beside Camera 2 runtime.
 
-Start payload `persist_mode` defaults to `inline`. Opt-in `background` coalesces
+Set top-level `"persist_mode": "background"` in the observation start payload,
+or in the preset JSON passed to `scripts/launch_demo.py --preset <path>`.
+It stays `inline` by default. Opt-in `background` coalesces
 routine commits while running, keeping disk IO off the measurement thread.
 Paused/stepped commits and HTTP persists retain their existing behavior. Stop
 waits for the worker before final persistence. A crash can lose measurements
 since the last durable commit; the existing interrupted-run recovery still applies.
 
-One-board measurements (Stage 3, pinned clocks, optimized tree): default BLAS →
-one thread improved playback 0.949× → 0.986×, late frames 12.5% → 7.0–7.1%,
-track p50/p95/p99 41.8/56.8/77.1 → 37.5/40.4/45.6 ms, CPU 0.352 → 0.054
-CPU-s/frame (−85%), device power 8.39 → 7.76 W; tracker outputs were bit-identical.
-Without pinned clocks the cap worsened playback by 1.3% as clocks fell to ~850 MHz.
-These are one-board results, not performance guarantees for other clips/hardware.
+Measured on one Jetson Orin Nano in 15 W mode, TensorRT FP16, one clip, one
+boot, 2026-10-30. Original = `c683cdb`; optimized = `ca6ebdf`. These results
+apply only to that setup. Late frames are the share of frame-to-frame intervals
+longer than 1.25 frame slots (83 ms at 15 FPS, 125 ms at 10 FPS); playback is
+source time per wall-clock time (1.0× is real time). Medians of three 15 FPS
+runs per row; CPU is active CPU-s per frame:
+
+| Configuration | Late frames | Playback | FPS | CPU-s/frame |
+| --- | ---: | ---: | ---: | ---: |
+| Original | 24.0% | 0.875× | 13.12 | 0.348 |
+| Original + pinned clocks + BLAS 1 | 11.8% | 0.948× | 14.21 | 0.048 |
+| Optimized + pinned clocks + auto BLAS, inline persist | 7.1% | 0.986× | 14.79 | 0.045 |
+| Final recipe: optimized + pinned clocks + auto BLAS, background persist | 0.083% | 0.994× | 14.91 | 0.045 |
+
+Other checks, two runs per arm (medians unless individual results are shown):
+
+| Check | Original | Final recipe |
+| --- | ---: | ---: |
+| 15 FPS, two dashboard streams: late frames | 34.8% (26.0–43.6%) | 0.17% |
+| 10 FPS: late frames | 19.3% | 0.13% |
+| Native app, requires ≥13.5 FPS | 0/2 passed (6.2, 12.7 FPS) | 2/2 passed (both 14.93 FPS) |
+
+Known limit: in a four-cycle start/stop soak, open file descriptors rose by two
+per cycle (72 → 78) in both persist modes while thread counts stayed flat; the
+cause is not yet identified, so background persist remains opt-in.
