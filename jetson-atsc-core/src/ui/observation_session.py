@@ -287,8 +287,10 @@ class ObservationSession:
         if (getattr(self,"persist_mode","inline")=="background" and self.applied_state=="running" and
                 not self.stopping.is_set() and not self.storage_suspended):
             with self.persist_condition:
+                if self.persist_pending or self.persist_inflight:
+                    self.persist_coalesced_requests+=1;self.last_persisted=self.engine.time
+                    return
                 self.persist_background_requests+=1
-                if self.persist_pending:self.persist_coalesced_requests+=1
                 self.persist_pending=True;self.last_persisted=self.engine.time
                 self.persist_condition.notify()
         elif self.persist(wait=False) is not None:self.last_persisted=self.engine.time

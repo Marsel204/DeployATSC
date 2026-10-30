@@ -43,7 +43,7 @@ def test_mode_validation_and_api_default(video_factory,tmp_path):
         with pytest.raises(ValueError,match='Persist mode'):ObservationSession.preflight(data,tmp_path,FakeDetector,FakeANFIS)
 
 
-def test_coalesces_one_commit_after_inflight_and_preserves_order(video_factory,tmp_path):
+def test_coalesces_inflight_until_next_due_check_and_preserves_order(video_factory,tmp_path):
     s=make(video_factory,tmp_path);entered=threading.Event();release=threading.Event();calls=[];original=s.store.persist
     def slow(state):
         calls.append((state['snapshot_revision'],threading.current_thread().name))
@@ -56,11 +56,14 @@ def test_coalesces_one_commit_after_inflight_and_preserves_order(video_factory,t
         for _ in range(20):dirty(s);s._request_persist()
         assert len(calls)==1
         release.set();idle(s)
+        assert len(calls)==1 and not s.persist_pending
+        telemetry=s.telemetry()
+        assert telemetry['persist_background_requests']==1 and telemetry['persist_coalesced_requests']==20
+        assert telemetry['persist_background_commits']==1 and telemetry['persist_worker_errors']==0
+        # Fresh due checks, rather than an in-flight level, request later evidence.
+        s._request_persist();idle(s)
         assert len(calls)==2 and calls[0][0]<calls[1][0]
         assert all(name=='Observation-persist-'+s.run_id for _,name in calls)
-        telemetry=s.telemetry()
-        assert telemetry['persist_background_requests']==21 and telemetry['persist_coalesced_requests']==19
-        assert telemetry['persist_background_commits']==2 and telemetry['persist_worker_errors']==0
         assert s.store.read()['snapshot_revision']==s.engine.revision
     finally:release.set();s.stop()
     assert s.finalized and not s.persist_thread.is_alive()
@@ -244,10 +247,13 @@ def test_unfenced_background_saved_domain_and_predictions_equal_inline(tmp_path,
     from test_observation_storage_corrections import scripted_payload,ScriptedDetector,neutral
     from test_critical_path_golden import normalize
     monkeypatch.setattr(time,'perf_counter',lambda:100.)
-    data=scripted_payload(tmp_path,budget=1);results={}
+    data=scripted_payload(tmp_path,budget=1);results={};commits={}
     for mode in ('inline','background'):
         data['persist_mode']=mode
         s=Manual(data,tmp_path/mode,detector_factory=ScriptedDetector,anfis_factory=FakeANFIS,sysfs_root=tmp_path/'sys')
+        calls=[];original=s.store.persist
+        def record(state):calls.append(state['snapshot_revision']);return original(state)
+        s.store.persist=record
         try:
             s.state=s.applied_state='running'
             for frame in range(140):
@@ -260,5 +266,8 @@ def test_unfenced_background_saved_domain_and_predictions_equal_inline(tmp_path,
             keys=('vehicles','comparisons','summary','phase_events','observation_gaps','processed_frames','predictions')
             results[mode]=normalize(neutral({key:saved[key] for key in keys},s.run_id))
             assert saved['vehicles'] and len(saved['predictions'])==2
+            commits[mode]=len(calls)
         finally:s.stop()
     assert results['inline']==results['background']
+    print('UNFENCED_PHYSICAL_COMMITS '+json.dumps(commits))
+    assert commits['inline']>0 and 0<commits['background']<=commits['inline']*1.15,commits
