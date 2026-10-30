@@ -52,3 +52,21 @@ def get_tracking_profile(name: str) -> TrackingProfile:
     if not isinstance(name, str) or name not in TRACKING_PROFILES:
         raise ValueError('Unknown tracking profile; choose baseline or low_score')
     return TRACKING_PROFILES[name]
+
+
+def tracking_profile_provenance(component) -> dict:
+    describe = getattr(component, 'tracking_profile_provenance', None)
+    if callable(describe):
+        return describe()
+    return {'name': 'baseline', 'status': 'injected_component',
+            'tracker_yaml': {'path': None, 'sha256': None}, 'effective_thresholds': None}
+
+
+def apply_tracking_profile(component, name: str) -> dict:
+    """Preserve injected factory signatures; capability means setter plus descriptor."""
+    get_tracking_profile(name)
+    setter = getattr(component, 'set_tracking_profile', None)
+    describe = getattr(component, 'tracking_profile_provenance', None)
+    if callable(setter) and callable(describe):
+        setter(name)
+    return tracking_profile_provenance(component)

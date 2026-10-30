@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from src.experiment.calibration import legacy_system_payload
 from src.experiment.contracts import RunPolicy
 from src.experiment.predictions import PredictionConflict
+from src.perception.tracking_profiles import get_tracking_profile
 from src.ui.observation_session import ObservationManager, RuntimeConflict
 from src.ui.session_manager import manager as legacy_manager
 
@@ -106,7 +107,14 @@ class StartObservation(StrictModel):
     shared_test:bool=False
     retention_budget:int=Field(default=64,ge=1,le=4096)
     persist_mode:Literal["inline","background"]="inline"
+    tracking_profile:str="baseline"
     policy:dict[str,Any]=Field(default_factory=dict)
+
+    @field_validator("tracking_profile")
+    @classmethod
+    def valid_tracking_profile(cls,value):
+        get_tracking_profile(value)
+        return value
 
     @field_validator("policy")
     @classmethod
