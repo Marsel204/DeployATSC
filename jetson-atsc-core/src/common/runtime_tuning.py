@@ -65,6 +65,8 @@ def clocks_pinned(policies):
 
 def apply_blas_policy(environ=None,sysfs_root=None):
     global _last
+    # Nested launchers must retain the first process policy decision.
+    if environ is None and _last.reason!='not_applied':return _last
     env=os.environ if environ is None else environ
     requested=env.get('ATSC_BLAS_THREADS','auto');policies=read_cpu_policies('/sys' if sysfs_root is None else sysfs_root)
     value=None
