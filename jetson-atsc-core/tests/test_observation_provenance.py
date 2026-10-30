@@ -73,7 +73,7 @@ def test_real_session_persists_execution_media_clock_and_capture_diagnostics(tmp
     data=run_payload(video_factory);data['policy']['offset_sec']=.04
     for role in ('system','acquisition'):
         data[role].update(scale_evidence={'method':'measured_dimensions','reference':'synthetic dimensions'},binding={'reviewed':True})
-    session=ObservationSession(data,tmp_path/'runs',detector_factory=ExecutionDetector,anfis_factory=lambda *a,**kw:synthetic_anfis(10.004))
+    session=ObservationSession(data,tmp_path/'runs',detector_factory=ExecutionDetector,anfis_factory=lambda *a,**kw:synthetic_anfis(10.004),sysfs_root=tmp_path/"fake-sysfs")
     try:
         session.predict('actual-call');session.engine.predictions.await_idle()
         telemetry=session.telemetry()

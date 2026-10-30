@@ -45,12 +45,15 @@ def test_performance_history_is_bounded():
     assert len(stats.inference) <= 60
 
 
-def test_clean_preview_is_encoded_on_demand_and_tracks_latest_frame(monkeypatch):
+def test_clean_preview_is_encoded_on_demand_and_tracks_latest_frame(monkeypatch,request):
     session = ObservationSession.__new__(ObservationSession)
     session.lock = threading.RLock()
     session.jpeg_frames = {}; session.clean_frames = {}; session.clean_jpeg_cache = {}
     session.frame_times = {}; session.storage_suspended = True
     session._render = lambda role, frame, tracks: np.full_like(frame, 200)
+    session.run_id = 'clean-preview'; session.applied_state = 'paused'
+    session.preview_width = 640; session.preview_published_at = {}
+    session._start_previews(); request.addfinalizer(session._stop_previews)
     packet = type('Packet', (), {'role': 'acquisition', 'timestamp': 0.})()
     calls = []; encode = cv2.imencode
     def counted(*args, **kwargs):
@@ -58,6 +61,7 @@ def test_clean_preview_is_encoded_on_demand_and_tracks_latest_frame(monkeypatch)
         return encode(*args, **kwargs)
     monkeypatch.setattr(cv2, 'imencode', counted)
     session._publish_frame(packet, np.full((40, 40, 3), 20, np.uint8), [])
+    assert session.jpeg('acquisition')
     assert len(calls) == 1
     clean = session.jpeg('acquisition', clean=True)
     decoded = cv2.imdecode(np.frombuffer(clean, np.uint8), cv2.IMREAD_COLOR)
@@ -65,6 +69,7 @@ def test_clean_preview_is_encoded_on_demand_and_tracks_latest_frame(monkeypatch)
     assert session.jpeg('acquisition', clean=True) == clean
     assert len(calls) == 2
     session._publish_frame(packet, np.full((40, 40, 3), 90, np.uint8), [])
+    assert session.jpeg('acquisition')
     fresh = session.jpeg('acquisition', clean=True)
     assert cv2.imdecode(np.frombuffer(fresh, np.uint8), cv2.IMREAD_COLOR).mean() == pytest.approx(90, abs=1)
     assert len(calls) == 4

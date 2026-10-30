@@ -37,3 +37,55 @@ Open **http://localhost:8001**. The demo opens paused at 3 seconds with two sepa
 The demo uses **generated videos and scripted vehicle tracks**, clearly labelled on the dashboard. It exercises the normal observation engine, manual prediction, the actual deployed CPU ANFIS model, calibration, storage, history and exports. It does **not** demonstrate real YOLO detection, camera accuracy, hardware actuation, validated traffic measurements or LOS grading.
 
 Demo media, profiles and runs are isolated under `data/demo/`; the reproducible start payload is `data/demo/preset.json`. Existing experiment evidence, research, weights and camera configuration are unchanged. The normal launcher remains `scripts/launch_ui.py`. The demo detector is injected only by `launch_demo.py`; ordinary app operation is unaffected. To regenerate only the assets/preset without starting a server, use `--prepare-only`.
+
+## Real-time setup on Jetson
+
+### Validated recipe
+
+Before launching, pin clocks with `sudo jetson_clocks`. Revert with
+`sudo jetson_clocks --restore`; clock settings reset at reboot. This stage never
+changes clocks automatically. Schedutil under-clocks the bursty pipeline; an
+uncapped OpenBLAS pool can otherwise prop up clocks by spinning.
+
+Leave `ATSC_BLAS_THREADS=auto` (default) for this recipe. The launchers apply it
+**before numerical imports**, capping OpenBLAS at one thread only when every
+online CPU policy is pinned (equal
+min/max frequency or performance governor). Unknown/unpinned clocks leave BLAS
+alone. `ATSC_BLAS_THREADS=default` disables tuning; a positive integer requests
+that cap. An existing `OPENBLAS_NUM_THREADS` always wins. Restart after changes.
+Telemetry/manifest host facts record this decision; `performance_advice` explains
+unpinned clocks or uncapped BLAS, with the first advice beside Camera 2 runtime.
+
+Set top-level `"persist_mode": "background"` in the observation start payload,
+or in the preset JSON passed to `scripts/launch_demo.py --preset <path>`.
+It stays `inline` by default. Opt-in `background` coalesces
+routine commits while running, keeping disk IO off the measurement thread.
+Paused/stepped commits and HTTP persists retain their existing behavior. Stop
+waits for the worker before final persistence. A crash can lose measurements
+since the last durable commit; the existing interrupted-run recovery still applies.
+
+Measured on one Jetson Orin Nano in 15 W mode, TensorRT FP16, one clip, one
+boot, 2026-10-30. Original = `c683cdb`; optimized = `ca6ebdf`. These results
+apply only to that setup. Late frames are the share of frame-to-frame intervals
+longer than 1.25 frame slots (83 ms at 15 FPS, 125 ms at 10 FPS); playback is
+source time per wall-clock time (1.0× is real time). Medians of three 15 FPS
+runs per row; CPU is active CPU-s per frame:
+
+| Configuration | Late frames | Playback | FPS | CPU-s/frame |
+| --- | ---: | ---: | ---: | ---: |
+| Original | 24.0% | 0.875× | 13.12 | 0.348 |
+| Original + pinned clocks + BLAS 1 | 11.8% | 0.948× | 14.21 | 0.048 |
+| Optimized + pinned clocks + auto BLAS, inline persist | 7.1% | 0.986× | 14.79 | 0.045 |
+| Final recipe: optimized + pinned clocks + auto BLAS, background persist | 0.083% | 0.994× | 14.91 | 0.045 |
+
+Other checks, two runs per arm (medians unless individual results are shown):
+
+| Check | Original | Final recipe |
+| --- | ---: | ---: |
+| 15 FPS, two dashboard streams: late frames | 34.8% (26.0–43.6%) | 0.17% |
+| 10 FPS: late frames | 19.3% | 0.13% |
+| Native app, requires ≥13.5 FPS | 0/2 passed (6.2, 12.7 FPS) | 2/2 passed (both 14.93 FPS) |
+
+Known limit: in a four-cycle start/stop soak, open file descriptors rose by two
+per cycle (72 → 78) in both persist modes while thread counts stayed flat; the
+cause is not yet identified, so background persist remains opt-in.

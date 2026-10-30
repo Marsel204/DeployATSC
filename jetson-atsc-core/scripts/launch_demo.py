@@ -2,6 +2,11 @@
 """Isolated feature demos: native real-footage presets or labelled generated scenes."""
 from __future__ import annotations
 
+# Direct script invocation needs the project root before the first application import.
+__import__("sys").path.insert(0, __import__("os").path.dirname(__import__("os").path.dirname(__import__("os").path.abspath(__file__))))
+from src.common.runtime_tuning import apply_blas_policy
+apply_blas_policy()
+
 import argparse
 from functools import partial
 import json

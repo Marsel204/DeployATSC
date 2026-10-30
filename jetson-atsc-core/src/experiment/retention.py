@@ -5,7 +5,7 @@ quantiles become unavailable once samples leave memory; the reader computes
 exact quantiles for a pinned generation on request.
 """
 from collections import deque
-from copy import deepcopy
+from src.common.json_data import clone as deepcopy
 from src.experiment.archive_index import ArchiveIndex
 from src.experiment.summary import summarize
 
@@ -203,10 +203,12 @@ class Retention:
                     population['partial']+=bool(final['left_censored'] or final['right_censored'] or final['quality_flags'])
                     if final['crossed_stop_line'] and final['crossing_cycle']==cycle_id:
                         population['crossings'].append(final['completed_at'])
+                engine.waits.work-=len(row['intervals'])+int(row['completed'])
                 del engine.waits.records[identity]
             else:
                 progress=self.progress.setdefault(identity,{'archived_intervals':0,'archived_cycles':0})
                 progress['archived_intervals']+=change['intervals'];progress['archived_cycles']+=len(change['cycles'])
+                engine.waits.work-=change['intervals']
                 del row['intervals'][:change['intervals']]
                 for cycle in change['cycles']:
                     row['wait_by_cycle'].pop(cycle,None)
