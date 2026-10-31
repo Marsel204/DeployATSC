@@ -91,30 +91,80 @@ interior breaks. This audit is not labelled vehicle recall or field validation.
 Longer buffers, longer row timeouts, higher birth thresholds and other trackers
 were deliberately excluded.
 
-Stage B-2 attempted G2 using the feature-branch product `DetectorTracker`, with
-the profile argument omitted (default `baseline`), on the full P15 frame path
-against the saved A1 live output. The memory guard aborted after 75.769491 s:
-peak sampled unit RSS was 1,483,497,472 bytes and minimum MemAvailable was
-1,179,385,856 bytes, below the required 1.2 GB. An interrupted temporary output
-retained a recoverable prefix of 673 of 1,200 frames: all 6,385 instances had
-zero box error, identical numeric IDs and stable flags, and exact class and
-confidence agreement (6,385/6,385 each; ID agreement 1.0). This prefix does not
-pass the full-clip G2 gate; complete-clip agreement remains unmeasured.
+Stage B-2's memory-aborted G2 retained only a matching 673/1,200-frame prefix
+(6,385 instances). The board subsequently stopped without a recorded shutdown,
+OOM or panic. That prefix was not a full-clip pass. Stage B-3 completed the
+following validation on 31 October, on boot
+`a09f04b1-f75d-4c7d-a748-e333085af3cc`, without the owner's demo running.
+Saved A1/live and CPU-replay references from the earlier boot were read-only;
+cross-boot fidelity comparisons were explicitly allowed for this stage.
 
-G3a (product `low_score` on P15 versus the saved offline L1 replay) and G3b
-(the same on JH15, frame step 2, resized to 960×540 through the harness registry)
-were not run. The session was interrupted during the recovery wait; on resumption
-the board had restarted, preventing further runs under the saved-trace protocol. Instances
-compared, box error, ID agreement, and class/confidence agreement for both G3
-units are unmeasured. G2/G3 product-profile live fidelity therefore remains
-unverified.
+| Live product gate | Frames | Instances | Maximum box error px | ID agreement | Exact class/confidence agreement |
+|---|---:|---:|---:|---:|---:|
+| G2 default profile vs saved A1 live P15 | 1,200 | 10,383 | 0 | 10,383/10,383 numeric IDs | 10,383/10,383 each |
+| G3a low_score P15 vs offline L1 | 1,200 | 11,079 | 0 | 11,073/11,079 partition (99.945843%) | 11,079/11,079 each |
+| G3b low_score JH15 vs offline L1 | 1,610 | 16,241 | 0 | 16,241/16,241 partition | 16,241/16,241 each |
 
-Other validation still unverified:
+All three meet the registered criteria: boxes within 1e-3 px after Ultralytics
+clipping, identical numeric IDs for G2, and ID-partition agreement >=99.5% for
+G3. G2 omitted the profile argument. JH15 used frame step 2 and resize 960×540
+through the registered calibration path. Timestamps and source sequences agree;
+per-instance stable flags have zero mismatches. G3a's six matching unstable-ID
+instances remain in the denominator and are excluded from the ID numerator;
+every seven-column vehicle row, including those six, matches exactly.
 
-- G5 replay-session smoke and export through the real ObservationSession path.
-- Full-suite parity (targeted parity passed; the full run was incomplete).
-- Stage C board timing.
-- Field footage.
+There is a retained G3a harness-summary discrepancy on **empty frames**:
+frame-level `stable` booleans differ on 74 frames for saved-vs-product,
+80 for same-boot raw-vs-product, and 6 for saved-vs-raw. The product harness uses
+`all([])` and the original raw unit masks unconfirmed tracks; these empty
+summaries do not describe any vehicle instance. A conservative same-boot check
+regenerated the direct Ultralytics L1/P15 reference using the original raw-unit
+call/conversion. Comparison against it also passed: 11,079 instances, 0px,
+11,073/11,079 partition, exact class/confidence and zero per-instance stable
+differences. Both comparisons and all empty-summary differences are retained;
+no acceptance tolerance or comparator predicate was changed.
+
+G5a and G5b ran the real `ObservationSession` to P15 EOF using the preset's
+unchanged geometry, `step_mode=false`, and isolated temporary storage. G5a
+requested `low_score`; G5b omitted the profile field. Both processed 1,200
+acquisition frames, finalized, released resources, built valid ZIP exports and
+reopened them successfully. The vehicle tables contained **407 low_score /
+403 baseline rows**; exports were **86,040 / 83,637 bytes**. Their manifests
+stayed immutable and agreed with execution provenance on name, requested choice,
+applied roles `['acquisition']`, tracker YAML path/SHA256 and effective thresholds.
+Low-score acquisition conf was 0.10; system/predict conf stayed 0.28. Default
+acquisition/system conf was 0.28. System inference calls were zero in both runs.
+G5 did not separately measure box/ID/class/confidence fidelity.
+
+| Session telemetry (indicative only) | Inference mean ms | Inference median ms | Steady playback FPS | Playback factor |
+|---|---:|---:|---:|---:|
+| low_score | 43.930906 | 43.340558 | 14.31 | 0.95 |
+| default baseline | 43.317405 | 42.762156 | 14.38 | 0.96 |
+
+These figures use the sessions' own timings: mean/median over all 1,200
+acquisition calls, including cold start and velocity update; steady FPS/factor
+are medians of active recent-five-second telemetry at source times 10–70s
+(61 low_score / 62 baseline samples). Late-frame share is not exposed.
+Clocks were **unpinned**, with CPU `schedutil` and GPU `performance` governors.
+The runner applied `nice -n 10` both to supervisors and their worker commands,
+giving workers effective niceness **19** through additive inheritance. Runtime
+numbers are indicative at that priority, from one serial run per profile on
+one boot; they do not establish profile overhead or real-time qualification.
+All six GPU units, including the raw-reference diagnostic, completed under
+four minutes without a memory/RSS abort or new relevant kernel error.
+
+Full **product-suite parity passed** as the final validation step:
+**638 passed / the same 75 inherited failures / 1 skipped**, in **388.965863s**.
+All 28 added tests passed; failing identities exactly equal the saved baseline,
+with zero new or resolved failures. All 70 product test files ran: 66 nonbrowser,
+then four browser files as a separate final pass. The historical 616-pass Stage
+4c command additionally included six external review-only tests; those six
+were not included here. Product-only baseline passes are 610, plus 28 added
+cases gives 638. This is parity with an inherited failing suite, not a green
+suite. Quiet-start and the 20-minute/memory watchdog conditions were met.
+
+Still unverified: **Stage C authoritative board timing under pinned clocks and
+independent field footage**. Both remain with the owner.
 
 ## Evidence binding
 
