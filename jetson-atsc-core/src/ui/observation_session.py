@@ -36,6 +36,7 @@ from src.experiment.predictions import PredictionConflict
 from src.experiment.retention import validate_budget
 from src.experiment.sources import ReplayPair, LivePair
 from src.perception.detector_tracker import DetectorTracker
+from src.perception.tracking_profiles import get_tracking_profile, apply_tracking_profile, tracking_profile_provenance
 from src.perception.observation_model import model_for_factory
 from src.perception.lens_rectifier import LensRectifier
 
@@ -68,6 +69,7 @@ class ObservationSession:
     @staticmethod
     def preflight(payload,storage_root,detector_factory=None,anfis_factory=None):
         """Validate static inputs without opening video devices or allocating models."""
+        get_tracking_profile(payload.get("tracking_profile","baseline"))
         RunPolicy(**payload.get("policy",{}))
         validate_budget(payload.get("retention_budget",64))
         if payload.get("persist_mode","inline") not in ("inline","background"):raise ValueError("Persist mode must be inline or background")
@@ -156,6 +158,13 @@ class ObservationSession:
                 self.detectors[role]=detector_factory(str(model),conf_threshold=.28,imgsz=640)
             for role in self.detectors:
                 self.detectors[role].max_gap_sec=self.policy.max_gap_sec
+            requested_profile=payload.get("tracking_profile","baseline")
+            profile=apply_tracking_profile(self.detectors["acquisition"],requested_profile)
+            self.tracking_profile={**profile,"requested":requested_profile,
+                "applied_roles":["acquisition"] if profile["status"]=="applied" else []}
+            # Bind once at run creation; resets/sampling/persistence never rewrite it.
+            self.detector_tracking_profiles={role:tracking_profile_provenance(detector)
+                for role,detector in self.detectors.items()}
             self.decision=ATSCDecisionEngine(anfis_factory(str(anfis),prefer_cuda=False))
             acquisition=self.calibrations["acquisition"]
             self.engine=ObservationEngine(self.run_id,self.policy,acquisition.roi,acquisition.side,self.decision.evaluate,acquisition.lamp_rois,
@@ -175,6 +184,7 @@ class ObservationSession:
                 "model_hashes_scope":"configured_files",
                 "model_hashes":{p.name:file_digest(str(p),p.stat().st_mtime_ns) for p in {model,ROOT/"models/Final.pt",anfis}},
                 "detector_selection":self.model_selection,
+                "tracking_profile":self.tracking_profile,
                 "package_versions":versions, "execution":self.execution_provenance(),
                 "media_identity":self.pair.media_identity() if hasattr(self.pair,"media_identity") else {"state":"unknown"},
                 "clock_provenance":self.clock_provenance()}
@@ -736,11 +746,13 @@ class ObservationSession:
                 "precision_scope":"input_tensor",
                 "engine_build_precision":self.model_selection.get("engine_build_precision") if getattr(detector,"is_tensorrt",False) else None,
                 "requested_settings":{key:getattr(detector,key,None) for key in ("conf_threshold","iou_threshold","imgsz","max_gap_sec")},
+                "tracking_profile":getattr(self,"detector_tracking_profiles",{}).get(role) or tracking_profile_provenance(detector),
                 "effective_settings":settings}
         anfis=getattr(self.decision,"anfis",None)
         session=getattr(anfis,"session",None)
         providers=session.get_providers() if callable(getattr(session,"get_providers",None)) else ([anfis.active_provider] if getattr(anfis,"active_provider",None) else [])
-        result=public_data({"host":host_provenance(getattr(self,"sysfs_root","/sys")),"detectors":detectors,"anfis":{"component":type(anfis).__name__,
+        result=public_data({"host":host_provenance(getattr(self,"sysfs_root","/sys")),"detectors":detectors,
+            "tracking_profile":getattr(self,"tracking_profile",None),"anfis":{"component":type(anfis).__name__,
             "providers":providers,"requested_prefer_cuda":False,"model":artifact(anfis),
             "min_green_sec":getattr(anfis,"min_green",None),"max_green_sec":getattr(anfis,"max_green",None),
             "model_domain":"unknown"}})
