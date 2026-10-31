@@ -43,12 +43,14 @@ stays 1.0 s under the default RunPolicy; velocity gaps, epoch resets, row accoun
 signal phases and prediction/storage behavior are unchanged. Missing time remains
 unknown; no stopped/red time is imputed and no identity stitching is added.
 
-## Evidence and limits (30 October 2026)
+## Evidence and limits (30–31 October 2026)
 
 These are CPU-replica results using cached real detections and the product's
 velocity/VehicleWaits code. The replica was checked against live ByteTrack output.
 Rows are assigned to halves by first observation and retain their full histories;
 these totals are vehicle-seconds, not clip duration or independently labelled truth.
+The profile was chosen after seeing the sweep results and confirmed on windows
+not used to pick it; this was a post-hoc choice, not a pre-registered profile.
 
 | Window | Unknown seconds B → low_score | Observed stopped seconds B → low_score | Valid-time fraction B → low_score |
 |---|---:|---:|---:|
@@ -62,22 +64,57 @@ night-camera decision windows without reducing valid-time fraction or stopped
 seconds; zero persistent detection chains were lost on JH15/second, JH05, V3 and
 V6; jump counts stayed within baseline +2 on every window. Indicative elapsed
 tracker medians stayed within baseline +2 ms with one BLAS thread.
+Independent review by Sonnet 5.5 re-derived these confirmatory numbers from the
+raw replay rows. Across JH15/all, unknown seconds fell 125.7 → 65.5, observed
+stopped seconds rose 411.5 → 492.9, and valid-time fraction rose 0.862 → 0.933.
 
-This does not establish generally better identity continuity: JH15/second rows/min
-stayed 99.5 and interior breaks/min rose 135.3 → 145.4. Handheld evidence is
+The profile reduces dropouts and unknown time but does **not** reduce rows or ID
+churn: JH15/all had 156 → 155 rows, JH15/second rows/min stayed 99.5, and interior
+breaks/min rose 135.3 → 145.4. Handheld evidence is
 neutral-to-unknown: P15 unknown time rose 5.5%; P05 persistent-chain coverage fell
 0.879 → 0.867 (two lost chains). No global default change is justified. V3/V6 are
 short daytime smoke clips without physical calibration. JH05 is a lower-FPS view,
 not independent footage. Jackson Hole is one sparse night scene, and neither it
 nor handheld Pasteur is the owner's intersection. Detection-chain coverage is a
-proxy, not labelled vehicle recall. A blind new-link audit requires separate
-reviewer labels; no identity-precision or field-throughput claim is made here.
+proxy, not labelled vehicle recall.
+
+Sonnet's independent blind audit covered all 24 new links on the fixed clips
+(JH15 16, JH05 4, V6 4; V3 none). No wrong link was found: strict labels were
+19 same / 0 different / 5 unsure (20.8% unsure); the adopted same-object rule
+gave 20 / 0 / 4 (16.7% unsure, precision 20/20 among decidable links). The
+one-label difference counts two boxes on the same traffic light as the same
+object, as required for a false-merge audit. G6 is satisfied in substance, with
+4–5 links still uncertain depending on that convention. L1 also lost 32 baseline
+continuations versus 24 new links, consistent with unchanged rows and increased
+interior breaks. This audit is not labelled vehicle recall or field validation.
 
 Longer buffers, longer row timeouts, higher birth thresholds and other trackers
-were deliberately excluded. Product-profile live fidelity and replay/export smoke
-remain unverified: local model startup exceeded the experiment's process-memory
-ceiling before a full live pass could finish. Field footage and authoritative
-board timing also remain separate validation work.
+were deliberately excluded.
+
+Stage B-2 attempted G2 using the feature-branch product `DetectorTracker`, with
+the profile argument omitted (default `baseline`), on the full P15 frame path
+against the saved A1 live output. The memory guard aborted after 75.769491 s:
+peak sampled unit RSS was 1,483,497,472 bytes and minimum MemAvailable was
+1,179,385,856 bytes, below the required 1.2 GB. An interrupted temporary output
+retained a recoverable prefix of 673 of 1,200 frames: all 6,385 instances had
+zero box error, identical numeric IDs and stable flags, and exact class and
+confidence agreement (6,385/6,385 each; ID agreement 1.0). This prefix does not
+pass the full-clip G2 gate; complete-clip agreement remains unmeasured.
+
+G3a (product `low_score` on P15 versus the saved offline L1 replay) and G3b
+(the same on JH15, frame step 2, resized to 960×540 through the harness registry)
+were not run. The session was interrupted during the recovery wait; on resumption
+the board had restarted, preventing further runs under the saved-trace protocol. Instances
+compared, box error, ID agreement, and class/confidence agreement for both G3
+units are unmeasured. G2/G3 product-profile live fidelity therefore remains
+unverified.
+
+Other validation still unverified:
+
+- G5 replay-session smoke and export through the real ObservationSession path.
+- Full-suite parity (targeted parity passed; the full run was incomplete).
+- Stage C board timing.
+- Field footage.
 
 ## Evidence binding
 
