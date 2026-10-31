@@ -134,7 +134,7 @@ class CameraCalibration:
         self.lamp_rois = {}
         self.stop_line = None
         self.crossing_direction = int(data.get("crossing_direction", 1))
-        if self.role == "acquisition":
+        if self.role == "acquisition" or data.get('signal_roi') is not None:
             self.roi = validate_roi(data.get("signal_roi"), self.size)
             for phase, region in data.get("lamp_rois", {}).items():
                 if phase not in ("RED", "YELLOW", "GREEN"): raise ValueError("Unknown lamp region")
@@ -143,6 +143,7 @@ class CameraCalibration:
                         self.roi["ymin"] <= region["ymin"] < region["ymax"] <= self.roi["ymax"]):
                     raise ValueError("Lamp regions must be inside the signal-head box")
                 self.lamp_rois[phase] = region
+        if self.role == 'acquisition':
             self.stop_line = points("stop_line", 2)
             if np.linalg.norm(np.subtract(*self.stop_line)) < 1: raise ValueError("Stop line has zero length")
             if self.crossing_direction not in (-1, 1): raise ValueError("Crossing direction must be -1 or 1")

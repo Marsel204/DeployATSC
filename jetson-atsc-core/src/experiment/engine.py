@@ -8,14 +8,30 @@ from src.perception.signal_phase_observer import SignalPhaseObserver
 from src.experiment.predictions import PredictionBook, QUALIFICATION_POLICY, LEGACY_QUALIFICATION_POLICY, qualification
 from src.experiment.vehicle_waits import VehicleWaits
 from src.experiment.summary import summarize
+from src.experiment.identity_contracts import IdentityPolicy
+from src.experiment.vehicle_identity import VehicleIdentityRegistry
+from src.experiment.persistent_vehicle_waits import PersistentVehicleWaits
+from src.experiment.wait_savings import SchedulePolicy
+from src.experiment.schedule_episodes import ScheduleEpisodes
 
 
 class ObservationEngine:
-    def __init__(self, run_id, policy, roi, side, evaluate, lamp_rois=None, *, scale_evidence=None):
+    def __init__(self, run_id, policy, roi, side, evaluate, lamp_rois=None, *, scale_evidence=None, identity_policy=None,
+                 schedule_policy=None, system_roi=None, system_lamp_rois=None):
         self.run_id = run_id; self.policy = policy
         self.lock = threading.RLock(); self.time = 0.; self.closed = False
         self.phase = SignalPhaseObserver(roi, policy, lamp_rois)
-        self.waits = VehicleWaits(run_id, policy, side)
+        self.identity_policy = identity_policy or IdentityPolicy()
+        self.identities = VehicleIdentityRegistry(self.identity_policy, policy.max_gap_sec,
+            ground_trusted=scale_evidence is None or scale_evidence.get('acquisition',{}).get('state')=='verified') if self.identity_policy.mode == 'persistent_v1' else None
+        self.waits = (PersistentVehicleWaits(run_id, policy, side, self.identity_policy)
+            if self.identities else VehicleWaits(run_id, policy, side))
+        self.identity_degradation = None
+        self.schedule_policy=schedule_policy or SchedulePolicy()
+        if self.schedule_policy.enabled and (not self.identities or system_roi is None):
+            raise ValueError('A/B comparison requires persistent identities and an A signal ROI')
+        self.system_phase=SignalPhaseObserver(system_roi,policy,system_lamp_rois) if self.schedule_policy.enabled else None
+        self.schedule=ScheduleEpisodes(run_id,self.schedule_policy,evaluate,lambda:self.time) if self.schedule_policy.enabled else None
         self.predictions = PredictionBook(run_id, policy, evaluate, lambda:self.time, scale_evidence=scale_evidence)
         self.system_snapshot = None
         self.processed = {"system":0, "acquisition":0}
@@ -42,14 +58,48 @@ class ObservationEngine:
             self.revision += 1
             return True
 
-    def observe_acquisition(self, frame, timestamp, sequence, observations, *, generation=None):
+    def observe_a(self, frame, timestamp, sequence, analyze, frame_evidence, *, generation=None):
+        with self.lock:
+            if self.closed or self.schedule is None or (generation is not None and generation!=self.generation):return False
+            if self.system_phase.last_time is not None and timestamp-self.system_phase.last_time>self.policy.max_gap_sec:
+                self.invalidate_a('a_observation_gap',self.system_phase.last_time)
+            result=self.system_phase.observe(frame,timestamp,sequence)
+            if result['duplicate']:return False
+            self.schedule.observe_a(result['transition'],frame_evidence,analyze)
+            self.system_phase.events[:]=self.system_phase.events[-32:]
+            self.system_phase.cycles[:]=self.system_phase.cycles[-8:]
+            self._protect_schedule()
+            return True
+
+    def invalidate_a(self,reason,timestamp=None):
+        with self.lock:
+            if self.closed or self.schedule is None:return
+            t=self.system_phase.last_time if timestamp is None else timestamp
+            self.schedule.invalidate(reason)
+            self.system_phase.invalidate(0. if t is None else t,reason)
+            self._protect_schedule()
+            self.revision+=1
+
+    def _protect_schedule(self):
+        if self.schedule:
+            cutoff=self.schedule.protected_since()
+            for active in self.waits.active.values():active['schedule_candidate']=cutoff
+
+    def observe_acquisition(self, frame, timestamp, sequence, observations, *, generation=None,
+                            identity_evidence=None, camera_stable=True, gap_evidence_healthy=True):
         with self.lock:
             if self.closed or (generation is not None and generation != self.generation):return
             # Reject sequence retries before committing the clock or continuity gaps.
             if self.phase.last_sequence is not None and sequence <= self.phase.last_sequence:return
+            if self.phase.last_time is not None and timestamp <= self.phase.last_time:return
+            if self.identities and not camera_stable:
+                if self.identity_degradation != 'camera_displacement':self.invalidate('camera_displacement', timestamp)
+                self.identity_degradation = 'camera_displacement'
+                return
             if (self.phase.last_time is not None and sequence != self.phase.last_sequence and
                     timestamp-self.phase.last_time > self.policy.max_gap_sec):
-                self.predictions.invalidate("observation_gap", self.phase.last_time)
+                if self.identities:self.invalidate("observation_gap", self.phase.last_time)
+                else:self.predictions.invalidate("observation_gap", self.phase.last_time)
             result = self.phase.observe(frame, timestamp, sequence)
             if result["duplicate"]: return
             self.time = max(self.time, timestamp)
@@ -62,6 +112,20 @@ class ObservationEngine:
                 self.predictions.on_green(event["timestamp"], self.phase.cycle_id)
             measured = result["measurement_phase"]
             cycle = None if measured == "UNKNOWN" else max(1,self.phase.cycle_id + (1 if measured == "RED" else 0))
+            if self.identities:
+                if identity_evidence is None:raise ValueError('Persistent identity evidence is required')
+                resolution = self.identities.resolve(tuple(identity_evidence), timestamp, sequence)
+                self.waits.observe_resolved(resolution.vehicles, measured, timestamp, sequence, cycle,
+                    evidence_healthy=gap_evidence_healthy,ambiguous_ids=resolution.ambiguous_logical_ids)
+                if self.schedule:
+                    self.schedule.observe_b(measured,timestamp,cycle,event)
+                    self.schedule.finalize(self.waits.records.values(),self.waits.active.values())
+                    self._protect_schedule()
+                self.identity_degradation = 'identity_capacity_exhausted' if resolution.capacity_exhausted else None
+                for identity,state in self.waits.active.items():
+                    row = state['row']
+                    if row['completed']:self.identities.retire(*identity,crossed=row['crossed_stop_line'])
+                return resolution
             self.waits.observe(observations, measured, timestamp, sequence, cycle)
 
     def predict(self, request_id, timestamp=None, *, provenance=None, frame=None, analyze=None):
@@ -85,7 +149,11 @@ class ObservationEngine:
             t = self.time if timestamp is None else timestamp
             self.gaps.append({"timestamp":t,"reason":reason})
             self.phase.invalidate(t, reason)
-            self.waits.invalidate(t, reason)
+            self.waits.invalidate(self.waits.last_time if self.identities and self.waits.last_time is not None else t, reason)
+            if self.identities:self.identities.invalidate(reason)
+            if self.schedule:
+                self.schedule.invalidate(reason)
+                self.system_phase.invalidate(t,reason)
             self.predictions.invalidate(reason, t)
             self.revision += 1
 
@@ -142,6 +210,9 @@ class ObservationEngine:
 
     def snapshot(self, offset=0, limit=100, evidence=False):
         with self.lock:
+            if self.schedule:
+                self.schedule.finalize(self.waits.records.values(),self.waits.active.values())
+                self._protect_schedule()
             view = self.predictions.view()
             key=(self.revision,view["revision"],self.retention.acknowledged if self.retention else None,evidence,offset,limit,view["rows"])
             if self._summary_cache is None or self._summary_cache[0]!=key:
@@ -172,6 +243,23 @@ class ObservationEngine:
                 "summary":summary,"los":summary["los"]}
             if evidence:
                 result.update(policy=asdict(self.policy), phase_events=deepcopy(self.phase.events), observation_gaps=deepcopy(self.gaps))
+            if self.identities:
+                result['vehicle_identity'] = {**asdict(self.identity_policy), 'degradation': self.identity_degradation,
+                    'logical_generation': self.identities.generation,
+                    'association_space':'ground_and_image' if self.identities.ground_trusted else 'image'}
+            if self.schedule:
+                schedule=self.schedule.view()
+                result.update(schedule_comparison={**schedule['policy'],'busy':schedule['busy'],
+                    'rejected_episode_count':self.schedule.rejected_episode_count},
+                    schedule_episodes=schedule['episodes'],vehicle_savings=schedule['vehicle_savings'] if evidence else schedule['vehicle_savings'][-100:],
+                    a_phase=self.system_phase.status())
+                result['snapshot_revision']+=schedule['revision']
+                analysed=[r for r in schedule['episodes'] if r.get('snapshot') is not None]
+                if analysed:
+                    last=analysed[-1]
+                    result['metrics']=deepcopy(last['snapshot'])
+                    result['camera1_last_analysis']={'request_id':last['episode_id'],'frame':deepcopy(last['camera1_frame']),
+                        'snapshot':deepcopy(last['snapshot']),'completed_at':last['completed_at']}
             if self.retention:
                 result["history"]={key:{"total":self.retention.archived_counts[key]+len(result.get(key,[])),
                     "retained":len(result.get(key,[])),"historical_endpoint":"/api/observation/history/"+key}
@@ -184,6 +272,7 @@ class ObservationEngine:
         from src.experiment.retention import Retention
         with self.lock:
             self.retention=Retention(budget,directory)
+            if self.identities:self.retention.identity_scheme='persistent_v1'
             self._summary_cache=None
             self.waits.archived=self.retention.identity
 
@@ -191,6 +280,17 @@ class ObservationEngine:
         with self.lock:
             if self.retention is None or self.closed:return False
             work=self.waits.work
+            if self.identities:
+                from src.experiment.retention import revisable_times
+                states={s['row']['vehicle_id']:s for s in self.waits.active.values()}
+                work=0
+                protected=self.schedule.protected_since() if self.schedule else None
+                for key,row in self.waits.records.items():
+                    if row['completed'] and protected is None:work+=len(row['intervals'])+1;continue
+                    candidates=revisable_times(states.get(key,{}))
+                    cutoff=min(candidates) if candidates else float('inf')
+                    work+=sum(i['end']<=cutoff+1e-8 for i in row['intervals'])
+            if self.schedule:work+=max(0,len(self.schedule.records)-min(64,self.retention.budget))
             work+=max(0,len(self.phase.events)-self.retention.budget)+max(0,len(self.gaps)-self.retention.budget)
             return work>=self.retention.budget
 
@@ -209,7 +309,10 @@ class ObservationEngine:
         with self.lock:
             if self.closed:return
             self.phase.invalidate(self.time, reason)
-            self.waits.close(self.time, reason)
+            self.waits.close(self.waits.last_time if self.identities and self.waits.last_time is not None else self.time, reason)
+            if self.schedule:
+                self.schedule.finalize(self.waits.records.values(),self.waits.active.values())
+                self.schedule.close(reason)
             self.closed = True
             self.generation += 1
             self.revision += 1

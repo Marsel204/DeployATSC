@@ -10,7 +10,7 @@ def _percentile(values, p):
     return round(values[lo]+(values[hi]-values[lo])*(index-lo),6)
 
 
-def summarize(rows,comparisons,method,predictions=()):
+def summarize(rows,comparisons,method,predictions=(),*,identity_scheme=None):
     rows=list(rows)
     comparisons=list(comparisons)
     predictions=list(predictions)
@@ -20,7 +20,7 @@ def summarize(rows,comparisons,method,predictions=()):
     finished=[r.get("red_wait_sec",0.) for r in complete]
     timing_count=sum(bool(c.get("eligible")) for c in comparisons)
     qualified_count=sum(bool(c.get("qualified")) for c in comparisons)
-    return {"operation":"observation", "observed_vehicle_count":len(rows),
+    result = {"operation":"observation", "observed_vehicle_count":len(rows),
         "complete_vehicle_count":len(complete),"partial_vehicle_count":len(rows)-len(complete),
         "observed_mean_red_wait_sec":round(statistics.mean(values),6) if values else None,
         "observed_median_red_wait_sec":_percentile(values,.5),
@@ -46,3 +46,7 @@ def summarize(rows,comparisons,method,predictions=()):
         "sample_definition":"All observed acquisition tracks; incomplete waits are lower bounds. Complete journeys reported separately.",
         "los":{"method":method,"grade":None,
             "reason":"LOS ungraded: a selected control-delay methodology, edition and sufficient measurement coverage are required"}}
+    if identity_scheme == 'persistent_v1' or any(r.get('identity_scheme') == 'persistent_v1' for r in rows):
+        from src.experiment.identity_summary import identity_statistics, identity_summary
+        result.update(identity_summary(identity_statistics(rows)))
+    return result

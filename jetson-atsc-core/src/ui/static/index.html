@@ -19,7 +19,14 @@
     <div><label for="associationLimit">Track association timeout (seconds)</label><input id="associationLimit" type="number" value="1" min="0.1" step="0.1"></div>
     <div><label for="phaseDebounce">Signal confirmation (frames)</label><input id="phaseDebounce" type="number" value="3" min="1" step="1"></div>
     <div><label for="phaseRatio">Signal color area ratio</label><input id="phaseRatio" type="number" value="0.08" min="0.001" max="1" step="0.01"></div>
+    <div><label for="vehicleIdentityMode">Vehicle IDs and timers</label><select id="vehicleIdentityMode"><option value="native">Native tracker IDs</option><option value="persistent_v1">Persistent vehicle IDs</option></select></div>
+    <div><label for="identityRetention">Remember hidden vehicles (seconds)</label><input id="identityRetention" type="number" value="10" min="0.1" max="60" step="0.1"></div>
+    <div><label for="estimateGap">Maximum estimated hidden gap (seconds)</label><input id="estimateGap" type="number" value="5" min="0" max="30" step="0.1"></div>
+    <div><label><input id="scheduleEnabled" type="checkbox"> Compare B waits using A’s recommended green</label></div>
+    <div><label for="scheduleAMovement">Movement A</label><input id="scheduleAMovement" value="approach-A" maxlength="100"></div>
+    <div><label><input id="unchangedClearance" type="checkbox"> A is followed by B; assume unchanged transition and clearance time</label></div>
   </div><p class="settings-note">Pilot thresholds require validation against annotated footage. Acquisition time = system time + offset. LOS remains ungraded until the study’s control-delay method and coverage are established.</p><p id="qualificationPolicy" class="settings-note">Qualification policy unknown · scale unverified. Controlled engineering evaluation; field accuracy remains unvalidated.</p></details>
+  <p id="persistentIdentityStatus" class="settings-note" hidden></p>
   <section class="cameras" aria-label="Independent camera views">
     <article class="camera-card" data-camera="system">
       <div class="camera-head"><div class="camera-title"><span class="camera-number">1</span><div><h3>System camera</h3><p class="subtitle">Perspective correction · YOLO · ANFIS</p></div></div><span class="badge road">Prediction inputs</span></div>
@@ -70,7 +77,8 @@
   <section class="card summary-pad" id="savedRunsCard" aria-label="Saved evidence browser">
     <h3>Saved runs · durable evidence</h3><p class="subtitle">Current-run controls, streams and summaries remain above. Browse saved evidence here; reading does not resume or recover a run. Exact waits include partial lower bounds.</p>
     <div class="controls"><select id="savedRuns" aria-label="Saved runs"></select><button id="refreshRuns">Refresh list</button><button id="browseSaved" disabled>Reload selected evidence</button><button id="exportSaved" disabled>Export selected run</button></div><p id="savedRunStatus">No saved runs listed.</p>
-    <label for="savedKind">Saved evidence table</label><select id="savedKind"><option value="vehicles">Vehicles</option><option value="predictions">Predictions</option><option value="comparisons">Cycle comparisons</option></select>
+    <label for="savedKind">Saved evidence table</label><select id="savedKind"><option value="vehicles">Vehicles</option><option value="predictions">Predictions</option><option value="comparisons">Cycle comparisons</option><option value="schedule_episodes">A/B signal episodes</option><option value="vehicle_savings">Per-vehicle potential savings</option></select>
+    <label for="savedQuantileMetric">Wait distribution</label><select id="savedQuantileMetric"><option value="confirmed">Confirmed wait</option><option value="best_estimate">Confirmed + accepted estimated wait</option></select>
     <p id="viewedRunStatus" role="status" aria-live="polite">No saved evidence selected.</p>
     <div class="table-wrap"><table id="savedEvidence"><thead></thead><tbody></tbody></table></div>
     <div class="pager"><span id="savedPage">No page loaded.</span><div><button id="previousSaved" disabled>Previous</button><button id="nextSaved" disabled>Next</button></div></div>
@@ -78,6 +86,7 @@
   </section>
   <p id="runtimeStatus" class="subtitle" style="margin-top:18px">No active observation run.</p>
   <p id="performanceAdvice" role="note" style="color:#c58a12;font-size:.85rem" hidden></p>
+<section id="scheduleSavingsPanel" class="card table-card" hidden><div class="section-head"><div><h3>Per-vehicle potential red-wait saving</h3><p id="scheduleStatus">Waiting for paired A/B phases.</p><p>Schedule estimate assuming unchanged clearance. Physical queue discharge is not simulated. Hidden-time contributions remain estimated.</p></div></div><div class="table-wrap"><table id="scheduleSavings"><thead><tr><th>Vehicle</th><th>A episode / B cycle</th><th>Observed red stop</th><th>Estimated hidden stop</th><th>Under proposed schedule</th><th>Potential saving</th><th>Coverage</th><th>Status</th></tr></thead><tbody></tbody></table></div></section>
 </main>
 <div id="calibrationModal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="calibrationTitle"><div class="modal-card"><div class="modal-head"><div><h2 id="calibrationTitle">Camera calibration</h2><p id="calibrationSubtitle">Draw only on this camera’s processed preview.</p></div><button id="closeCalibration">Cancel</button></div><div class="modal-body"><div class="canvas-wrap"><canvas id="calibrationCanvas"></canvas></div><div>
   <div class="tool-grid"><button data-tool="polygon" id="toolPolygon">Road / waiting area</button><button data-tool="anchors" id="toolAnchors">Perspective anchors</button><button data-tool="ruler" id="toolRuler">Distance ruler</button><button data-tool="lamp" class="acquisition" id="toolLamp">Traffic-light box</button><button data-tool="stopline" class="acquisition" id="toolStopline">Stop line</button><button id="flipStopline" class="acquisition">Flip crossing arrow</button><button data-tool="lamp_RED" class="acquisition" id="toolRed">Red lamp region</button><button data-tool="lamp_YELLOW" class="acquisition" id="toolYellow">Yellow lamp region</button><button data-tool="lamp_GREEN" class="acquisition" id="toolGreen">Green lamp region</button><button id="clearTool">Clear current tool</button><button id="undoTool">Undo last point</button></div>

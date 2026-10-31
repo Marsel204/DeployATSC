@@ -34,6 +34,9 @@ from src.experiment.engine import ObservationEngine
 from src.experiment.export import ExperimentStore
 from src.experiment.predictions import PredictionConflict
 from src.experiment.retention import validate_budget
+from src.experiment.identity_contracts import IdentityPolicy
+from src.experiment.wait_savings import SchedulePolicy
+from src.perception.identity_features import IdentityFeatureExtractor
 from src.experiment.sources import ReplayPair, LivePair
 from src.perception.detector_tracker import DetectorTracker
 from src.perception.tracking_profiles import get_tracking_profile, apply_tracking_profile, tracking_profile_provenance
@@ -71,11 +74,19 @@ class ObservationSession:
         """Validate static inputs without opening video devices or allocating models."""
         get_tracking_profile(payload.get("tracking_profile","baseline"))
         RunPolicy(**payload.get("policy",{}))
+        IdentityPolicy(**(payload.get('vehicle_identity') or {}))
         validate_budget(payload.get("retention_budget",64))
         if payload.get("persist_mode","inline") not in ("inline","background"):raise ValueError("Persist mode must be inline or background")
         mode=payload.get("source_mode","replay")
         if mode not in ("live","replay"):raise ValueError("Source mode must be replay or live")
         calibrations={role:CameraCalibration(payload[role]) for role in ("system","acquisition")}
+        schedule=SchedulePolicy(**(payload.get('schedule_comparison') or {}))
+        if schedule.enabled:
+            if IdentityPolicy(**(payload.get('vehicle_identity') or {})).mode!='persistent_v1':
+                raise ValueError('A/B comparison requires persistent vehicle IDs')
+            if calibrations['system'].roi is None:raise ValueError('Configure Camera 1 signal ROI for movement A')
+            if schedule.b_movement_id!=RunPolicy(**payload.get('policy',{})).movement_id:
+                raise ValueError('Schedule B movement must match the measured movement')
         if any(c.role!=role for role,c in calibrations.items()):raise ValueError("Calibration camera roles are mismatched")
         # The same pure extractor construction (numeric conversions included) that the session performs.
         system=calibrations["system"]
@@ -105,6 +116,9 @@ class ObservationSession:
         self.sysfs_root=sysfs_root
         self.preflight(payload,storage_root,detector_factory,anfis_factory)
         self.policy=RunPolicy(**payload.get("policy",{}))
+        self.identity_policy=IdentityPolicy(**(payload.get('vehicle_identity') or {}))
+        self.identity_features=IdentityFeatureExtractor() if self.identity_policy.mode=='persistent_v1' else None
+        self.schedule_policy=SchedulePolicy(**(payload.get('schedule_comparison') or {}))
         self.persist_mode=payload.get("persist_mode","inline")
         self.persist_condition=threading.Condition();self.persist_thread=None;self.persist_pending=False;self.persist_inflight=False;self.persist_stopping=False
         self.persist_background_requests=0;self.persist_background_commits=0;self.persist_coalesced_requests=0;self.persist_worker_errors=0
@@ -142,6 +156,7 @@ class ObservationSession:
         self.cleanup_schedule_lock=threading.Lock();self.cleanup_schedule_error=None;self.thread=None
         self.detectors={};self.pair=None;self.decision=None
         self.last_persisted=0.;self.acquisition_ended=False;self.live_stale=False
+        self.a_live_stale=False
         factory=ReplayPair if self.source_mode=="replay" else LivePair
         try:
             self.pair=factory(sources["system"],sources["acquisition"],self.policy.offset_sec,
@@ -168,10 +183,14 @@ class ObservationSession:
             self.decision=ATSCDecisionEngine(anfis_factory(str(anfis),prefer_cuda=False))
             acquisition=self.calibrations["acquisition"]
             self.engine=ObservationEngine(self.run_id,self.policy,acquisition.roi,acquisition.side,self.decision.evaluate,acquisition.lamp_rois,
-                scale_evidence={role:{"revision":c.revision,**c.scale_status} for role,c in self.calibrations.items()})
+                scale_evidence={role:{"revision":c.revision,**c.scale_status} for role,c in self.calibrations.items()},
+                **({'identity_policy':self.identity_policy} if self.identity_features else {}),
+                **({'schedule_policy':self.schedule_policy,'system_roi':self.calibrations['system'].roi,
+                    'system_lamp_rois':self.calibrations['system'].lamp_rois} if self.schedule_policy.enabled else {}))
             self.engine.enable_retention(payload.get("retention_budget",64),Path(storage_root))
             if self.source_mode=="live":
                 self.engine.predictions.clock=lambda:time.monotonic()-self.pair.origin
+                if self.engine.schedule:self.engine.schedule.clock=lambda:time.monotonic()-self.pair.origin
             system=self.calibrations["system"]
             self.metrics=TrafficMetricsExtractor.from_config(system.legacy_metrics_config(),system.homography,strict_motion=True)
             versions={}
@@ -189,6 +208,12 @@ class ObservationSession:
                 "media_identity":self.pair.media_identity() if hasattr(self.pair,"media_identity") else {"state":"unknown"},
                 "clock_provenance":self.clock_provenance()}
             manifest["host"]=manifest["execution"]["host"]
+            if self.identity_features:
+                manifest['vehicle_identity']={**asdict(self.identity_policy), 'requested':deepcopy(payload.get('vehicle_identity')),
+                    'association_space':'ground_and_image' if self.engine.identities.ground_trusted else 'image',
+                    'association_version':'joint_geometry_appearance_v1','features_version':'hsv_marginal_cpu_background_v1'}
+            if self.schedule_policy.enabled:manifest['schedule_comparison']={**asdict(self.schedule_policy),
+                'assumption_policy':'observed_intersection_unchanged_clearance_v1'}
             manifest["inference_components"]={"detector":getattr(detector_factory,"__name__",type(detector_factory).__name__),
                 "anfis":getattr(anfis_factory,"__name__",type(anfis_factory).__name__)}
             manifest["source_hashes"]={str(path.relative_to(ROOT)):file_digest(str(path),path.stat().st_mtime_ns)
@@ -232,7 +257,12 @@ class ObservationSession:
             started=time.perf_counter()
             tracks=detector.track([frame],timestamp=packet.timestamp)[0]
             if self.stopping.is_set() or (getattr(self,"persist_mode","inline")=="background" and self.storage_suspended):break
-            detector.update_velocities(tracks,calibration.homography.pixel_to_ground,timestamp=packet.timestamp)
+            identity_evidence=None
+            identity_started=time.perf_counter()
+            if self.identity_features:
+                identity_evidence=self.identity_features.extract(frame,tracks,calibration.homography.pixel_to_ground,
+                    calibration.homography.is_in_approach_corridor)
+            else:detector.update_velocities(tracks,calibration.homography.pixel_to_ground,timestamp=packet.timestamp)
             elapsed=(time.perf_counter()-started)*1000
             self._sample_execution_provenance(packet.timestamp)
             predictor=getattr(getattr(detector,"model",None),"predictor",None)
@@ -244,14 +274,39 @@ class ObservationSession:
                     velocity_valid=getattr(v,"velocity_valid",False),
                     in_region=calibration.homography.is_in_approach_corridor(*v.bottom_center),
                     epoch=getattr(v,"epoch",detector.epoch)) for v in tracks]
-                self.engine.observe_acquisition(frame,packet.timestamp,packet.sequence,observations,generation=generation)
+                if identity_evidence is not None:
+                    resolution=self.engine.observe_acquisition(frame,packet.timestamp,packet.sequence,(),generation=generation,
+                        identity_evidence=identity_evidence.detections,camera_stable=identity_evidence.camera_stable,
+                        gap_evidence_healthy=identity_evidence.camera_reason is None)
+                    if resolution is None:continue
+                    labels=[]
+                    with self.engine.lock:
+                        for item,resolved in zip(identity_evidence.detections,resolution.labels):
+                            label=item.class_name+' (identity pending)'
+                            if resolved is not None:
+                                state=self.engine.waits.active.get((resolved.generation,resolved.logical_id))
+                                label=f'V{resolved.logical_id} {item.class_name}'
+                                if state and 'red_wait_sec' in state['row']:
+                                    row=state['row']
+                                    label+=f" | {row['red_wait_sec']:.1f}s confirmed + {row['estimated_red_wait_sec']:.1f}s estimated"
+                                    if row['pending_estimated_red_wait_sec']:
+                                        label+=f" + {row['pending_estimated_red_wait_sec']:.1f}s provisional"
+                            labels.append((tuple(int(x) for x in item.bbox),label))
+                    labels=tuple(labels)
+                else:
+                    self.engine.observe_acquisition(frame,packet.timestamp,packet.sequence,observations,generation=generation)
+                    labels=None
                 data=self.runtime[packet.role]
                 data["frames"]+=1;data["preview_frames"]+=1;data["inference_total_ms"]+=elapsed;data["last_inference_ms"]=elapsed
                 data["neural_device"]=neural_device
+                if self.identity_features:
+                    data['identity_last_ms']=(time.perf_counter()-identity_started)*1000
+                    data['identity_evidence_status']=identity_evidence.camera_reason or 'supported'
                 data["last_source_timestamp"]=packet.source_timestamp;data["last_mapped_timestamp"]=packet.timestamp
                 data["last_timestamp_origin"]=packet.timestamp_origin;data["last_sequence"]=packet.sequence
                 self.acquisition_rates.record(time.monotonic(),packet.timestamp,elapsed)
-            self._publish_frame(packet,frame,tracks)
+            if labels is None:self._publish_frame(packet,frame,tracks)
+            else:self._publish_frame(packet,frame,tracks,labels=labels)
         self._apply_controls()
         if self.source_mode=="replay" and not self.packets and self.pair.acquisition.ended and not self.acquisition_ended:
             self.acquisition_ended=True;self.engine.invalidate("acquisition_ended")
@@ -261,11 +316,16 @@ class ObservationSession:
             stale=age is None or age>self.policy.freshness_sec
             if stale and not self.live_stale:self.engine.invalidate("acquisition_stale")
             self.live_stale=stale
+            if self.engine.schedule:
+                age=health.get('system',{}).get('age_sec')
+                stale=age is None or age>self.policy.freshness_sec
+                if stale and not self.a_live_stale:self.engine.invalidate_a('a_source_stale')
+                self.a_live_stale=stale
         if not self.storage_suspended and (self.engine.time-self.last_persisted>=5 or
                 self.engine.retention_due()):self._request_persist()
         return had_packets
 
-    def _publish_frame(self,packet,frame,tracks):
+    def _publish_frame(self,packet,frame,tracks,*,labels=None):
         with self.lock:
             # The transformed frame is owned by this packet and never modified after publication.
             # Calibration previews encode it only when requested, rather than twice per frame.
@@ -276,7 +336,7 @@ class ObservationSession:
         if packet.role=="system" and getattr(self,"applied_state",None)=="running":
             previous=self.preview_published_at.get(packet.role)
             if previous is not None and now-previous<.1:return
-        labels=self._preview_labels(packet.role,tracks)
+        if labels is None:labels=self._preview_labels(packet.role,tracks)
         with self.preview_condition:
             self.preview_serial+=1
             if packet.role in self.preview_jobs:self.preview_coalesced_frames+=1
@@ -345,7 +405,24 @@ class ObservationSession:
             data=self.runtime["system"];data["preview_frames"]+=1
             data["last_source_timestamp"]=packet.source_timestamp;data["last_mapped_timestamp"]=packet.timestamp
             data["last_timestamp_origin"]=packet.timestamp_origin;data["last_sequence"]=packet.sequence
+        if getattr(self.engine,'schedule',None):
+            fresh=self.source_mode!='live' or 0<=self._camera1_clock()-packet.timestamp<=self.policy.freshness_sec
+            if not fresh:
+                if not getattr(self,'a_live_stale',False):self.engine.invalidate_a('a_frame_stale',packet.timestamp)
+                self.a_live_stale=True
+            else:
+                self.a_live_stale=False
+                evidence={'timestamp':packet.timestamp,'source_timestamp':packet.source_timestamp,
+                    'sequence':packet.sequence,'timestamp_origin':packet.timestamp_origin,'generation':generation,
+                    'shape':list(frame.shape),'calibration_revision':self.calibrations['system'].revision}
+                self.engine.observe_a(frame,packet.timestamp,packet.sequence,
+                    partial(self._analyze_schedule_frame,frame,packet.timestamp),evidence,generation=generation)
         self._publish_frame(packet,frame,[])
+
+    def _analyze_schedule_frame(self,frame,timestamp):
+        digest=hashlib.sha256(frame.tobytes()).hexdigest()
+        snapshot,analysis=self._analyze_camera1(frame,timestamp)
+        return snapshot,{**analysis,'input_sha256':digest}
 
     def _camera1_clock(self):
         """Run clock on the mapped-timestamp axis: host monotonic for live, replay time otherwise."""
@@ -570,7 +647,9 @@ class ObservationSession:
                 if close:close()
             except Exception as error:errors.append(safe_text(error));continue  # unconfirmed: retained for retry
             del self.detectors[role]
-        if hasattr(self,"engine"):self.engine.predictions.evaluate=None
+        if hasattr(self,"engine"):
+            self.engine.predictions.evaluate=None
+            if self.engine.schedule:self.engine.schedule.evaluate=None
         self.decision=None
         if errors:raise RuntimeError("; ".join(errors))
 
@@ -578,7 +657,8 @@ class ObservationSession:
         return self.pair is None or getattr(self.pair,"resources_released",True)
 
     def _predictions_released(self):
-        return not hasattr(self,"engine") or self.engine.predictions.resources_released
+        return not hasattr(self,"engine") or (self.engine.predictions.resources_released and
+            (self.engine.schedule is None or self.engine.schedule.resources_released))
 
     @property
     def resources_released(self):
@@ -589,7 +669,7 @@ class ObservationSession:
             return {"stop_requested":self.stopping.is_set(),
                     "measurement_sealed":hasattr(self,"engine") and self.engine.closed,
                     "capture_release_pending":self.pair is not None and not getattr(self.pair,"resources_released",True),
-                    "prediction_release_pending":hasattr(self,"engine") and not self.engine.predictions.resources_released,
+                    "prediction_release_pending":not self._predictions_released(),
                     "resources_released":self.resources_released,"finalized":self.finalized,
                     "terminal_state":self.terminal_state,"release_error":self.release_error,
                     "cleanup_schedule_error":self.cleanup_schedule_error,
@@ -614,6 +694,7 @@ class ObservationSession:
         return result
 
     def predict(self,request_id):
+        if self.engine.schedule:raise PredictionConflict('A/B mode captures one A image automatically per green episode')
         # Historical retries are explicit reads, outside engine/control locks.
         with self.engine.predictions.lock:
             existing=deepcopy(self.engine.predictions.records.get(request_id))
@@ -697,7 +778,7 @@ class ObservationSession:
             age,problem=self._camera1_frame_status() if hasattr(self,"engine") else (None,"Camera 1 is unavailable")
             last=snapshot.pop("camera1_last_analysis",None)
             now=self._camera1_clock() if hasattr(self,"engine") else 0.
-            snapshot["camera1"]={"inference_mode":"on_demand_single_frame",
+            snapshot["camera1"]={"inference_mode":"one_frame_per_a_green" if getattr(getattr(self,'engine',None),'schedule',None) else "on_demand_single_frame",
                 "frame_available":self.camera1_latest is not None,"frame_fresh":problem is None,
                 "frame_age_sec":age,"frame_problem":problem,
                 "frame_sequence":self.camera1_latest["sequence"] if self.camera1_latest else None,
