@@ -23,7 +23,7 @@ class PersistentVehicleWaits(VehicleWaits):
         state['row'].update(identity_scheme='persistent_v1', identity_generation=observation.epoch,
             estimated_red_wait_sec=0., pending_estimated_red_wait_sec=0., display_red_wait_sec=0.,
             unresolved_coverage_sec=0., native_reference=None, recent_native_references=[],
-            gap_decision=None, association_policy=ASSOCIATION_VERSION)
+            gap_decision=None, association_policy=self.identity_policy.association)
         return state
 
     def _red_slices(self, start, end):

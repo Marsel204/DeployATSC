@@ -3,11 +3,13 @@ from dataclasses import dataclass
 import math
 
 ASSOCIATION_VERSION = 'joint_image_motion_appearance_v2'
+ASSOCIATION_VERSIONS = (ASSOCIATION_VERSION, 'delayed_trajectory_v3', 'delayed_trajectory_v4', 'delayed_trajectory_v5', 'delayed_trajectory_v6')
 
 
 @dataclass(frozen=True)
 class IdentityPolicy:
     mode: str = 'native'
+    association: str = ASSOCIATION_VERSION
     occlusion_retention_sec: float = 10.
     max_estimated_gap_sec: float = 5.
     gap_accounting: str = 'bounded_stationary_v1'
@@ -19,6 +21,8 @@ class IdentityPolicy:
     exit_persistence_sec: float = .3
 
     def __post_init__(self):
+        if self.association not in ASSOCIATION_VERSIONS:
+            raise ValueError('Unsupported identity association version')
         if self.mode not in ('native', 'persistent_v1'):
             raise ValueError('Identity mode must be native or persistent_v1')
         if self.gap_accounting != 'bounded_stationary_v1':

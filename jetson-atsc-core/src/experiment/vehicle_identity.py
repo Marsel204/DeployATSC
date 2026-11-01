@@ -37,6 +37,13 @@ class Entry:
 
 
 class VehicleIdentityRegistry:
+    def __new__(cls, policy, *args, **kwargs):
+        from src.experiment.identity_contracts import ASSOCIATION_VERSION
+        if cls is VehicleIdentityRegistry and policy.association != ASSOCIATION_VERSION:
+            from src.experiment.vehicle_identity_candidates import CandidateRegistry
+            return object.__new__(CandidateRegistry)
+        return object.__new__(cls)
+
     def __init__(self, policy, max_gap_sec=.5, *, ground_trusted=True):
         self.policy = policy
         self.max_gap_sec = max_gap_sec
