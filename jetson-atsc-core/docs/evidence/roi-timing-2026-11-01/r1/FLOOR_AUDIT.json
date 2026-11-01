@@ -1,0 +1,31 @@
+{
+  "utc": "2026-11-01T14:10:39.940349+00:00",
+  "streams": {
+    "S30": {
+      "path": "/home/marsel/.t3/projects/deployatsc/reviews/model-attribution-2026-11-01/raw/custom11m_trt.jsonl",
+      "sha256": "7fcd65414eddd4366247959e6869aa98c63c17120679a4e673dc2571666c5246",
+      "boxes": 24210,
+      "min_confidence": 0.2802223563194275,
+      "below_0_30": 353,
+      "below_0_25": 0,
+      "below_0_28": 0
+    },
+    "S10": {
+      "path": "/home/marsel/.t3/projects/deployatsc/reviews/tracking-flicker-2026-11-01/r1/raw/S10.jsonl",
+      "sha256": "18b77ac987908d052c8a40cbd9cbbdfa23b6bd54b0e0327f0217e88bbb8b324d",
+      "boxes": 28597,
+      "min_confidence": 0.10016891360282898,
+      "below_0_30": 4740,
+      "below_0_25": 3859,
+      "below_0_28": 4387
+    }
+  },
+  "finding": "The earlier cache metadata and R1 frozen protocol label S30 as conf .30, but it contains 353 boxes in [.28,.30). Original application acquisition path explicitly uses conf_threshold=.28. S30 is preserved byte-for-byte, not filtered or rerun; protocol remains immutable. The floor contrast is .28 legacy capture vs .10 fresh capture, not a pure .30/.10 test.",
+  "provenance": {
+    "DeployATSC/jetson-atsc-core/src/ui/observation_session.py": "1ebaac36b7f9ab701d56f8fc4b10c46d71c4f620366ff989eaa3dfd1f5b0a2da",
+    "DeployATSC/jetson-atsc-core/src/ui/session_manager.py": "6b5c749f669f22f5d948f89fa91fa7969b3c448f2237bc657a85802dcf973c4b",
+    "reviews/vehicle-tracking-2026-11-01/evaluate_clip_end.py": "daf9f33607e1e1bd258c9c627b075fc2e0b5588d4add7060e2f953d4097d2cf8",
+    "reviews/model-attribution-2026-11-01/raw/custom11m_trt.json": "6fc7e4f9fa07176cd7bd7167020d2271709ca9dc38efa3d94f672b5cc7d60b8f"
+  },
+  "evidence": "observation_session.py line173 detector_factory conf_threshold=.28; session_manager.py line78 .28; evaluate_clip_end.py capture_raw stores detector boxes before tracker."
+}

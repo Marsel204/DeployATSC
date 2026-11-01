@@ -1,0 +1,133 @@
+{
+  "source_mode": "replay",
+  "step_mode": true,
+  "shared_test": true,
+  "vehicle_identity": {
+    "mode": "persistent_v1",
+    "occlusion_retention_sec": 10.0,
+    "max_estimated_gap_sec": 5.0
+  },
+  "policy": {
+    "movement_id": "Junction-queue-22s-identity-inspection",
+    "phase_ratio": 1.0
+  },
+  "system": {
+    "role": "system",
+    "source": "/home/marsel/.t3/projects/deployatsc/reviews/youtube-stationary-2026-11-01/interactive/data/sample_videos/Junction_queue_first_22s.mp4",
+    "image_size": [
+      540,
+      960
+    ],
+    "anchors": [
+      [
+        70,
+        240
+      ],
+      [
+        370,
+        240
+      ],
+      [
+        539,
+        420
+      ],
+      [
+        170,
+        420
+      ]
+    ],
+    "polygon": [
+      [
+        60,
+        235
+      ],
+      [
+        370,
+        235
+      ],
+      [
+        539,
+        410
+      ],
+      [
+        539,
+        959
+      ],
+      [
+        465,
+        959
+      ]
+    ],
+    "road_width_m": 12.0,
+    "road_length_m": 20.0,
+    "name": "Junction_22s_system_UNVERIFIED"
+  },
+  "acquisition": {
+    "role": "acquisition",
+    "source": "/home/marsel/.t3/projects/deployatsc/reviews/youtube-stationary-2026-11-01/interactive/data/sample_videos/Junction_queue_first_22s.mp4",
+    "image_size": [
+      540,
+      960
+    ],
+    "anchors": [
+      [
+        70,
+        240
+      ],
+      [
+        370,
+        240
+      ],
+      [
+        539,
+        420
+      ],
+      [
+        170,
+        420
+      ]
+    ],
+    "polygon": [
+      [
+        60,
+        235
+      ],
+      [
+        370,
+        235
+      ],
+      [
+        539,
+        410
+      ],
+      [
+        539,
+        959
+      ],
+      [
+        465,
+        959
+      ]
+    ],
+    "road_width_m": 12.0,
+    "road_length_m": 20.0,
+    "name": "Junction_22s_acquisition_UNVERIFIED",
+    "signal_roi": {
+      "xmin": 0,
+      "ymin": 0,
+      "xmax": 540,
+      "ymax": 960
+    },
+    "stop_line": [
+      [
+        55,
+        270
+      ],
+      [
+        397,
+        270
+      ]
+    ],
+    "crossing_direction": -1
+  }
+}

@@ -1,0 +1,166 @@
+{
+  "utc": "2026-11-01T15:47:24.577224+00:00",
+  "boot_id": "736ad236-871a-4d3a-888f-5867639b1189",
+  "product_head": "65990137637df478f810ec0f9e37db41f7481cea",
+  "source": "/home/marsel/.t3/projects/deployatsc/reviews/youtube-stationary-2026-11-01/interactive/data/sample_videos/Junction_queue_first_22s.mp4",
+  "source_sha256": "849a35eb11023009b2e650c8742b7b151311a768e57d4839652226450f3632d3",
+  "decoded_frames_sha256": "2f5636da631236513f20d87ee53d1221574b6a3c92a7d072f2b101a19c44d226",
+  "frames": 660,
+  "fps": 30,
+  "last_source_seconds": 21.966666666666665,
+  "image_size": [
+    540,
+    960
+  ],
+  "preset": {
+    "source_mode": "replay",
+    "step_mode": true,
+    "shared_test": true,
+    "vehicle_identity": {
+      "mode": "persistent_v1",
+      "occlusion_retention_sec": 10.0,
+      "max_estimated_gap_sec": 5.0
+    },
+    "policy": {
+      "movement_id": "Junction-queue-22s-identity-inspection",
+      "phase_ratio": 1.0
+    },
+    "system": {
+      "role": "system",
+      "source": "/home/marsel/.t3/projects/deployatsc/reviews/youtube-stationary-2026-11-01/interactive/data/sample_videos/Junction_queue_first_22s.mp4",
+      "image_size": [
+        540,
+        960
+      ],
+      "anchors": [
+        [
+          70,
+          240
+        ],
+        [
+          370,
+          240
+        ],
+        [
+          539,
+          420
+        ],
+        [
+          170,
+          420
+        ]
+      ],
+      "polygon": [
+        [
+          60,
+          235
+        ],
+        [
+          370,
+          235
+        ],
+        [
+          539,
+          410
+        ],
+        [
+          539,
+          959
+        ],
+        [
+          465,
+          959
+        ]
+      ],
+      "road_width_m": 12.0,
+      "road_length_m": 20.0,
+      "name": "Junction_22s_system_UNVERIFIED"
+    },
+    "acquisition": {
+      "role": "acquisition",
+      "source": "/home/marsel/.t3/projects/deployatsc/reviews/youtube-stationary-2026-11-01/interactive/data/sample_videos/Junction_queue_first_22s.mp4",
+      "image_size": [
+        540,
+        960
+      ],
+      "anchors": [
+        [
+          70,
+          240
+        ],
+        [
+          370,
+          240
+        ],
+        [
+          539,
+          420
+        ],
+        [
+          170,
+          420
+        ]
+      ],
+      "polygon": [
+        [
+          60,
+          235
+        ],
+        [
+          370,
+          235
+        ],
+        [
+          539,
+          410
+        ],
+        [
+          539,
+          959
+        ],
+        [
+          465,
+          959
+        ]
+      ],
+      "road_width_m": 12.0,
+      "road_length_m": 20.0,
+      "name": "Junction_22s_acquisition_UNVERIFIED",
+      "signal_roi": {
+        "xmin": 0,
+        "ymin": 0,
+        "xmax": 540,
+        "ymax": 960
+      },
+      "stop_line": [
+        [
+          55,
+          270
+        ],
+        [
+          397,
+          270
+        ]
+      ],
+      "crossing_direction": -1
+    }
+  },
+  "detector": "same custom YOLO11m TensorRT, cached confidence floor 0.10",
+  "raw_sha256": "18b77ac987908d052c8a40cbd9cbbdfa23b6bd54b0e0327f0217e88bbb8b324d",
+  "tags": [
+    "S10_P_bytetrack",
+    "S10_P_botsort"
+  ],
+  "association": "delayed_trajectory_v6",
+  "question": "Compare the two selected candidates on the earlier identical 22-second demo.",
+  "method": "Fresh CPU ObservationEngine replays from immutable cached native tracker outputs; no new inference.",
+  "control": "Both native streams consumed the exact same S10 raw boxes. Native outputs are reused, not freshly timed.",
+  "reproduction": "Require every v6 emitted owner and all 154 reference pair flags to match the corresponding R3 trace.",
+  "report": "Per-car rows use actual observed samples only, source timestamps, confirmed ROI exits, and a separate clip-end category.",
+  "audit": "Frozen wrong/merged photographed endpoints and exact legacy anchors; inspect selected successful-looking histories too. No exhaustive physical labels.",
+  "outputs": "Per-arm CSV and interactive report, synchronized annotated replay, side-by-side video and comparison.",
+  "adoption": false,
+  "product_changes": false,
+  "confidence_tuning": false,
+  "limitations": "One selected development clip; v6 Semarang acceptance remains failed; physical scale unverified; signal UNKNOWN."
+}

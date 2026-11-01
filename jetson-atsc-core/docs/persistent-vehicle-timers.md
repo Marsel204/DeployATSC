@@ -23,6 +23,12 @@ multiple assignments compete. Confirmed departure ends a visit; a replacement
 gets a new logical ID. Logical motion history survives supported native-ID changes
 and warms up again after a real gap. Raw IDs are available in row/interval evidence.
 
+New runs record `joint_image_motion_appearance_v2`: image motion is independent
+of physical scale, geometry follows the latest associated box, and a changed
+native reference needs stronger appearance and spatial support. The crowded
+[moving-queue follow-up](tracking-moving-queue-follow-up.md) still fails complete
+physical tracking; partial boxes and same-native transfers remain possible.
+
 ## A/B schedule comparison
 
 To compare B waiting with A's recommended green:

@@ -27,6 +27,8 @@ class Entry:
     lifecycle: str = 'TENTATIVE'
     appearance: tuple | None = None
     history: deque = field(default_factory=lambda: deque(maxlen=8))
+    image_history: deque = field(default_factory=lambda: deque(maxlen=8))
+    image_velocity: tuple | None = None
     aliases: deque = field(default_factory=lambda: deque(maxlen=16))
     exit_since: float | None = None
     speed: float | None = None
@@ -35,6 +37,13 @@ class Entry:
 
 
 class VehicleIdentityRegistry:
+    def __new__(cls, policy, *args, **kwargs):
+        from src.experiment.identity_contracts import ASSOCIATION_VERSION
+        if cls is VehicleIdentityRegistry and policy.association != ASSOCIATION_VERSION:
+            from src.experiment.vehicle_identity_candidates import CandidateRegistry
+            return object.__new__(CandidateRegistry)
+        return object.__new__(cls)
+
     def __init__(self, policy, max_gap_sec=.5, *, ground_trusted=True):
         self.policy = policy
         self.max_gap_sec = max_gap_sec
@@ -52,23 +61,33 @@ class VehicleIdentityRegistry:
     def retire(self, generation, identity, *, crossed=False):
         entry = self.entries.get(identity)
         if entry and entry.generation == generation:
-            entry.lifecycle = 'SERVED' if crossed else 'EXITED'
+            lifecycle = 'SERVED' if crossed else 'EXITED'
+            if entry.lifecycle == lifecycle:
+                return
+            entry.lifecycle = lifecycle
             entry.history.clear()
+            entry.image_history.clear()
+            entry.image_velocity = None
 
-    def _cost(self, entry, item, timestamp):
-        if entry.lifecycle=='EXITED':return None
-        old = entry.trusted_detection or entry.detection
+    def _geometry(self, entry, timestamp):
+        # Appearance may be old or occluded; geometry belongs to the latest
+        # associated observation. Never date an old trusted crop with seen.
+        old = entry.detection
         dt = timestamp-entry.seen
         height = max(8., old.bbox[3]-old.bbox[1])
         predicted = old.point
-        if old is entry.detection and len(entry.history) >= 2 and entry.speed is not None and entry.speed > .5 and dt <= self.max_gap_sec:
-            # Image displacement is independent of whether the physical scale is verified.
-            previous = entry.history[-2]
-            elapsed = entry.history[-1][0]-previous[0]
-            if elapsed > 0:
-                predicted = tuple(old.point[k]+(old.point[k]-previous[2][k])*dt/elapsed for k in (0, 1))
+        gate = .65 + min(dt, 5.)*.04
+        if entry.image_velocity is not None:
+            if dt <= self.max_gap_sec and len(entry.image_history) >= 2:
+                predicted = tuple(old.point[k]+entry.image_velocity[k]*dt for k in (0, 1))
+                gate = .3 + .3*dt
+        return old, predicted, height, gate
+
+    def _cost(self, entry, item, timestamp):
+        if entry.lifecycle=='EXITED':return None
+        old, predicted, height, gate = self._geometry(entry, timestamp)
+        dt = timestamp-entry.seen
         distance = math.dist(predicted, item.point)/height
-        gate = .65 + (min(dt, 2.)*.3 if entry.speed is not None and entry.speed > .5 else min(dt, 5.)*.04)
         if distance > gate:
             return None
         size = abs(math.log((item.bbox[2]-item.bbox[0])/(old.bbox[2]-old.bbox[0])))
@@ -86,6 +105,15 @@ class VehicleIdentityRegistry:
         native = item.native_stable and item.native_id is not None
         alias = (item.native_epoch, item.native_id) if native else None
         same_alias = alias is not None and alias in entry.aliases
+        if entry.admitted and not same_alias:
+            # A partial/merged box must not inherit another vehicle's timer.
+            # A broad color match is insufficient evidence of re-identification.
+            if not reliable or appearance > self.policy.appearance_threshold*.5:
+                return None
+            if distance > min(gate, .3 + min(dt, 5.)*.04):
+                return None
+        if dt > self.max_gap_sec and entry.image_velocity is not None and math.hypot(*entry.image_velocity)/height > .25:
+            return None  # Retention is not permission to match a moving car at stale geometry.
         if dt > self.max_gap_sec and not reliable and not same_alias:
             return None
         # Ground displacement adds a plausibility check without inventing a speed
@@ -100,6 +128,15 @@ class VehicleIdentityRegistry:
         recovered = sequence != entry.sequence+1 or timestamp-entry.seen > self.max_gap_sec
         if recovered:
             entry.history.clear()
+            entry.image_history.clear()
+        entry.image_history.append((timestamp, item.point))
+        # A single sparse return has no new velocity evidence. Keep the last
+        # measured image motion so intermittent boxes cannot imply stationarity.
+        if len(entry.image_history) >= 2 and timestamp-entry.image_history[0][0] >= .05:
+            times = np.asarray([t-entry.image_history[0][0] for t, _ in entry.image_history])
+            times -= times.mean()
+            points = np.asarray([p for _, p in entry.image_history])
+            entry.image_velocity = tuple(times @ (points-points.mean(axis=0)) / (times @ times))
         if item.ground is not None:
             entry.history.append((timestamp, item.ground, item.point))
         else:
@@ -118,7 +155,7 @@ class VehicleIdentityRegistry:
         entry.speed = speed if valid else None
         entry.observations += 1
         entry.admitted = entry.admitted or (entry.observations >= self.policy.confirmation_observations and timestamp-entry.born >= self.policy.confirmation_sec-1e-8)
-        if item.appearance_reliable and item.appearance is not None and (entry.appearance is None or not recovered):
+        if item.appearance_reliable and item.appearance is not None:
             entry.appearance = item.appearance
             entry.trusted_detection=item
         if item.native_stable and item.native_id is not None:
@@ -163,18 +200,11 @@ class VehicleIdentityRegistry:
         entries = sorted(self.entries.values(), key=lambda e: e.identity)
         costs = np.full((len(entries), len(kept)), 1e6)
         if entries and kept:
-            references=[e.trusted_detection or e.detection for e in entries]
-            predicted=np.asarray([d.point for d in references],dtype=float)
-            for row,entry in enumerate(entries):
-                dt=timestamp-entry.seen
-                if references[row] is entry.detection and len(entry.history)>=2 and entry.speed is not None and entry.speed>.5 and dt<=self.max_gap_sec:
-                    previous=entry.history[-2];elapsed=entry.history[-1][0]-previous[0]
-                    if elapsed>0:predicted[row]+=(predicted[row]-np.asarray(previous[2]))*dt/elapsed
+            geometry=[self._geometry(e,timestamp) for e in entries]
+            predicted=np.asarray([g[1] for g in geometry],dtype=float)
             points=np.asarray([detections[i].point for i in kept],dtype=float)
-            heights=np.asarray([max(8.,d.bbox[3]-d.bbox[1]) for d in references])
-            delta=np.asarray([timestamp-e.seen for e in entries])
-            moving=np.asarray([e.speed is not None and e.speed>.5 for e in entries])
-            gates=.65+np.where(moving,np.minimum(delta,2.)*.3,np.minimum(delta,5.)*.04)
+            heights=np.asarray([g[2] for g in geometry])
+            gates=np.asarray([g[3] for g in geometry])
             candidates=np.linalg.norm(predicted[:,None,:]-points[None,:,:],axis=2)/heights[:,None]<=gates[:,None]
             for row,col in np.argwhere(candidates):
                 cost=self._cost(entries[row],detections[kept[col]],timestamp)
@@ -205,7 +235,7 @@ class VehicleIdentityRegistry:
                 pending=False
                 for old in entries:
                     if not old.admitted or old.lifecycle in ('EXITED','SERVED') or timestamp-old.seen<=self.max_gap_sec:continue
-                    reference=old.trusted_detection or old.detection
+                    reference=old.detection
                     if math.dist(reference.point,item.point)>max(8.,reference.bbox[3]-reference.bbox[1])*.85:continue
                     comparable=item.appearance_reliable and item.appearance is not None and old.appearance is not None and len(item.appearance)==len(old.appearance)
                     if not comparable or math.dist(item.appearance,old.appearance)/math.sqrt(2)<=self.policy.appearance_threshold:

@@ -1,0 +1,80 @@
+Car_Id,Time when detected,Time in the Region Of interest,Time where they Left,Status
+V1,0.000,17.167,17.167,Detected
+V2,0.000,-,-,Loss
+V3,0.000,3.767,-,Loss
+V4,0.000,2.100,-,Loss
+V5,0.000,17.533,17.533,Detected
+V6,0.000,12.267,12.267,Detected
+V7,0.433,3.167,-,Loss
+V8,0.900,10.933,13.033,Loss and Recovered
+V9,1.000,-,-,Loss
+V10,1.333,14.067,-,Loss
+V11,1.567,0.767,2.433,Loss and Recovered
+V12,1.567,1.300,-,Loss
+V13,1.667,11.867,13.567,Loss and Recovered
+V14,1.767,0.733,-,Loss
+V15,1.933,1.700,-,Loss
+V16,2.100,1.700,-,Loss
+V17,2.233,1.067,3.300,Detected
+V20,2.533,2.267,-,Loss
+V21,2.567,15.933,18.500,Detected
+V22,2.600,2.000,-,Loss
+V24,2.733,0.867,-,Loss
+V25,3.000,0.900,-,Loss
+V28,3.700,1.867,5.567,Detected
+V29,3.700,14.300,-,Loss
+V31,3.800,11.700,15.500,Detected
+V32,3.900,14.400,18.367,Loss and Recovered
+V35,3.967,-,-,Loss
+V36,4.033,-,-,Loss
+V38,4.100,13.700,17.800,Detected
+V39,4.100,0.900,-,Loss
+V40,4.133,1.433,-,Loss
+V41,4.200,10.133,-,Loss
+V42,4.433,9.567,14.100,Loss and Recovered
+V43,4.633,12.733,-,Loss
+V46,4.833,7.633,12.467,Detected
+V47,4.867,9.367,14.233,Detected
+V50,4.900,13.200,18.100,Detected
+V54,5.067,6.133,11.867,Loss and Recovered
+V55,5.100,0.567,-,Loss
+V56,5.467,8.700,14.167,Detected
+V57,5.633,9.000,14.667,Loss and Recovered
+V58,5.967,3.000,9.867,Detected
+V59,10.300,0.633,11.800,Detected
+V60,11.800,5.633,17.433,Detected
+V61,12.267,5.367,17.733,Loss and Recovered
+V62,13.000,5.967,18.967,Detected
+V63,13.067,1.767,14.833,Detected
+V64,13.200,5.300,18.533,Detected
+V65,13.333,4.700,18.100,Detected
+V66,13.500,5.767,19.267,Detected
+V67,13.533,-,-,Loss
+V69,13.900,8.100,-,Still tracked in ROI at clip end
+V70,14.067,3.367,-,Loss
+V71,14.133,5.633,19.767,Detected
+V72,14.267,4.567,18.833,Detected
+V73,14.400,0.767,15.267,Loss and Recovered
+V74,14.567,5.467,20.033,Detected
+V75,14.933,3.167,18.100,Detected
+V76,15.000,5.367,20.367,Detected
+V77,15.833,4.933,20.767,Detected
+V79,16.133,0.400,-,Loss
+V80,16.333,0.733,-,Loss
+V81,16.500,5.500,-,Still tracked in ROI at clip end
+V82,16.600,0.300,-,Loss
+V83,16.667,4.467,21.133,Detected
+V84,17.200,0.267,-,Loss
+V86,17.433,4.567,-,Still tracked in ROI at clip end
+V87,17.433,2.733,20.167,Detected
+V88,17.467,1.767,19.233,Detected
+V89,17.533,2.433,19.967,Detected
+V91,18.000,1.133,19.133,Detected
+V92,18.033,2.600,20.633,Detected
+V93,18.267,3.733,-,Still tracked in ROI at clip end
+V94,18.467,2.533,21.000,Detected
+V95,19.367,0.400,19.767,Detected
+V96,19.367,1.733,21.100,Detected
+V98,19.833,2.133,-,Detected
+V99,19.900,1.567,21.467,Detected
+V101,20.633,0.733,21.367,Detected

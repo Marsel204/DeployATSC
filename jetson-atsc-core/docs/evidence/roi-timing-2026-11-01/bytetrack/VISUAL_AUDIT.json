@@ -1,0 +1,62 @@
+{
+  "rejected_ids": [
+    "V9",
+    "V77",
+    "V2",
+    "V55",
+    "V58",
+    "V64"
+  ],
+  "cases": {
+    "V9": [
+      {
+        "frame": 145,
+        "source_seconds": 4.833333333333333,
+        "reason": "Frozen photographed merged pair 77062132873e remains linked"
+      }
+    ],
+    "V77": [
+      {
+        "frame": 582,
+        "source_seconds": 19.4,
+        "reason": "Earlier photographed different bodies legacy-V69-547-582 remain linked"
+      }
+    ],
+    "V2": [
+      {
+        "frame": 144,
+        "source_seconds": 4.8,
+        "reason": "Previously photographed mixed multi-car box at f144"
+      }
+    ],
+    "V55": [
+      {
+        "frame": 149,
+        "source_seconds": 4.966666666666667,
+        "reason": "Previously photographed mixed multi-car box at f149"
+      }
+    ],
+    "V58": [
+      {
+        "frame": 358,
+        "source_seconds": 11.933333333333334,
+        "reason": "Previously photographed mixed multi-car box at f358"
+      }
+    ],
+    "V64": [
+      {
+        "frame": 280,
+        "source_seconds": 9.333333333333334,
+        "reason": "Previously photographed mixed multi-car box at f280"
+      },
+      {
+        "frame": 282,
+        "source_seconds": 9.4,
+        "reason": "Previously photographed mixed multi-car box at f282"
+      }
+    ]
+  },
+  "review_mode": "Frozen photographed labels with exact current owners; implementing-agent self-review.",
+  "scope": "Selected wrong/merged samples only; all other identities remain unvalidated.",
+  "fresh_independent_labels": false
+}

@@ -1,0 +1,7 @@
+{
+  "utc": "2026-11-01T13:48:01.971329+00:00",
+  "best_vehicle": null,
+  "eligible": [],
+  "criterion": "frozen highest AUC > .5",
+  "protocol_sha256": "da7f77de28bf1542955fcb29ee93ab07b7cacf56c71f2d2ea608993ee935eabf"
+}

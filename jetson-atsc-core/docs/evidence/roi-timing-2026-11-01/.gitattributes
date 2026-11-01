@@ -1,0 +1,2 @@
+# Frozen CSV data: preserve original CRLF and cell whitespace for hash equality.
+*.csv -text -whitespace

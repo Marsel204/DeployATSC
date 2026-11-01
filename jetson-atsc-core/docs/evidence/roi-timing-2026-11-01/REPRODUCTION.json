@@ -1,0 +1,19 @@
+{
+  "passed": true,
+  "arms": {
+    "S10_P_bytetrack": {
+      "passed": true,
+      "frames": 660,
+      "native_records_and_assignments": 23175,
+      "reference_pairs": 154,
+      "decoded_pixels_match": true
+    },
+    "S10_P_botsort": {
+      "passed": true,
+      "frames": 660,
+      "native_records_and_assignments": 23549,
+      "reference_pairs": 154,
+      "decoded_pixels_match": true
+    }
+  }
+}

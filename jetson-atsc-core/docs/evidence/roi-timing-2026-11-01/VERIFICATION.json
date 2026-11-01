@@ -1,0 +1,57 @@
+{
+  "passed": true,
+  "utc": "2026-11-01T16:07:49.261580+00:00",
+  "reproduction": true,
+  "arms": {
+    "S10_P_bytetrack": {
+      "passed": true,
+      "frames": 660,
+      "native_records_and_assignments": 23175,
+      "reference_pairs": 154,
+      "decoded_pixels_match": true
+    },
+    "S10_P_botsort": {
+      "passed": true,
+      "frames": 660,
+      "native_records_and_assignments": 23549,
+      "reference_pairs": 154,
+      "decoded_pixels_match": true
+    }
+  },
+  "videos": {
+    "comparison-22s.mp4": {
+      "frames": 660,
+      "fps": 30.0,
+      "width": 1080,
+      "height": 1050,
+      "sha256": "291744af2bf2157a432bd2bfbcb5ed4bfba0e811f1ad88a190638e84189ae9d7",
+      "decoded_frame_md5_manifest_sha256": "1b822c95aff9c54d0056dd87ba2ec3e7d6609e16774dbca16fb8ee2e0e0e9797"
+    },
+    "bytetrack/annotated-22s.mp4": {
+      "frames": 660,
+      "fps": 30.0,
+      "width": 540,
+      "height": 1050,
+      "sha256": "696e2676633030e6e6fc604b4a4cbd49fcaefd1b18372ce088b7f5e243fdb57c",
+      "decoded_frame_md5_manifest_sha256": "e66b78f19ba0b4384d26788d7b25f9e34da273e6025dca76bf257fd5d13011d7"
+    },
+    "botsort/annotated-22s.mp4": {
+      "frames": 660,
+      "fps": 30.0,
+      "width": 540,
+      "height": 1050,
+      "sha256": "dca4ad65e88d9537696c82571d7c3b0fbcbe6eb14100da30e21bd757e7209d70",
+      "decoded_frame_md5_manifest_sha256": "c4398bc61e421342664a9a82b247d548ed28c8f8ee07bba0cebd1d0d98921b4d"
+    }
+  },
+  "roi_observed_sample_and_gap_accounting": true,
+  "rejected_unknowns_and_clip_end_rules": true,
+  "confirmed_exit_evidence": true,
+  "scripts_syntax_valid": true,
+  "source_hashes_unchanged": true,
+  "product_clean": true,
+  "boot_id": "736ad236-871a-4d3a-888f-5867639b1189",
+  "new_inference": false,
+  "product_changes": false,
+  "render_process_note": "Initial renderer completed all three 660-frame encodes but exited 143 during its verification stage. Each retained video was subsequently decoded and verified independently in a bounded process."
+}
