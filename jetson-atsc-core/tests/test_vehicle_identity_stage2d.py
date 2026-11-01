@@ -15,7 +15,7 @@ from src.experiment.vehicle_identity import VehicleIdentityRegistry
 from test_vehicle_identity import detection
 
 VERSION = os.environ.get('STAGE2D_ASSOCIATION', 'delayed_trajectory_v6')
-ROOT = Path(__file__).resolve().parents[3]
+FIXTURES = Path(__file__).parent / 'fixtures/flicker_stage2d'
 
 
 def registry(**kwargs):
@@ -24,12 +24,11 @@ def registry(**kwargs):
 
 
 def replay_prefix(clip):
-    data = json.loads((Path(__file__).parent / 'fixtures/flicker_stage2d' /
-                       f'{clip}_complete_prefix.json').read_text())
+    data = json.loads((FIXTURES / f'{clip}_complete_prefix.json').read_text())
     book = registry()
     engine = None
     if clip == 'queue':
-        payload = json.loads((ROOT / 'reviews/youtube-stationary-2026-11-01/interactive/junction-22s-preset.json').read_text())
+        payload = json.loads((FIXTURES / 'junction-22s-preset.json').read_text())
         camera = CameraCalibration(payload['acquisition'])
         engine = ObservationEngine('stage2', RunPolicy(**payload['policy']), camera.roi, camera.side,
             lambda *_: None, identity_policy=book.policy,
