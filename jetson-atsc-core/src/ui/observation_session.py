@@ -211,7 +211,7 @@ class ObservationSession:
             if self.identity_features:
                 manifest['vehicle_identity']={**asdict(self.identity_policy), 'requested':deepcopy(payload.get('vehicle_identity')),
                     'association_space':'ground_and_image' if self.engine.identities.ground_trusted else 'image',
-                    'association_version':'joint_geometry_appearance_v1','features_version':'hsv_marginal_cpu_background_v1'}
+                    'association_version':'joint_image_motion_appearance_v2','features_version':'hsv_marginal_cpu_background_v1'}
             if self.schedule_policy.enabled:manifest['schedule_comparison']={**asdict(self.schedule_policy),
                 'assumption_policy':'observed_intersection_unchanged_clearance_v1'}
             manifest["inference_components"]={"detector":getattr(detector_factory,"__name__",type(detector_factory).__name__),

@@ -2,6 +2,8 @@
 from dataclasses import dataclass
 import math
 
+ASSOCIATION_VERSION = 'joint_image_motion_appearance_v2'
+
 
 @dataclass(frozen=True)
 class IdentityPolicy:
@@ -78,7 +80,7 @@ class ResolvedVehicle:
     speed_mps: float | None = None
     velocity_valid: bool = False
     recovered: bool = False
-    association: str = 'joint_geometry_appearance_v1'
+    association: str = ASSOCIATION_VERSION
     exit_pending: bool = False
     birth_timestamp: float | None = None
     first_native_reference: tuple[int,int] | None = None
