@@ -20,6 +20,10 @@ Both observation launchers bind to loopback, use one worker, reject reload and e
 If storage fails, new measurement/capture admission stops and the last durable revision remains visible. Repair storage, then use the dashboard retry action or `POST /api/observation/recover?run_id=<id>` to finalize the interrupted run before explicitly starting another. Browsing/exporting saved evidence never resumes it. Native resource cleanup may outlast a stop timeout; check resource release and durable finalization separately.
 
 See the [operator guide](docs/TWO_CAMERA_OBSERVATION.md) and [dated validation results and limits](docs/OBSERVATION_VALIDATION.md). The architecture and calibration tutorial below describe the legacy control/replay tools.
+
+Optional per-run [tracking profiles](docs/TRACKING_PROFILES.md) document `low_score`,
+its fixed-night-camera evidence, payload selection, rollback and validation limits.
+The default remains `baseline`.
 ---
 
 ## 1. System Architecture

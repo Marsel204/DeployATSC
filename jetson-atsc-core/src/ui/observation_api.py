@@ -16,7 +16,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from src.experiment.calibration import legacy_system_payload
 from src.experiment.contracts import RunPolicy
+from src.experiment.identity_contracts import IdentityPolicy
+from src.experiment.wait_savings import SchedulePolicy
 from src.experiment.predictions import PredictionConflict
+from src.perception.tracking_profiles import get_tracking_profile
 from src.ui.observation_session import ObservationManager, RuntimeConflict
 from src.ui.session_manager import manager as legacy_manager
 
@@ -106,12 +109,35 @@ class StartObservation(StrictModel):
     shared_test:bool=False
     retention_budget:int=Field(default=64,ge=1,le=4096)
     persist_mode:Literal["inline","background"]="inline"
+    tracking_profile:str="baseline"
+    vehicle_identity:dict[str,Any]|None=None
+    schedule_comparison:dict[str,Any]|None=None
     policy:dict[str,Any]=Field(default_factory=dict)
+
+    @field_validator("tracking_profile")
+    @classmethod
+    def valid_tracking_profile(cls,value):
+        get_tracking_profile(value)
+        return value
 
     @field_validator("policy")
     @classmethod
     def valid_policy(cls,value):
         try:RunPolicy(**value)
+        except (TypeError,ValueError) as error:raise ValueError(safe_text(error)) from error
+        return value
+
+    @field_validator('vehicle_identity')
+    @classmethod
+    def valid_identity(cls,value):
+        try:IdentityPolicy(**(value or {}))
+        except (TypeError,ValueError) as error:raise ValueError(safe_text(error)) from error
+        return value
+
+    @field_validator('schedule_comparison')
+    @classmethod
+    def valid_schedule(cls,value):
+        try:SchedulePolicy(**(value or {}))
         except (TypeError,ValueError) as error:raise ValueError(safe_text(error)) from error
         return value
 
@@ -259,7 +285,7 @@ def full_evidence(run_id:str):
 
 
 @router.get("/api/observation/history/{kind}")
-def history(kind:Literal["vehicles","predictions","comparisons","phase_events","observation_gaps"],run_id:str,
+def history(kind:Literal["vehicles","predictions","comparisons","phase_events","observation_gaps","schedule_episodes","vehicle_savings"],run_id:str,
             offset:int=Query(0,ge=0),limit:int=Query(100,ge=1,le=200),generation:int|None=None):
     try:
         store=observations.evidence_store(run_id);pinned=store.pin()
@@ -271,8 +297,10 @@ def history(kind:Literal["vehicles","predictions","comparisons","phase_events","
 
 
 @router.get("/api/observation/quantiles")
-def quantiles(run_id:str):
-    try:return observations.evidence_store(run_id).quantiles()
+def quantiles(run_id:str,metric:Literal['confirmed','best_estimate']='confirmed'):
+    try:
+        store=observations.evidence_store(run_id)
+        return store.quantiles() if metric=='confirmed' else store.quantiles(metric=metric)
     except Exception as error:translate(error)
 
 

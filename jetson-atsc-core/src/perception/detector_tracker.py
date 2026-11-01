@@ -17,6 +17,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
+from src.perception.tracking_profiles import get_tracking_profile
+
 
 # Standard PKJI vehicle categories
 CLASS_NAMES = {
@@ -112,6 +114,7 @@ class DetectorTracker:
         imgsz: int = 640,
         device: str = "cuda:0",
         max_gap_sec: float = 5.0,
+        tracking_profile: str = "baseline",
     ) -> None:
         """
         Args:
@@ -120,6 +123,7 @@ class DetectorTracker:
             iou_threshold: NMS IoU threshold.
             imgsz: Input resolution size.
             device: 'cuda:0' or 'cpu'.
+            tracking_profile: Named tracking floor; does not change still/fallback detection.
         """
         self.model_path = model_path
         self.conf_threshold = conf_threshold
@@ -127,6 +131,7 @@ class DetectorTracker:
         self.imgsz = imgsz
         self.device = device
         self.max_gap_sec = max_gap_sec
+        self.set_tracking_profile(tracking_profile)
 
         self.is_tensorrt: bool = str(model_path).endswith(".engine")
         self.model = None
@@ -140,6 +145,13 @@ class DetectorTracker:
         self.epoch = 0
 
         self._load_model()
+
+    def set_tracking_profile(self, name: str) -> None:
+        """Select before tracking starts; reset_tracking preserves this choice."""
+        self.tracking_profile = get_tracking_profile(name)
+
+    def tracking_profile_provenance(self) -> dict:
+        return self.tracking_profile.provenance(self.conf_threshold, self.iou_threshold)
 
     def reset_tracking(self) -> None:
         """Start a new identity epoch without reloading the model weights."""
@@ -218,12 +230,12 @@ class DetectorTracker:
         try:
             results = self.model.track(
                 source=frames,
-                conf=self.conf_threshold,
+                conf=self.tracking_profile.track_confidence(self.conf_threshold),
                 iou=self.iou_threshold,
                 imgsz=self.imgsz,
                 device=getattr(self,"inference_device",self.device),
                 persist=True,
-                tracker="bytetrack.yaml",
+                tracker=self.tracking_profile.tracker_argument,
                 verbose=False,
             )
         except Exception as e:

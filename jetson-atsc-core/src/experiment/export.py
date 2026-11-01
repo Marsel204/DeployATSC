@@ -22,7 +22,9 @@ from src.common.source_identity import public_data, discover_sources
 
 PROTOCOL = 'typed-archive-v1'
 TABLES = ('predictions', 'phase_events', 'vehicles', 'comparisons', 'observation_gaps')
+SCHEDULE_TABLES = ('schedule_episodes','vehicle_savings')
 IDS = {'predictions':'request_id', 'vehicles':'vehicle_id', 'comparisons':'cycle_id'}
+IDS.update(schedule_episodes='episode_id',vehicle_savings='savings_id')
 # One explicitly rebuilt history, reused by page requests for the same pinned
 # generation (each HTTP request opens a new reader). Committed bytes are immutable.
 _PAGE_VIEW = {'key':None, 'view':None}
@@ -171,7 +173,7 @@ class ExperimentStore:
         pinned=self.pin() if pinned is None else pinned
         state=deepcopy(pinned['state'])
         if pinned['storage_protocol']!=PROTOCOL:return state
-        tables={key:{} for key in TABLES};fragments={}
+        tables={key:{} for key in TABLES+SCHEDULE_TABLES};fragments={}
         def add(kind,identity,value):
             if kind in ('vehicle_intervals','vehicle_cycles'):
                 target=fragments.setdefault(identity,{'intervals':[], 'cycles':[], 'wait_by_cycle':{}})
@@ -185,7 +187,7 @@ class ExperimentStore:
             elif kind in tables:tables[kind][str(identity)]=value
             else:raise ValueError('Unsupported archive record type: '+kind)
         for record in self.records(pinned):add(record['kind'],record['id'],record['value'])
-        for key in TABLES:
+        for key in TABLES+tuple(k for k in SCHEDULE_TABLES if k in state or tables[k]):
             for index,row in enumerate(state.get(key,[])):
                 identity=row.get(IDS.get(key,''),row.get('_archive_id',f'active-{index}'))
                 tables[key][str(identity)]=row
@@ -216,7 +218,8 @@ class ExperimentStore:
                                      cycle['green_start']<=r['completed_at']<end) for r in rows))
         if 'policy' in state:
             from src.experiment.summary import summarize
-            state['summary']=summarize(state['vehicles'],state['comparisons'],state['policy'].get('los_method'),state['predictions'])
+            state['summary']=summarize(state['vehicles'],state['comparisons'],state['policy'].get('los_method'),state['predictions'],
+                identity_scheme=(state.get('vehicle_identity') or {}).get('mode'))
             state['los']=state['summary']['los']
         if 'lifecycle' in state:
             state['lifecycle'].update(durable_revision=pinned['snapshot_revision'],durable_generation=pinned['generation'],
@@ -229,7 +232,7 @@ class ExperimentStore:
         return state
 
     def page(self,kind,offset=0,limit=100,pinned=None):
-        if kind not in TABLES:raise ValueError('Unknown evidence table')
+        if kind not in TABLES+SCHEDULE_TABLES:raise ValueError('Unknown evidence table')
         if offset<0 or not 1<=limit<=200:raise ValueError('Invalid pagination')
         pinned=self.pin() if pinned is None else pinned
         key=(str(self.directory.resolve()),pinned['generation'],pinned.get('committed_bytes'),pinned.get('snapshot_revision'))
@@ -249,14 +252,17 @@ class ExperimentStore:
             if record['kind']=='predictions' and record['id']==request_id:result=record['value']
         return result
 
-    def quantiles(self):
+    def quantiles(self,metric='confirmed'):
+        if metric not in ('confirmed','best_estimate'):raise ValueError('Unknown wait quantile metric')
         pinned=self.pin();generation=pinned['generation']
         cached=getattr(self,'_quantile_cache',None)
-        if cached is not None and cached['generation']==generation:return deepcopy(cached)
+        if cached is not None and cached['generation']==generation and cached.get('metric','confirmed')==metric:return deepcopy(cached)
         from src.experiment.summary import _percentile
-        values=[r.get('red_wait_sec',0.) for r in self.read(pinned,raw=True).get('vehicles',[])]
+        values=[r.get('red_wait_sec',0.)+(r.get('estimated_red_wait_sec',0.) if metric=='best_estimate' else 0.)
+            for r in self.read(pinned,raw=True).get('vehicles',[])]
         result={'state':'exact','generation':generation,'snapshot_revision':pinned.get('snapshot_revision'),
                 'sample_count':len(values),'median_red_wait_sec':_percentile(values,.5),'p95_red_wait_sec':_percentile(values,.95)}
+        if metric!='confirmed' or (pinned['state'].get('vehicle_identity') or {}).get('mode')=='persistent_v1':result['metric']=metric
         self._quantile_cache=result
         return deepcopy(result)
 
@@ -272,6 +278,10 @@ class ExperimentStore:
         state=deepcopy(pinned['state'])
         interrupted=self.recovery_status()['status']
         state['closed']=True;state['prediction_busy']=False
+        for episode in state.get('schedule_episodes',[]):
+            if not episode.get('sealed'):
+                episode.update(status='unavailable',sealed=True,reasons=episode.get('reasons',[])+['unclean_recovery'])
+        if state.get('schedule_comparison'):state['schedule_comparison']['busy']=False
         state['snapshot_revision']=pinned['snapshot_revision']+1
         for row in state.get('predictions',[]):
             if row['status'] in ('predicting','awaiting_green'):
@@ -280,6 +290,20 @@ class ExperimentStore:
             if (row.get('camera_analysis') or {}).get('state')=='pending':
                 row['camera_analysis']['state']='interrupted_unclean_recovery'
         for row in state.get('vehicles',[]):
+            if row.get('identity_scheme')=='persistent_v1':
+                gap=row.get('pending_gap') or {}
+                if gap and gap.get('end') is None:
+                    duration=max(0.,gap['through_time']-gap['start'])
+                    row['unknown_sec']=row.get('unknown_sec',0.)+duration
+                    row['phase_unknown_sec']=row.get('phase_unknown_sec',0.)+duration
+                    row.setdefault('intervals',[]).append({'start':gap['start'],'end':gap['through_time'],
+                        'phase':'UNKNOWN','cycle_id':None,'valid':False,'stopped':False,
+                        'gap_evidence':{'status':'unresolved','reason':'unclean_recovery'}})
+                row['pending_estimated_red_wait_sec']=0.
+                row['display_red_wait_sec']=row['red_wait_sec']+row.get('estimated_red_wait_sec',0.)
+                row['unresolved_coverage_sec']=max(0.,row.get('unknown_sec',0.)-row.get('estimated_red_wait_sec',0.))
+                row['pending_gap']=None
+                row['gap_decision']={'status':'unresolved','reason':'unclean_recovery'}
             if not row.get('completed'):
                 row.update(completed=True,completed_at=state.get('time'),right_censored=True,tracking_state='UNKNOWN')
                 row.setdefault('quality_flags',[]).append('unclean_recovery')
@@ -316,5 +340,5 @@ class ExperimentStore:
         with zipfile.ZipFile(output,'w',zipfile.ZIP_DEFLATED) as bundle:
             bundle.writestr('manifest.json',json.dumps(public_data(self.manifest),indent=2,allow_nan=False))
             bundle.writestr('evidence.json',json.dumps(evidence,indent=2,allow_nan=False))
-            for key in TABLES:bundle.writestr(key+'.csv',self._csv(evidence.get(key,[])))
+            for key in TABLES+tuple(k for k in SCHEDULE_TABLES if k in evidence):bundle.writestr(key+'.csv',self._csv(evidence.get(key,[])))
         return output.getvalue()

@@ -8,6 +8,7 @@ from collections import deque
 from src.common.json_data import clone as deepcopy
 from src.experiment.archive_index import ArchiveIndex
 from src.experiment.summary import summarize
+from src.experiment.identity_summary import identity_statistics, identity_summary
 
 DURATIONS={'motion_unknown_sec':'unknown_sec','phase_unknown_sec':'phase_unknown_sec','unattributed_stopped_sec':'unattributed_stopped_sec'}
 
@@ -31,6 +32,11 @@ def validate_budget(budget):
     return budget
 
 
+def revisable_times(active):
+    return [active[k] for k in ('stop_candidate','move_candidate','gap_candidate','exit_candidate','schedule_candidate')
+            if active.get(k) is not None]
+
+
 class Retention:
     def __init__(self,budget,directory=None):
         validate_budget(budget)
@@ -43,6 +49,8 @@ class Retention:
         self.cycle_population={}
         self.archived_counts={key:0 for key in ('vehicles','comparisons','predictions','phase_events','observation_gaps')}
         self.visited_records=0;self.pending=None;self.progress={}
+        self.identity_totals=identity_statistics([])
+        self.identity_scheme=None
 
     def summary(self,rows,comparisons,method,predictions):
         rows=list(rows);comparisons=list(comparisons);predictions=list(predictions)
@@ -62,6 +70,9 @@ class Retention:
         result['qualified_comparison_fraction']=result['qualified_cycle_comparisons']/valid if valid else None
         result['quantiles']={'state':'unavailable' if self.archived_counts['vehicles'] else 'exact_live',
                              'reason':'Request exact quantiles for a durable generation' if self.archived_counts['vehicles'] else None}
+        if self.identity_scheme == 'persistent_v1' or any(r.get('identity_scheme')=='persistent_v1' for r in rows):
+            values=identity_statistics(rows)
+            result.update(identity_summary({k:v+self.identity_totals[k] for k,v in values.items()}))
         return result
 
     def prepare(self,engine,state):
@@ -75,10 +86,11 @@ class Retention:
         # An unfinished inference and a revisable hysteresis suffix retain their
         # cycle dependencies. Everything else outside the display window seals.
         protected={r['cycle_id'] for r in state['predictions'] if r['status']=='predicting'}
+        if engine.schedule:protected.update(engine.schedule.protected_cycles())
         for active in engine.waits.active.values():
-            candidates=[active[k] for k in ('stop_candidate','move_candidate') if active[k] is not None]
+            candidates=revisable_times(active)
             if candidates:
-                protected.update(i['cycle_id'] for i in active['row']['intervals'] if i['start']>=min(candidates)-1e-8)
+                protected.update(i['cycle_id'] for i in active['row'].get('intervals',[]) if i['start']>=min(candidates)-1e-8)
         drop={c['cycle_id'] for c in cycles[:-self.budget] if c['cycle_id'] not in protected}
         retained_cycles={c['cycle_id'] for c in cycles if c['cycle_id'] not in drop}
         if engine.phase.green:retained_cycles.add(engine.phase.green['cycle_id'])
@@ -96,18 +108,19 @@ class Retention:
             # Internal persistence retains full precision; public row rendering
             # rounds only after exact statistics have been derived.
             snapshot.update({k:v for k,v in row.items() if isinstance(v,float)})
-            if row['completed']:
+            if row['completed'] and not (engine.schedule and engine.schedule.protected_since() is not None):
                 add('vehicles',identity,snapshot)
                 token['vehicles'][identity]={'final':deepcopy(snapshot)}
                 state['vehicles'].remove(snapshot)
                 continue
             active=states[identity]
-            candidates=[active[k] for k in ('stop_candidate','move_candidate') if active[k] is not None]
+            candidates=revisable_times(active)
             cutoff=min(candidates)-1e-8 if candidates else float('inf')
             count=0
             for interval in snapshot['intervals']:
                 if interval['end']>cutoff:break
                 count+=1
+            if row.get('identity_scheme')=='persistent_v1':active['_prepared_prefix_count']=count
             old_cycles=[str(c) for c in snapshot['cycles'] if c not in retained_cycles and
                         not any(i['cycle_id']==c for i in snapshot['intervals'][count:])]
             if count:add('vehicle_intervals',identity,snapshot['intervals'][:count])
@@ -123,6 +136,16 @@ class Retention:
         for row in terminal:
             if row['request_id'] in evict:add('predictions',row['request_id'],row);token['predictions'].append(row)
         state['predictions']=[r for r in state['predictions'] if r['request_id'] not in evict]
+        if engine.schedule:
+            for key in ('schedule_episodes','vehicle_savings'):self.archived_counts.setdefault(key,0)
+            terminal=[r for r in state['schedule_episodes'] if r['sealed']]
+            sealed={r['episode_id'] for r in terminal[:-min(self.budget,64)]}
+            token['schedule_episodes']=[];token['vehicle_savings']=[]
+            for key,field in (('schedule_episodes','episode_id'),('vehicle_savings','savings_id')):
+                for row in state[key]:
+                    if row['episode_id'] in sealed:
+                        add(key,row[field],row);token[key].append(row[field])
+                state[key]=[r for r in state[key] if r['episode_id'] not in sealed]
         for key,kind in (('phase_events','events'),('observation_gaps','gaps')):
             count=max(0,len(state.get(key,[]))-self.budget)
             token[kind]=count
@@ -145,6 +168,8 @@ class Retention:
             for key in COUNTS:projected[key]+=stats[key]
             counts[kind]+=len(rows)
         counts['phase_events']+=token['events'];counts['observation_gaps']+=token['gaps']
+        if engine.schedule:
+            for key in ('schedule_episodes','vehicle_savings'):counts[key]+=len(token.get(key,[]))
         state['retention']={'budget':self.budget,'archived_counts':counts,
                             'aggregates':projected,'wait_sum':wait_sum,'complete_sum':complete_sum}
         self.pending=deepcopy((state,token))
@@ -184,11 +209,18 @@ class Retention:
     def acknowledge(self,engine,token):
         if token['serial']<=self.acknowledged:return
         self.index_token(token)
+        if engine.schedule:
+            with engine.schedule.lock:
+                for key,records in (('schedule_episodes',engine.schedule.records),('vehicle_savings',engine.schedule.savings)):
+                    for identity in token.get(key,[]):records.pop(identity,None)
+                    self.archived_counts[key]+=len(token.get(key,[]))
         for identity,change in token['vehicles'].items():
             row=engine.waits.records.get(identity)
             if row is None:continue
             if 'final' in change:
                 final=change['final'];stats=aggregate([final])
+                if final.get('identity_scheme')=='persistent_v1':
+                    for k,v in identity_statistics([final]).items():self.identity_totals[k]+=v
                 for key in COUNTS:self.totals[key]+=stats[key]
                 self.wait_sum+=final['red_wait_sec']
                 if stats['complete_vehicle_count']:self.complete_sum+=final['red_wait_sec']
@@ -210,12 +242,15 @@ class Retention:
                 progress['archived_intervals']+=change['intervals'];progress['archived_cycles']+=len(change['cycles'])
                 engine.waits.work-=change['intervals']
                 del row['intervals'][:change['intervals']]
+                active=engine.waits.active.get((row['tracker_epoch'],row['local_id']))
+                if active is not None and row.get('identity_scheme')=='persistent_v1':
+                    active['_prepared_prefix_count']=max(0,active.get('_prepared_prefix_count',0)-change['intervals'])
                 for cycle in change['cycles']:
                     row['wait_by_cycle'].pop(cycle,None)
                     if int(cycle) in row['cycles']:row['cycles'].remove(int(cycle))
         for identity,active in list(engine.waits.active.items()):
             if active['row']['vehicle_id'] not in engine.waits.records:
-                if engine.waits.last_time-active.get('_last_seen',active['row']['last_seen'])>engine.policy.association_gap_sec:
+                if engine.waits.last_time-active.get('_last_seen',active['row']['last_seen'])>engine.waits.policy.association_gap_sec:
                     del engine.waits.active[identity]
                     continue
                 active['row']= {k:v for k,v in active['row'].items() if k not in ('intervals','wait_by_cycle','cycles')}

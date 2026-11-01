@@ -121,6 +121,7 @@
     // Camera 1 runs YOLO only on this click: a fresh preview frame is enough, no prior metrics.
     const fresh=telemetry?.camera1?.frame_fresh===true;
     $('predictNextGreen').disabled=telemetry?.lifecycle?.storage_suspended || busy || !running || !fresh || pending || telemetry.prediction_busy || ['GREEN','YELLOW'].includes(phase);
+    if(telemetry?.schedule_comparison?.enabled)$('predictNextGreen').disabled=true;
   }
   function changeMode() {
     for(const role of roles){camera[role].calibration=null;camera[role].image=null;}
@@ -139,11 +140,25 @@
     if(Object.values(result).some(value=>typeof value==='number' && !Number.isFinite(value)))throw new Error('Measurement settings must be finite numbers.');
     return result;
   }
+  function redWaitLabel(record) {
+    if(record.identity_scheme!=='persistent_v1')return fmt(record.red_wait_sec)+' s';
+    const pending=record.pending_estimated_red_wait_sec || 0;
+    return `${fmt(record.red_wait_sec)} confirmed + ${fmt(record.estimated_red_wait_sec || 0)} estimated${pending ? ` + ${fmt(pending)} provisional` : ''} = ${fmt(record.display_red_wait_sec)} s`;
+  }
   async function startRun() {
     busy=true;updateControls();show('Opening both camera sources and loading models…');
     try {
-      const data=await json('/api/observation/start',{system:camera.system.calibration,acquisition:camera.acquisition.calibration,
-        source_mode:mode(),step_mode:$('startPaused').value==='yes',shared_test:$('sharedTest').checked,policy:policy()});
+      const settings={system:camera.system.calibration,acquisition:camera.acquisition.calibration,
+        source_mode:mode(),step_mode:$('startPaused').value==='yes',shared_test:$('sharedTest').checked,policy:policy()};
+      if($('vehicleIdentityMode').value==='persistent_v1')settings.vehicle_identity={mode:'persistent_v1',
+        occlusion_retention_sec:Number($('identityRetention').value),max_estimated_gap_sec:Number($('estimateGap').value)};
+      if($('scheduleEnabled').checked){
+        if(!settings.vehicle_identity)throw new Error('Select persistent vehicle IDs for A/B comparison.');
+        if(!camera.system.calibration?.signal_roi)throw new Error('Draw and save movement A’s signal head in Camera 1 calibration.');
+        settings.schedule_comparison={enabled:true,a_movement_id:$('scheduleAMovement').value.trim(),
+          b_movement_id:settings.policy.movement_id,unchanged_clearance:$('unchangedClearance').checked};
+      }
+      const data=await json('/api/observation/start',settings);
       runId=data.run_id;vehicleOffset=0;captureRequestId=null;
       for(const role of roles){$(role+'Feed').src=`/stream/observation/${role}?run=${encodeURIComponent(runId)}`;$(role+'Feed').hidden=false;$(role+'Placeholder').hidden=true;}
       show('Observation started. Camera 2 measures continuously; Camera 1 runs YOLO only when you click Analyze frame & predict, shortly before this movement turns green.','success');
@@ -177,17 +192,22 @@
     $('savedQuantiles').disabled=!view || !!view.error;
     const q=view?.quantiles;
     $('savedQuantileStatus').textContent=q ? `Exact durable median / P95 for ${view.id}: ${fmt(q.median_red_wait_sec)} / ${fmt(q.p95_red_wait_sec)} s · ${q.sample_count} samples · generation ${q.generation ?? 'unknown (legacy)'}${page && q.generation!==page.generation ? ' (different generation from page; reload to compare)' : ''}` : view?.quantileStatus || 'No exact quantiles requested for this saved run.';
-    const columns=view?.kind==='predictions' ? ['Request ID','Cycle','ANFIS green','Status','Qualification'] : view?.kind==='comparisons' ? ['Cycle','Request ID','ANFIS green','Actual green','Difference','Qualification'] : ['Vehicle ID','Class','Red wait','Total stopped','State','Observation quality'];
+    const columns=view?.kind==='schedule_episodes' ? ['A episode','B episode','Actual A green','Recommended A green','Status','Evidence'] : view?.kind==='vehicle_savings' ? ['Vehicle','A episode','Observed red stop','Hidden estimated stop','Under proposed schedule','Potential saving','Status'] : view?.kind==='predictions' ? ['Request ID','Cycle','ANFIS green','Status','Qualification'] : view?.kind==='comparisons' ? ['Cycle','Request ID','ANFIS green','Actual green','Difference','Qualification'] : ['Vehicle ID','Class','Red wait','Total stopped','State','Observation quality'];
     const header=document.createElement('tr');
+    if(q?.metric)$('savedQuantileStatus').textContent+=' · metric '+q.metric;
     columns.forEach(title=>{const th=document.createElement('th');th.textContent=title;header.append(th);});
     $('savedEvidence').querySelector('thead').replaceChildren(header);
     populateTable('savedEvidence',page?.rows || [],columns.length,(row,record)=>{
-      if(view.kind==='predictions'){
+      if(view.kind==='schedule_episodes'){
+        cell(row,record.episode_id);cell(row,record.b_episode_id || 'Unpaired');cell(row,record.a_end==null ? 'Pending' : fmt(record.a_end-record.a_start)+' s');cell(row,fmt(record.recommended_green_sec)+' s');cell(row,record.status);cell(row,(record.reasons || []).join(' · '));
+      }else if(view.kind==='vehicle_savings'){
+        cell(row,record.vehicle_id);cell(row,record.episode_id);cell(row,fmt(record.observed_red_stop_sec)+' s');cell(row,fmt(record.estimated_actual_red_stop_sec)+' s');cell(row,fmt(record.estimated_schedule_red_stop_sec)+' s');cell(row,savingLabel(record));cell(row,record.available ? record.comparison_mode : (record.reasons || []).join(' · '));
+      }else if(view.kind==='predictions'){
         cell(row,record.request_id);cell(row,record.cycle_id ?? 'unknown');cell(row,fmt(record.recommended_green_sec)+' s');cell(row,record.status);cell(row,qualificationLabel(record));
       }else if(view.kind==='comparisons'){
         cell(row,record.cycle_id);cell(row,record.prediction?.request_id || 'No recommendation');cell(row,fmt(record.recommended_green_sec)+' s');cell(row,fmt(record.actual_green_sec)+' s');cell(row,fmt(record.difference_sec)+' s');cell(row,cycleStatusLabel(record));
       }else{
-        cell(row,record.vehicle_id);cell(row,record.class_name);cell(row,fmt(record.red_wait_sec)+' s');cell(row,fmt(record.total_stopped_sec)+' s');cell(row,record.tracking_state);
+        cell(row,record.vehicle_id);cell(row,record.class_name);cell(row,redWaitLabel(record));cell(row,fmt(record.total_stopped_sec)+' s');cell(row,record.tracking_state);
         const flags=[...(record.quality_flags || [])];if(record.left_censored)flags.push('partial arrival');if(record.right_censored)flags.push('partial departure');cell(row,flags.join(' · ') || 'Complete');
       }
     },view?.error ? 'Page cleared. Reload selected evidence to restart pagination.' : 'No records in this saved page.');
@@ -217,7 +237,8 @@
     const id=savedView.id,token=++quantileRequest;
     savedView.quantileStatus='Pending · computing exact durable quantiles';renderSaved();
     try{
-      const result=await json('/api/observation/quantiles?'+new URLSearchParams({run_id:id}));
+      const query={run_id:id};if($('savedQuantileMetric').value==='best_estimate')query.metric='best_estimate';
+      const result=await json('/api/observation/quantiles?'+new URLSearchParams(query));
       if(token!==quantileRequest || savedView?.id!==id)return;
       savedView.quantiles=result;renderSaved();
     }catch(error){
@@ -275,6 +296,10 @@
       $('sharedTest').checked=data.shared_source_test;
       const settings={movementId:'movement_id',sourceOffset:'offset_sec',stoppedSpeed:'stopped_speed_mps',movingSpeed:'moving_speed_mps',stopPersistence:'stop_persistence_sec',gapLimit:'max_gap_sec',associationLimit:'association_gap_sec',phaseDebounce:'debounce_frames',phaseRatio:'phase_ratio'};
       for(const[id,key]of Object.entries(settings))$(id).value=data.policy[key];
+      $('vehicleIdentityMode').value=data.vehicle_identity?.mode || 'native';
+      if(data.vehicle_identity){$('identityRetention').value=data.vehicle_identity.occlusion_retention_sec;$('estimateGap').value=data.vehicle_identity.max_estimated_gap_sec;}
+      $('scheduleEnabled').checked=!!data.schedule_comparison?.enabled;
+      if(data.schedule_comparison){$('scheduleAMovement').value=data.schedule_comparison.a_movement_id;$('unchangedClearance').checked=!!data.schedule_comparison.unchanged_clearance;}
       boundRunId=runId;
     }
     $('sessionStatus').textContent=data.state.toUpperCase();
@@ -288,13 +313,14 @@
     $('durabilityStatus').textContent=`Snapshot revision ${data.snapshot_revision ?? 'unknown'} · durable revision ${lifecycle.durable_revision ?? 'unknown'} · generation ${lifecycle.durable_generation ?? 'unknown'} · ${lifecycle.durable_finalized ? 'durably finalized' : lifecycle.terminal_state || 'open'}${lifecycle.storage_suspended ? ' · measurement suspended' : ''}`;
     $('retryStorage').hidden=!data.storage_error;
     $('historyStatus').textContent=`Live windows: ${data.comparisons.length} of ${data.history?.comparisons?.total ?? data.comparisons.length} cycles · ${data.predictions.length} of ${data.history?.predictions?.total ?? data.predictions.length} predictions. Full durable evidence is available through history and export.`;
-    const last=data.predictions.at(-1);
+    const episode=data.schedule_comparison?.enabled ? data.schedule_episodes?.at(-1) : null;
+    const last=episode ? {...episode,request_id:episode.episode_id,clicked_at:episode.captured_at,completed_lead_sec:null} : data.predictions.at(-1);
     $('recommendedGreen').textContent=fmt(last?.recommended_green_sec);
     $('recommendationCaption').textContent=last ? `${last.status.replaceAll('_',' ')} · ${qualificationLabel(last)}` : 'Awaiting manual capture';
     $('predictionStatus').replaceChildren();
     const analysis=last?.camera_analysis,analysisText=!analysis ? '' : analysis.state==='pending' ? ' · analysing frame' : analysis.state==='complete' ? ` · frame #${last.camera1_frame?.sequence} analysed (${analysis.detections} vehicles)` : ` · frame analysis ${analysis.state.replaceAll('_',' ')}${analysis.error ? ': '+analysis.error : ''}`;
     if(last){$('predictionStatus').append(document.createTextNode(`Capture at ${fmt(last.clicked_at,2)}s${analysisText} · ${last.status.replaceAll('_',' ')}${last.error && !analysis?.error ? ': '+last.error : ''}${last.completed_lead_sec!==null ? ` · total completion lead ${fmt(last.completed_lead_sec,2)}s` : ''}`));
-      if(['predicting','awaiting_green'].includes(last.status)){const button=document.createElement('button');button.textContent='Cancel pending';button.onclick=()=>safe(async()=>{await json(`/api/observation/predictions/${encodeURIComponent(last.request_id)}/cancel?run_id=${encodeURIComponent(runId)}`,{});await poll();});$('predictionStatus').append(' ',button);}}
+      if(!data.schedule_comparison?.enabled && ['predicting','awaiting_green'].includes(last.status)){const button=document.createElement('button');button.textContent='Cancel pending';button.onclick=()=>safe(async()=>{await json(`/api/observation/predictions/${encodeURIComponent(last.request_id)}/cancel?run_id=${encodeURIComponent(runId)}`,{});await poll();});$('predictionStatus').append(' ',button);}}
     else $('predictionStatus').textContent='Click shortly before green. Camera 1 runs YOLO once on the current frame, then ANFIS.';
     $('predictionReady').textContent=!$('predictNextGreen').disabled ? 'Ready: one frame per click' : data.camera1?.frame_problem && active() ? data.camera1.frame_problem : 'See phase and capture state below';
     const phase=data.phase?.phase || 'UNKNOWN';$('phaseBadge').textContent='Phase '+phase.toLowerCase();$('phaseBadge').className='badge '+(phase==='RED'?'red':phase==='GREEN'?'green':'signal');
@@ -308,7 +334,7 @@
       cell(row,c.cycle_id);cell(row,fmt(c.prediction?.completed_lead_sec,2)+' s');cell(row,fmt(c.recommended_green_sec)+' s');cell(row,c.running_green_sec!==undefined ? 'Running' : fmt(c.actual_green_sec)+' s');cell(row,fmt(c.difference_sec)+' s');cell(row,`${fmt(c.observed_mean_red_wait_sec)} s · ${c.observed_vehicle_count ?? 'unknown'} samples · ${c.partial_vehicle_count ?? 'unknown'} partial`);cell(row,c.n_served);cell(row,cycleStatusLabel(c));
     },'No observed green interval yet.');
     populateTable('vehicleLedger',durableVehicles?.rows || data.vehicles,8,(row,v)=>{
-      cell(row,`#${v.local_id} · epoch ${v.tracker_epoch}`,v.vehicle_id);cell(row,v.class_name);cell(row,fmt(v.red_wait_sec)+' s');cell(row,fmt(v.total_stopped_sec)+' s');cell(row,v.tracking_state);cell(row,v.cycles.join(', ')+(v.history?.archived_cycles ? ' · earlier cycles in durable history' : ''));cell(row,v.crossed_stop_line ? (v.crossing_cycle==null ? 'Crossed · cycle unknown' : 'Crossed') : '—');
+      cell(row,v.identity_scheme==='persistent_v1' ? `V${v.local_id} · generation ${v.identity_generation}` : `#${v.local_id} · epoch ${v.tracker_epoch}`,v.vehicle_id);cell(row,v.class_name);cell(row,redWaitLabel(v));cell(row,fmt(v.total_stopped_sec)+' s');cell(row,v.identity_state || v.tracking_state);cell(row,v.cycles.join(', ')+(v.history?.archived_cycles ? ' · earlier cycles in durable history' : ''));cell(row,v.crossed_stop_line ? (v.crossing_cycle==null ? 'Crossed · cycle unknown' : 'Crossed') : '—');
       const quality=[...v.quality_flags];if(v.left_censored)quality.push('partial arrival');if(v.right_censored)quality.push(v.completed?'partial departure':'in progress');cell(row,quality.length ? [...new Set(quality)].join(' · ') : 'Complete');
     },'No stable acquisition vehicle IDs yet.');
     $('vehiclePage').textContent=durableVehicles ? `${durableVehicles.total ? durableVehicles.offset+1 : 0}–${Math.min(durableVehicles.offset+100,durableVehicles.total)} of ${durableVehicles.total} durable records · generation ${durableVehicles.generation}` : `Live window: ${data.vehicles.length} of ${data.vehicle_total} records`;
@@ -327,9 +353,31 @@
     else if(last?.error)show('Recommendation failed: '+last.error,'error');
     updateControls();
   }
+  function savingLabel(record) {
+    if(!record.available)return '—';
+    return `${fmt(record.potential_saving_sec)} s (${fmt(record.confirmed_potential_saving_sec)} from observed + ${fmt(record.estimated_potential_saving_sec)} from hidden time)`;
+  }
+  function renderSchedule(data) {
+    const enabled=!!data.schedule_comparison?.enabled;
+    $('scheduleSavingsPanel').hidden=!enabled;
+    $('predictNextGreen').textContent=enabled ? 'Automatic A-green capture' : 'Analyze frame & predict';
+    if(!enabled)return;
+    const episode=data.schedule_episodes?.at(-1);
+    $('scheduleStatus').textContent=`Movement A: ${(data.a_phase?.measurement_phase || 'UNKNOWN').toLowerCase()} · ${data.schedule_episodes?.length || 0} recent A episodes${episode ? ' · '+episode.status+(episode.reasons?.length ? ' · '+episode.reasons.join(', ') : '') : ''}.`;
+    $('predictionReady').textContent='One Camera 1 image is analysed automatically per observed A-green episode.';
+    if(!episode)$('predictionStatus').textContent='Waiting for A green and a fresh observed B red. Configure A’s signal head in Camera 1 calibration.';
+    populateTable('scheduleSavings',data.vehicle_savings || [],8,(row,value)=>{
+      cell(row,value.vehicle_id);cell(row,`${value.episode_id} / ${value.b_cycle_id ?? 'unknown'}`);cell(row,fmt(value.observed_red_stop_sec)+' s');cell(row,fmt(value.estimated_actual_red_stop_sec)+' s');cell(row,fmt(value.estimated_schedule_red_stop_sec)+' s');cell(row,savingLabel(value));cell(row,value.measurement_coverage || 'unknown');cell(row,value.available ? (value.online_eligible ? 'Schedule estimate' : 'Retrospective estimate') : (value.reasons || []).join(' · '));
+    },'No completed paired A/B episode yet.');
+  }
+  function renderPersistentIdentity(data) {
+    const status=$('persistentIdentityStatus');
+    status.hidden=data.vehicle_identity?.mode!=='persistent_v1';
+    if(!status.hidden)status.textContent=`Persistent IDs · confirmed mean ${fmt(data.summary.observed_mean_red_wait_sec)} s · best-estimate mean ${fmt(data.summary.best_estimate_mean_red_wait_sec)} s · estimated share ${fmt((data.summary.estimated_wait_fraction || 0)*100)}% · unresolved ${fmt(data.summary.unresolved_coverage_sec)} vehicle-seconds${data.vehicle_identity.degradation ? ' · '+data.vehicle_identity.degradation : ''}.`;
+  }
   async function poll() {
     if(polling)return;polling=true;
-    try{renderTelemetry(await json(`/api/observation/telemetry?limit=100`));}
+    try{const data=await json(`/api/observation/telemetry?limit=100`);renderTelemetry(data);renderPersistentIdentity(data);renderSchedule(data);}
     catch(error){show('Dashboard connection: '+error.message,'error');}
     finally{polling=false;}
   }
@@ -380,7 +428,8 @@
     draft.parent_revision=data.binding?.geometry_digest ? camera[role].revision : undefined;
     $('calibrationTitle').textContent=role==='system'?'Camera 1 · System calibration':'Camera 2 · Acquisition calibration';
     $('calibrationSubtitle').textContent=role==='system'?'Road perspective and metric scale for ANFIS inputs.':'Waiting area, metric scale, signal head and vehicle crossing direction.';
-    for(const id of ['toolLamp','toolStopline','flipStopline','toolRed','toolYellow','toolGreen'])$(id).hidden=role!=='acquisition';
+    for(const id of ['toolLamp','toolRed','toolYellow','toolGreen'])$(id).hidden=role!=='acquisition' && !$('scheduleEnabled').checked;
+    for(const id of ['toolStopline','flipStopline'])$(id).hidden=role!=='acquisition';
     $('calibrationCanvas').width=image.naturalWidth;$('calibrationCanvas').height=image.naturalHeight;
     $('calibrationError').textContent='';$('calibrationModal').classList.add('active');setTool(role==='system'?'polygon':'lamp');draw();$('closeCalibration').focus();
   }
@@ -392,11 +441,12 @@
     if(modalRole==='acquisition' && (!draft.signal_roi || draft.stop_line.length!==2))throw new Error('Draw the acquisition signal head and two stop-line points.');
     const payload={...copy(draft),name:$('calibrationName').value.trim(),road_width_m:Number($('groundWidth').value),road_length_m:Number($('groundLength').value)};
     delete payload.rulerPoints;
-    if(modalRole==='system') {delete payload.stop_line;delete payload.signal_roi;delete payload.lamp_rois;}
+    if(modalRole==='system')delete payload.stop_line;
+    if(!payload.signal_roi) {delete payload.signal_roi;delete payload.lamp_rois;}
     else {
       const pixels=roi=>Object.fromEntries(Object.entries(roi).map(([key,value])=>[key,Math.round(value)]));
       payload.signal_roi=pixels(payload.signal_roi);
-      payload.lamp_rois=Object.fromEntries(Object.entries(payload.lamp_rois).map(([phase,roi])=>[phase,pixels(roi)]));
+      payload.lamp_rois=Object.fromEntries(Object.entries(payload.lamp_rois || {}).map(([phase,roi])=>[phase,pixels(roi)]));
     }
     const method=$('scaleMethod').value;
     if(method==='measured_dimensions')delete payload.ruler;
@@ -449,6 +499,7 @@
     $('previousSaved').onclick=()=>safe(()=>browseSaved(Math.max(0,savedView.page.offset-100),true));
     $('nextSaved').onclick=()=>safe(()=>browseSaved(savedView.page.next_offset,true));
     $('savedQuantiles').onclick=()=>safe(savedQuantiles);
+    $('savedQuantileMetric').onchange=()=>{++quantileRequest;if(savedView){savedView.quantiles=null;savedView.quantileStatus='Metric changed; request exact quantiles for the selected metric.';renderSaved();}};
     async function historyPage(offset=0) {
       const id=runId,token=++currentHistoryRequest;if(!id)return;
       const current=()=>id===runId && token===currentHistoryRequest;

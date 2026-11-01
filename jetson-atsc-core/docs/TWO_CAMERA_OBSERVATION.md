@@ -51,6 +51,12 @@ Stop closes both sources and the observation worker and preserves completed/part
 
 IDs are namespaced by run, acquisition role and tracker epoch. They stay stable while the tracker reliably associates the vehicle; this is not cross-camera re-identification. Missing tracker IDs and velocity warmup are unknown observations, not stationary vehicles with invented IDs.
 
+The default tracking profile is `baseline`. A run may opt in to `tracking_profile: "low_score"`
+in its start payload to admit low-confidence detections to Camera 2's ByteTrack
+association. Camera 1 still detection is unchanged. See [tracking profiles](TRACKING_PROFILES.md)
+for payload/preset examples, rollback, measured fixed-night-camera benefits and
+handheld/field-validation limits. Default presets stay on baseline.
+
 - **Red wait:** observed stopped time in the selected movement's waiting region while its signal is confirmed red.
 - **Total stopped:** observed stopped time in that region, including a vehicle that remains queued after green.
 - **Cycles:** the intervals/cycles experienced by that vehicle; its wait is not reset at each red.
