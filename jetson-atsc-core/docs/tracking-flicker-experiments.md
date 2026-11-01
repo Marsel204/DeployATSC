@@ -1,4 +1,4 @@
-# Experimental identity resolvers: local checkpoint
+# Experimental identity resolvers: checkpoint
 
 Default association remains `joint_image_motion_appearance_v2`. The opt-in
 `delayed_trajectory_v3` through `delayed_trajectory_v6` versions are preserved for
@@ -45,7 +45,7 @@ Run the unchanged adoption requirements explicitly with:
 
 The second command intentionally remains red at this checkpoint; the default
 complete pytest collection also includes that failed acceptance test. This is a
-user-authorized local experimental commit, not a release. Historical full-suite
+user-authorized experimental checkpoint, not a release. Historical full-suite
 results do not certify this snapshot. Keep the known failures visible.
 
 The five-block 50-vehicle/200-frame normal CPU workload reports median paired
@@ -66,3 +66,7 @@ Next investigation changes detector weights independently of tracker and
 application association. A model comparison must save boxes before tracking,
 normalize class names, keep the same source frames/ROI, and compare trackers on
 identical cached detections. Fewer logical IDs alone do not establish success.
+
+The later identical-input two-tracker demo and proposed physical ROI timing
+target are documented in [the ROI timing checkpoint](roi-timing-checkpoint.md).
+Its evidence snapshot does not change these failed adoption requirements.

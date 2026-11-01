@@ -1,0 +1,9 @@
+{
+  "utc": "2026-11-01T14:11:58.181908+00:00",
+  "frames": 660,
+  "legacy_boxes": 24210,
+  "extra_S10_below_0_28": 4387,
+  "exact_all_six_columns_match": true,
+  "mismatch_frames": [],
+  "scope": "No inference: filter fresh S10 raw boxes at legacy .28 and compare every ordered box/confidence/class with frozen legacy raw. Does not change either stream or rerun any arm."
+}

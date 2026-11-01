@@ -1,0 +1,226 @@
+{
+  "utc": "2026-11-01T16:07:49.259828+00:00",
+  "frames": 660,
+  "fps": 30,
+  "last_source_seconds": 21.966666666666665,
+  "shared_raw_sha256": "18b77ac987908d052c8a40cbd9cbbdfa23b6bd54b0e0327f0217e88bbb8b324d",
+  "source_decoded_sha256": "2f5636da631236513f20d87ee53d1221574b6a3c92a7d072f2b101a19c44d226",
+  "arms": {
+    "bytetrack": {
+      "candidate": "ByteTrack + v6",
+      "reference_same": {
+        "total": 94,
+        "equal": 80,
+        "equal_wilson95": [
+          0.7654011494244456,
+          0.9091595204134059
+        ],
+        "returned": 88,
+        "returned_wilson95": [
+          0.8676702644900562,
+          0.970420264702426
+        ],
+        "native_returned": 94,
+        "native_returned_wilson95": [
+          0.9607379237084551,
+          0.9999999999999999
+        ]
+      },
+      "reference_different": {
+        "total": 18,
+        "equal": 0,
+        "equal_wilson95": [
+          0.0,
+          0.17587922364665765
+        ],
+        "returned": 11,
+        "returned_wilson95": [
+          0.3861904160223791,
+          0.7969475342783638
+        ],
+        "native_returned": 18,
+        "native_returned_wilson95": [
+          0.8241207763533425,
+          1.0
+        ]
+      },
+      "reference_mixed": {
+        "total": 42,
+        "equal": 32,
+        "equal_wilson95": [
+          0.6147245613168169,
+          0.8651903577535287
+        ],
+        "returned": 38,
+        "returned_wilson95": [
+          0.7793489419142897,
+          0.9623377511944261
+        ],
+        "native_returned": 42,
+        "native_returned_wilson95": [
+          0.916201209134296,
+          0.9999999999999999
+        ]
+      },
+      "wrong_reference_codes": [],
+      "audited_counts": {
+        "Detected": 34,
+        "Loss and Recovered": 12,
+        "Loss": 37,
+        "Still tracked in ROI at clip end": 4
+      },
+      "car_id_rows": 87,
+      "unassigned_candidate_rows": 11,
+      "physically_rejected_ids": [
+        "V2",
+        "V9",
+        "V55",
+        "V58",
+        "V64",
+        "V77"
+      ],
+      "supported_car_roi_samples": 12299,
+      "unassigned_car_roi_samples": 649,
+      "engine_timing_ms": {
+        "median_ms": 26.588767497742083,
+        "p95_ms": 28.208289049507584,
+        "samples": 660
+      },
+      "feature_timing_ms": {
+        "median_ms": 18.386609008302912,
+        "p95_ms": 20.9656550498039,
+        "samples": 660
+      },
+      "reused_native_tracker_timing_ms": {
+        "median_ms": 8.739700002479367,
+        "p95_ms": 10.43877960546524,
+        "samples": 660
+      },
+      "source_native_sha256": "6657db2272ca5c4bf1d82cbfd54e76c1dfa196427671500a051d76b9240a0dbd",
+      "decoded_source_sha256": "2f5636da631236513f20d87ee53d1221574b6a3c92a7d072f2b101a19c44d226"
+    },
+    "botsort": {
+      "candidate": "BoT-SORT + v6",
+      "reference_same": {
+        "total": 94,
+        "equal": 81,
+        "equal_wilson95": [
+          0.7776396834531167,
+          0.9173622188040635
+        ],
+        "returned": 89,
+        "returned_wilson95": [
+          0.8814635102974011,
+          0.97706825131441
+        ],
+        "native_returned": 94,
+        "native_returned_wilson95": [
+          0.9607379237084551,
+          0.9999999999999999
+        ]
+      },
+      "reference_different": {
+        "total": 18,
+        "equal": 1,
+        "equal_wilson95": [
+          0.009875190978303097,
+          0.25757300781872594
+        ],
+        "returned": 11,
+        "returned_wilson95": [
+          0.3861904160223791,
+          0.7969475342783638
+        ],
+        "native_returned": 17,
+        "native_returned_wilson95": [
+          0.7424269921812741,
+          0.990124809021697
+        ]
+      },
+      "reference_mixed": {
+        "total": 42,
+        "equal": 35,
+        "equal_wilson95": [
+          0.6939599725535115,
+          0.9168408335360192
+        ],
+        "returned": 40,
+        "returned_wilson95": [
+          0.8421014760304114,
+          0.9868424750910944
+        ],
+        "native_returned": 42,
+        "native_returned_wilson95": [
+          0.916201209134296,
+          0.9999999999999999
+        ]
+      },
+      "wrong_reference_codes": [
+        "9bd2026a1c07745b"
+      ],
+      "audited_counts": {
+        "Detected": 38,
+        "Loss and Recovered": 9,
+        "Loss": 28,
+        "Still tracked in ROI at clip end": 4
+      },
+      "car_id_rows": 79,
+      "unassigned_candidate_rows": 6,
+      "physically_rejected_ids": [
+        "V2",
+        "V9",
+        "V35",
+        "V36",
+        "V67"
+      ],
+      "supported_car_roi_samples": 12409,
+      "unassigned_car_roi_samples": 580,
+      "engine_timing_ms": {
+        "median_ms": 26.580364996334538,
+        "p95_ms": 27.99796944236732,
+        "samples": 660
+      },
+      "feature_timing_ms": {
+        "median_ms": 18.815071998687927,
+        "p95_ms": 21.200989993667463,
+        "samples": 660
+      },
+      "reused_native_tracker_timing_ms": {
+        "median_ms": 8.855719002895057,
+        "p95_ms": 10.465520391881,
+        "samples": 660
+      },
+      "source_native_sha256": "3e8485293585d9102bc0d6e71b1266ae908b398357fcbd03390874288fa56986",
+      "decoded_source_sha256": "2f5636da631236513f20d87ee53d1221574b6a3c92a7d072f2b101a19c44d226"
+    }
+  },
+  "videos": {
+    "comparison-22s.mp4": {
+      "frames": 660,
+      "fps": 30.0,
+      "width": 1080,
+      "height": 1050,
+      "sha256": "291744af2bf2157a432bd2bfbcb5ed4bfba0e811f1ad88a190638e84189ae9d7",
+      "decoded_frame_md5_manifest_sha256": "1b822c95aff9c54d0056dd87ba2ec3e7d6609e16774dbca16fb8ee2e0e0e9797"
+    },
+    "bytetrack/annotated-22s.mp4": {
+      "frames": 660,
+      "fps": 30.0,
+      "width": 540,
+      "height": 1050,
+      "sha256": "696e2676633030e6e6fc604b4a4cbd49fcaefd1b18372ce088b7f5e243fdb57c",
+      "decoded_frame_md5_manifest_sha256": "e66b78f19ba0b4384d26788d7b25f9e34da273e6025dca76bf257fd5d13011d7"
+    },
+    "botsort/annotated-22s.mp4": {
+      "frames": 660,
+      "fps": 30.0,
+      "width": 540,
+      "height": 1050,
+      "sha256": "dca4ad65e88d9537696c82571d7c3b0fbcbe6eb14100da30e21bd757e7209d70",
+      "decoded_frame_md5_manifest_sha256": "c4398bc61e421342664a9a82b247d548ed28c8f8ee07bba0cebd1d0d98921b4d"
+    }
+  },
+  "physical_identity_success_rate": null,
+  "adopted": false,
+  "note": "Both candidates reproduce R3 exactly. Counts are application-ID outcomes on selected development evidence, not physical-car accuracy."
+}

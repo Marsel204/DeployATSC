@@ -1,0 +1,12 @@
+Car_Id,Time when detected,Time in the Region Of interest,Time where they Left,Status,Candidate_ref,Notes
+-,3.000,0.067,-,Loss,raw 0:542,Raw car candidate never associated with an admitted application ID; not a certified distinct physical car.
+-,3.933,0.133,-,Loss,raw 0:674,Raw car candidate never associated with an admitted application ID; not a certified distinct physical car.
+-,4.133,0.133,-,Loss,raw 0:696,Raw car candidate never associated with an admitted application ID; not a certified distinct physical car.
+-,4.467,0.133,-,Loss,raw 0:757,Raw car candidate never associated with an admitted application ID; not a certified distinct physical car.
+-,4.900,0.033,-,Loss,raw 0:834,Raw car candidate never associated with an admitted application ID; not a certified distinct physical car.
+-,5.033,0.033,-,Loss,raw 0:859,Raw car candidate never associated with an admitted application ID; not a certified distinct physical car.
+-,12.133,0.200,-,Loss,raw 0:1612,Raw car candidate never associated with an admitted application ID; not a certified distinct physical car.
+-,13.067,0.067,-,Loss,raw 0:1681,Raw car candidate never associated with an admitted application ID; not a certified distinct physical car.
+-,17.500,0.033,-,Loss,raw 0:2098,Raw car candidate never associated with an admitted application ID; not a certified distinct physical car.
+-,19.400,0.033,-,Loss,raw 0:2181,Raw car candidate never associated with an admitted application ID; not a certified distinct physical car.
+-,20.600,0.033,-,Loss,raw 0:2249,Raw car candidate never associated with an admitted application ID; not a certified distinct physical car.

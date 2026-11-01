@@ -1,0 +1,133 @@
+{
+  "source_product_commit": "65990137637df478f810ec0f9e37db41f7481cea",
+  "date": "2026-11-01",
+  "method": "Byte-for-byte copies of completed demo evidence; no inference, replay, relabelling, or metric changes.",
+  "files": [
+    {
+      "path": "REPORT.md",
+      "bytes": 4093,
+      "sha256": "9eac054b9886eb760b19ff6172725fdb95825561d1ba3c69606237c3b96f400c",
+      "source": "reviews/tracking-flicker-2026-11-01/demo-22s/REPORT.md"
+    },
+    {
+      "path": "VISUAL_INSPECTION.md",
+      "bytes": 3608,
+      "sha256": "e8f7fbfa0b05eeedac4b899092a0e35f0f9e680356ab1175ae9a0818ce232374",
+      "source": "reviews/tracking-flicker-2026-11-01/demo-22s/VISUAL_INSPECTION.md"
+    },
+    {
+      "path": "COMPARISON.json",
+      "bytes": 6441,
+      "sha256": "acc91366ad5e4ee4bb36a73e87a6d0c48bb84526a29c0581c9be4dfd70827ab3",
+      "source": "reviews/tracking-flicker-2026-11-01/demo-22s/COMPARISON.json"
+    },
+    {
+      "path": "PROTOCOL.json",
+      "bytes": 4310,
+      "sha256": "9cef1c2439a5ed030647ec9370b864b5222b30afe307f3620f7fc178e2835581",
+      "source": "reviews/tracking-flicker-2026-11-01/demo-22s/PROTOCOL.json"
+    },
+    {
+      "path": "REPRODUCTION.json",
+      "bytes": 409,
+      "sha256": "6d501b336e80febd17e37d560c89d1b50210328f1e425a4cba52fc974b42d8cd",
+      "source": "reviews/tracking-flicker-2026-11-01/demo-22s/REPRODUCTION.json"
+    },
+    {
+      "path": "VERIFICATION.json",
+      "bytes": 2001,
+      "sha256": "799cd1c65414e1eed5e6552c55153dd3ba41cecbb60ca74ac09468c3464fb530",
+      "source": "reviews/tracking-flicker-2026-11-01/demo-22s/VERIFICATION.json"
+    },
+    {
+      "path": "AUDIT_CHECKS.json",
+      "bytes": 27642,
+      "sha256": "123e37da46b06973b5ccce70f6baac578f04d3eba80661c20ee59c23907d18c4",
+      "source": "reviews/tracking-flicker-2026-11-01/demo-22s/AUDIT_CHECKS.json"
+    },
+    {
+      "path": "FINAL_MANIFEST.json",
+      "bytes": 12429,
+      "sha256": "09f08add4b26d664739e42d42b1db5dbdb15cb2c414791461d4c8ae181f8e0ba",
+      "source": "reviews/tracking-flicker-2026-11-01/demo-22s/FINAL_MANIFEST.json"
+    },
+    {
+      "path": "bytetrack/cars.csv",
+      "bytes": 2836,
+      "sha256": "4e0adc50bc78029ad2198265c33568ad2239270cf0afd2139908174bca161f44",
+      "source": "reviews/tracking-flicker-2026-11-01/demo-22s/bytetrack/cars.csv"
+    },
+    {
+      "path": "bytetrack/car_details.csv",
+      "bytes": 22247,
+      "sha256": "27c74773017d63762e21a82a8ad0676d3cfe403d407d1a756b549996709696d8",
+      "source": "reviews/tracking-flicker-2026-11-01/demo-22s/bytetrack/car_details.csv"
+    },
+    {
+      "path": "bytetrack/unassigned_candidates.csv",
+      "bytes": 1645,
+      "sha256": "7ec501c35c0db5a322fceb77d804a83bdc734b6a7b5b748395cc6ff239cb6eb3",
+      "source": "reviews/tracking-flicker-2026-11-01/demo-22s/bytetrack/unassigned_candidates.csv"
+    },
+    {
+      "path": "bytetrack/VISUAL_AUDIT.json",
+      "bytes": 1533,
+      "sha256": "e76f74cb9f38ffbbd6a304bda0200b99e1a3e5ce37aac6e28019cc7b20445424",
+      "source": "reviews/tracking-flicker-2026-11-01/demo-22s/bytetrack/VISUAL_AUDIT.json"
+    },
+    {
+      "path": "botsort/cars.csv",
+      "bytes": 2621,
+      "sha256": "6bb6fcb17f9f544b699caf6dd90e58dfcfcbe7d86de29e8c89153f6423d3b73a",
+      "source": "reviews/tracking-flicker-2026-11-01/demo-22s/botsort/cars.csv"
+    },
+    {
+      "path": "botsort/car_details.csv",
+      "bytes": 18888,
+      "sha256": "c5f6ab30aaef106f668683a747e3bffc290b5d13d8b50a7689f4bc09aaee0ebb",
+      "source": "reviews/tracking-flicker-2026-11-01/demo-22s/botsort/car_details.csv"
+    },
+    {
+      "path": "botsort/unassigned_candidates.csv",
+      "bytes": 946,
+      "sha256": "1a24000d05e4930e39337e5f963a2a3d8c6a3d71937feff3b8c3e9d8d1941bc6",
+      "source": "reviews/tracking-flicker-2026-11-01/demo-22s/botsort/unassigned_candidates.csv"
+    },
+    {
+      "path": "botsort/VISUAL_AUDIT.json",
+      "bytes": 1851,
+      "sha256": "5339c3644bc348265364e04f235772cb99e6ea067fb839b0ab4ee1d2068dcdda",
+      "source": "reviews/tracking-flicker-2026-11-01/demo-22s/botsort/VISUAL_AUDIT.json"
+    },
+    {
+      "path": "SOURCE_FREEZE.json",
+      "bytes": 6505,
+      "sha256": "56ff5e6d19da9219607c7a3376f142f35da4b71e40083e0c0276c93886dd5179",
+      "source": "reviews/tracking-flicker-2026-11-01/demo-22s/SOURCE_FREEZE.json"
+    },
+    {
+      "path": "r1/DETECTOR_STREAM_CONTROL.json",
+      "bytes": 374,
+      "sha256": "ca18a8cb38b4acd8e49c00fe0b8cca0126a308745db62e6f703e4848b3e03a17",
+      "source": "reviews/tracking-flicker-2026-11-01/r1/DETECTOR_STREAM_CONTROL.json"
+    },
+    {
+      "path": "r1/FLOOR_AUDIT.json",
+      "bytes": 1889,
+      "sha256": "fd024dc179bb6aefb8b08df35fdc10995eae7af6d70c52715ddc8bd38e16bcb6",
+      "source": "reviews/tracking-flicker-2026-11-01/r1/FLOOR_AUDIT.json"
+    },
+    {
+      "path": "r1/REID_SELECTION.json",
+      "bytes": 221,
+      "sha256": "6ac7667a424b272afb43b1222ad2e73eea95703dedacb473c3c237f0dbc90f68",
+      "source": "reviews/tracking-flicker-2026-11-01/r1/REID_SELECTION.json"
+    },
+    {
+      "path": "r1/SKIPPED_ARMS.json",
+      "bytes": 751,
+      "sha256": "cc4a2f8e07c7455f588b936b759dd4315ab2768af8af6ae72a5acbb595dedda7",
+      "source": "reviews/tracking-flicker-2026-11-01/r1/SKIPPED_ARMS.json"
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+[
+  {
+    "stream": "S30",
+    "encoder": "best_vehicle",
+    "trackers": [
+      "botsort",
+      "deepocsort",
+      "tracktrack"
+    ],
+    "status": "not run",
+    "reason": "No eligible vehicle encoder: CLIP failed its single 570-second R2 unit without an AUC; ResNet normalization undocumented. Selection gate unresolved, not evidence of chance-level performance."
+  },
+  {
+    "stream": "S10",
+    "encoder": "best_vehicle",
+    "trackers": [
+      "botsort",
+      "deepocsort",
+      "tracktrack"
+    ],
+    "status": "not run",
+    "reason": "No eligible vehicle encoder: CLIP failed its single 570-second R2 unit without an AUC; ResNet normalization undocumented. Selection gate unresolved, not evidence of chance-level performance."
+  }
+]

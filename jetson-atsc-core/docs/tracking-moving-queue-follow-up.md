@@ -84,8 +84,10 @@ Software checks, source/harness hashes and paired CPU stress results are retaine
 under the follow-up's `validation/` directory. Review is self-review by Codex Sol
 with max reasoning; no independent review or AEK enforcement is claimed.
 
-Repository publication is local-only at the user's request. PR #6 was already
-merged; no replacement PR, push, merge or deployment is part of this follow-up.
+The original follow-up was committed locally at the user's request after PR #6
+had merged. The later request to publish a draft checkpoint is recorded in
+[the ROI timing checkpoint](roi-timing-checkpoint.md); no merge or deployment is
+authorized.
 
 ## Verification and runtime
 
