@@ -17,7 +17,7 @@ import src.ui.observation_api as api
 from src.ui.observation_session import ObservationManager, ObservationSession
 from test_observation_sessions import FakeANFIS, run_payload
 from test_observation_pipeline import KnownVehicleDetector
-from test_observation_dashboard_browser import browser_server  # isolated real localhost API
+from test_observation_dashboard_browser import browser_server, show_view  # isolated real localhost API
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -117,6 +117,7 @@ def test_saved_browser_pages_quantiles_export_and_active_isolation(saved_browser
         page.on('pageerror', lambda e:errors.append(str(e)))
         page.on('request', lambda r:calls.append((r.method, r.url)))
         page.goto(saved_browser_server, wait_until='domcontentloaded')
+        show_view(page,'saved')
         expect(page.locator('#savedRuns option')).to_have_count(3)
         page.locator('#savedRuns').select_option('saved_alpha')
         page.locator('#browseSaved').click()
@@ -157,6 +158,7 @@ def test_saved_browser_pages_quantiles_export_and_active_isolation(saved_browser
         expect(page.locator('#meanWait')).to_have_text('—')
         expect(page.locator('#metricQ')).to_have_text('—')
         page.reload(wait_until='domcontentloaded')
+        show_view(page,'saved')
         expect(page.locator('#savedRuns option')).to_have_count(3)
         page.locator('#savedRuns').select_option('saved_legacy');page.locator('#browseSaved').click()
         page.locator('#savedKind').select_option('predictions')
@@ -174,6 +176,7 @@ def test_saved_browser_generation_conflict_and_late_response(saved_browser_serve
     with sync_playwright() as p:
         browser=p.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox'])
         page=browser.new_page();page.goto(saved_browser_server,wait_until='domcontentloaded')
+        show_view(page,'saved')
         expect(page.locator('#savedRuns option')).to_have_count(3)
         page.locator('#savedRuns').select_option('saved_alpha');page.locator('#browseSaved').click()
         expect(page.locator('#nextSaved')).to_be_enabled()
@@ -231,6 +234,8 @@ def test_real_browser_repeated_runs_keep_active_controls_and_streams(saved_brows
         expect(page.locator('#runLabel')).to_have_text(identities[1])
         feeds={role:page.locator('#'+role+'Feed').get_attribute('src') for role in ('system','acquisition')}
         calls=[];page.on('request',lambda r:calls.append((r.method,r.url)))
+        expect(page.locator('#workspace')).to_have_attribute('data-view','run')  # an active run opens the Run tab
+        show_view(page,'saved')
         for identity in identities:
             page.locator('#savedRuns').select_option(identity);page.locator('#browseSaved').click()
             page.locator('#savedKind').select_option('predictions')

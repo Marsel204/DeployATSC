@@ -5,6 +5,7 @@ ROOT=Path(__file__).resolve().parents[1]
 import pytest
 from playwright.sync_api import sync_playwright, expect
 from test_observation_sessions import run_payload
+from test_observation_dashboard_browser import show_view
 
 
 @pytest.mark.parametrize('transition', ['new_run', 'live', 'superseded'])
@@ -35,7 +36,7 @@ def test_current_history_and_quantiles_reject_obsolete_responses(tracked_server,
         second=first
         if transition=='new_run':
             page.locator('#btnStop').click();expect(page.locator('#sessionStatus')).to_have_text('STOPPED')
-            page.locator('.settings summary').click();page.locator('#startPaused').select_option('yes');page.locator('#btnStart').click()
+            show_view(page,'setup');page.locator('.settings summary').click();page.locator('#startPaused').select_option('yes');page.locator('#btnStart').click()
             expect(page.locator('#sessionStatus')).to_have_text('PAUSED')
             expect(page.locator('#runLabel')).not_to_have_text(first)
             second=page.locator('#runLabel').inner_text()

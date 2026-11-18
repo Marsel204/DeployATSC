@@ -61,6 +61,12 @@ uvicorn.run(app,host='127.0.0.1',port={port},log_level='error')
         process.terminate();process.wait(timeout=5);log.close()
 
 
+def show_view(page,name):
+    """Open a dashboard tab (setup, run, results, saved); controls on other tabs are hidden."""
+    page.locator(f'.viewnav [data-view-tab={name}]').click()
+    expect(page.locator('#workspace')).to_have_attribute('data-view',name)
+
+
 def click_point(page,x,y):
     box=page.locator('#calibrationCanvas').bounding_box()
     page.mouse.click(box['x']+x/320*box['width'],box['y']+y/240*box['height'])
@@ -215,4 +221,60 @@ def test_mobile_layout_tabs_and_calibration_cancel(browser_server):
         page.keyboard.press('Escape');expect(page.locator('#calibrationModal')).not_to_have_class('modal-overlay active')
         expect(page.locator('#systemReadiness')).to_have_text('Calibration required')
         page.screenshot(path=str(ROOT/'.venv/phase-e-resume-mobile.png'),full_page=True)
+        browser.close()
+
+
+def test_tabbed_workflow_checklist_shortcuts_and_point_drag(browser_server):
+    """Setup checklist gates Start; Run opens on start; Space/→ drive playback; points can be dragged."""
+    import json,urllib.request
+    with sync_playwright() as p:
+        browser=p.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox'])
+        page=browser.new_page(viewport={'width':1440,'height':1100})
+        errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
+        page.goto(browser_server,wait_until='domcontentloaded')
+        page.wait_for_selector('#systemFeed:not([hidden])')
+        expect(page.locator('#workspace')).to_have_attribute('data-view','setup')
+        expect(page.locator('#checkSystemSource')).to_have_class('check-row ok')
+        expect(page.locator('#checkSystemCalibration')).to_have_class('check-row')
+        expect(page.locator('#startBlocked')).to_contain_text('steps left')
+        expect(page.locator('#predictNextGreen')).to_be_hidden()  # Run-only control
+        options=page.locator('#acquisitionSource option').evaluate_all('(items)=>items.map(i=>({value:i.value,text:i.textContent}))')
+        page.locator('#acquisitionSource').select_option(next(item['value'] for item in options if 'signal.mp4' in item['text']))
+        page.wait_for_selector('#acquisitionFeed:not([hidden])')
+        calibrate(page,'system');calibrate(page,'acquisition')
+        expect(page.locator('#checkAcquisitionCalibration')).to_have_class('check-row ok')
+        expect(page.locator('#startBlocked')).to_have_text('Ready to start')
+        # Drag the first anchor instead of adding a fifth point; auto-advance must not swallow the drag.
+        page.locator('#systemCalibrate').click();page.locator('#toolAnchors').click()
+        import re
+        expect(page.locator('#toolAnchors')).to_have_class(re.compile(r'(?=.*\bactive\b)(?=.*\bdone\b)'))
+        box=page.locator('#calibrationCanvas').bounding_box()
+        page.mouse.move(box['x']+20/320*box['width'],box['y']+50/240*box['height']);page.mouse.down()
+        page.mouse.move(box['x']+40/320*box['width'],box['y']+60/240*box['height'],steps=4);page.mouse.up()
+        expect(page.locator('#toolHelp')).to_contain_text('4/4')
+        expect(page.locator('#calibrationError')).to_have_text('')
+        page.locator('#saveCalibration').click()
+        expect(page.locator('#calibrationModal')).not_to_have_class('modal-overlay active')
+        with urllib.request.urlopen(browser_server+'/api/observation/profiles') as response:
+            profiles=json.load(response)['profiles']
+        saved=page.locator('#systemProfile').input_value()  # the page selects the profile it just saved
+        anchors=next(pr for pr in profiles if pr['profile_id']==saved)['calibration']['anchors']
+        assert abs(anchors[0][0]-40)<3 and abs(anchors[0][1]-60)<3, anchors
+        page.locator('.settings summary').click();page.locator('#phaseDebounce').fill('1');page.locator('#startPaused').select_option('yes')
+        page.locator('#btnStart').click()
+        expect(page.locator('#sessionStatus')).to_have_text('PAUSED',timeout=10000)
+        expect(page.locator('#workspace')).to_have_attribute('data-view','run')
+        expect(page.locator('#predictNextGreen')).to_be_visible()
+        expect(page.locator('#btnPause')).to_be_hidden();expect(page.locator('#btnResume')).to_be_visible()
+        page.locator('body').click(position={'x':5,'y':5})
+        page.keyboard.press('Space')
+        expect(page.locator('#sessionStatus')).to_have_text('RUNNING')
+        expect(page.locator('#btnPause')).to_be_visible()
+        page.keyboard.press('Space')
+        expect(page.locator('#sessionStatus')).to_have_text('PAUSED')
+        show_view(page,'results');expect(page.locator('#cycleComparison')).to_be_visible();expect(page.locator('#predictNextGreen')).to_be_hidden()
+        show_view(page,'saved');expect(page.locator('#savedRuns')).to_be_visible()
+        page.locator('#btnStop').click();expect(page.locator('#sessionStatus')).to_have_text('STOPPED')
+        assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+        assert not errors
         browser.close()
