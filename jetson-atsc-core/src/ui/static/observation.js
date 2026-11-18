@@ -10,7 +10,7 @@
   let currentQuantileStatus = 'No durable quantiles requested.';
   // Saved evidence has its own identity and request fence; never rebind live telemetry.
   let savedRuns = [], savedView = null, savedRequest = 0, quantileRequest = 0;
-  let vehicleOffset = 0, captureRequestId = null, modalRole = null, draft = null, tool = 'polygon', drag = null, previousFocus = null;
+  let vehicleOffset = 0, captureRequestId = null, modalRole = null, draft = null, tool = 'polygon', drag = null, vertexDrag = null, previousFocus = null;
   const copy = value => JSON.parse(JSON.stringify(value));
   const fmt = (value, digits=1) => typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : '—';
   const active = () => telemetry && ['running','paused'].includes(telemetry.state);
@@ -122,6 +122,21 @@
     const fresh=telemetry?.camera1?.frame_fresh===true;
     $('predictNextGreen').disabled=telemetry?.lifecycle?.storage_suspended || busy || !running || !fresh || pending || telemetry.prediction_busy || ['GREEN','YELLOW'].includes(phase);
     if(telemetry?.schedule_comparison?.enabled)$('predictNextGreen').disabled=true;
+    // Setup checklist, start hint and run-state chrome. Plain property writes only.
+    const checks={checkSystemSource:!!source('system'),checkSystemCalibration:!!calibrationValid('system'),
+      checkAcquisitionSource:!!source('acquisition'),checkAcquisitionCalibration:!!calibrationValid('acquisition')};
+    for(const[id,ok]of Object.entries(checks))$(id).className='check-row'+(ok ? ' ok' : '');
+    const missing=Object.values(checks).filter(ok=>!ok).length;
+    $('startBlocked').textContent=running ? '' : missing ? `${missing} setup step${missing===1 ? '' : 's'} left` : 'Ready to start';
+    $('startBlocked').className='why'+(!running && missing ? ' blocked' : '');
+    $('tabSetupMark').className='stepmark'+(missing ? '' : ' ok');$('tabSetupMark').textContent=missing ? '1' : '✓';
+    $('tabRunMark').className='stepmark'+(running ? ' live' : '');$('tabRunMark').textContent=running ? '●' : '2';
+    $('btnResume').hidden=telemetry?.state!=='paused';$('btnPause').hidden=!$('btnResume').hidden;
+    $('workspace').className=running ? 'is-running' : '';
+  }
+  function showView(name) {
+    $('workspace').dataset.view=name;
+    document.querySelectorAll('.viewnav [data-view-tab]').forEach(tab=>tab.setAttribute('aria-selected',String(tab.dataset.viewTab===name)));
   }
   function changeMode() {
     for(const role of roles){camera[role].calibration=null;camera[role].image=null;}
@@ -159,7 +174,7 @@
           b_movement_id:settings.policy.movement_id,unchanged_clearance:$('unchangedClearance').checked};
       }
       const data=await json('/api/observation/start',settings);
-      runId=data.run_id;vehicleOffset=0;captureRequestId=null;
+      runId=data.run_id;vehicleOffset=0;captureRequestId=null;showView('run');
       for(const role of roles){$(role+'Feed').src=`/stream/observation/${role}?run=${encodeURIComponent(runId)}`;$(role+'Feed').hidden=false;$(role+'Placeholder').hidden=true;}
       show('Observation started. Camera 2 measures continuously; Camera 1 runs YOLO only when you click Analyze frame & predict, shortly before this movement turns green.','success');
       await poll();
@@ -381,8 +396,16 @@
     catch(error){show('Dashboard connection: '+error.message,'error');}
     finally{polling=false;}
   }
-  const toolHelp={polygon:'Click at least 3 points around the road/waiting area. Clear or undo to edit.',anchors:'Click exactly 4 points: Far-Left, Far-Right, Near-Right, Near-Left.',ruler:'Click 2 endpoints on a known ground distance, then enter its real length.',lamp:'Drag a box around one signal head for the target movement. This belongs to camera 2.',stopline:'Click 2 points across the stop line. Flip the arrow to match vehicle travel.',lamp_RED:'Drag the red lamp region inside the signal-head box.',lamp_YELLOW:'Drag the yellow lamp region inside the signal-head box.',lamp_GREEN:'Drag the green lamp region inside the signal-head box.'};
-  function setTool(value) {tool=value;document.querySelectorAll('[data-tool]').forEach(button=>button.classList.toggle('active',button.dataset.tool===tool));$('toolHelp').textContent=toolHelp[tool];}
+  const toolHelp={polygon:'Click at least 3 points around the road / waiting area, then pick the next step.',anchors:'Click 4 points: far-left, far-right, near-right, near-left.',ruler:'Click both ends of a known ground distance and enter its length.',lamp:'Drag a box around the signal head for the target movement.',stopline:'Click both ends of the stop line. Flip the arrow to match travel.',lamp_RED:'Drag the red lamp region inside the signal box.',lamp_YELLOW:'Drag the yellow lamp region inside the signal box.',lamp_GREEN:'Drag the green lamp region inside the signal box.'};
+  // Main steps in order; ruler and lamp regions are optional extras.
+  const stepOrder=()=>modalRole==='acquisition' ? ['lamp','polygon','anchors','stopline'] : $('scheduleEnabled').checked ? ['polygon','anchors','lamp'] : ['polygon','anchors'];
+  function stepDone(step) {return step==='lamp' ? !!draft.signal_roi : step==='polygon' ? draft.polygon.length>=3 : step==='anchors' ? draft.anchors.length===4 : step==='stopline' ? draft.stop_line.length===2 : false;}
+  function advanceIfDone() {
+    // Auto-advance once a fixed-size step is complete; the road polygon may take any number of points.
+    if(tool==='polygon' || !stepOrder().includes(tool) || !stepDone(tool))return;
+    const next=stepOrder().find(step=>!stepDone(step));if(next)setTool(next);
+  }
+  function setTool(value) {tool=value;document.querySelectorAll('[data-tool]').forEach(button=>button.classList.toggle('active',button.dataset.tool===tool));$('toolHelp').textContent=toolHelp[tool];if(draft)draw();}
   function canvasPoint(event) {const canvas=$('calibrationCanvas'),rect=canvas.getBoundingClientRect();return [Math.max(0,Math.min(canvas.width-1,(event.clientX-rect.left)*canvas.width/rect.width)),Math.max(0,Math.min(canvas.height-1,(event.clientY-rect.top)*canvas.height/rect.height))];}
   function pointKey() {return {polygon:'polygon',anchors:'anchors',ruler:'rulerPoints',stopline:'stop_line'}[tool];}
   function regionKey() {return tool==='lamp'?'signal_roi':tool.startsWith('lamp_')?tool.slice(5):null;}
@@ -392,29 +415,41 @@
     if(canvas.dataset.initialized)return;canvas.dataset.initialized='yes';
     canvas.addEventListener('pointerdown',event=>{
       if(!draft)return;const point=canvasPoint(event);canvas.setPointerCapture(event.pointerId);
+      const key=pointKey(),radius=12*canvas.width/canvas.getBoundingClientRect().width;
+      const hit=key ? draft[key].findIndex(p=>Math.hypot(p[0]-point[0],p[1]-point[1])<=radius) : -1;
+      if(hit>=0){vertexDrag={key,index:hit};canvas.style.cursor='grabbing';return;}
       if(regionKey()){drag=point;setRegion({xmin:point[0],ymin:point[1],xmax:point[0],ymax:point[1]});}
       else {const key=pointKey(),maximum=key==='anchors'?4:key==='polygon'?100:2;
         if(draft[key].length>=maximum){$('calibrationError').textContent='Clear this tool before drawing a replacement.';return;}
-        draft[key].push(point);}
+        draft[key].push(point);advanceIfDone();}
       draw();
     });
-    canvas.addEventListener('pointermove',event=>{if(!drag)return;const point=canvasPoint(event);setRegion({xmin:Math.min(drag[0],point[0]),ymin:Math.min(drag[1],point[1]),xmax:Math.max(drag[0],point[0]),ymax:Math.max(drag[1],point[1])});draw();});
-    canvas.addEventListener('pointerup',()=>{drag=null;draw();});
-    canvas.addEventListener('pointercancel',()=>{drag=null;});
+    canvas.addEventListener('pointermove',event=>{
+      if(vertexDrag){draft[vertexDrag.key][vertexDrag.index]=canvasPoint(event);draw();return;}
+      if(!drag && draft && pointKey()){const point=canvasPoint(event),radius=12*canvas.width/canvas.getBoundingClientRect().width;
+        canvas.style.cursor=draft[pointKey()].some(p=>Math.hypot(p[0]-point[0],p[1]-point[1])<=radius) ? 'grab' : 'crosshair';}
+      if(!drag)return;const point=canvasPoint(event);setRegion({xmin:Math.min(drag[0],point[0]),ymin:Math.min(drag[1],point[1]),xmax:Math.max(drag[0],point[0]),ymax:Math.max(drag[1],point[1])});draw();});
+    canvas.addEventListener('pointerup',()=>{if(vertexDrag){vertexDrag=null;canvas.style.cursor='grab';draw();return;}const wasRegion=!!drag;drag=null;if(wasRegion && draft)advanceIfDone();draw();});
+    canvas.addEventListener('pointercancel',()=>{drag=null;vertexDrag=null;});
   }
+  // Overlay colours: Okabe-Ito colour-blind-safe set, distinct from the signal-phase colours.
+  const AREA='#56B4E9',ANCHOR='#CC79A7',RULER='#E69F00',STOPLINE='#D55E00',SIGNAL_BOX='#F0E442';
   function draw() {
     if(!draft || !modalRole)return;
     const canvas=$('calibrationCanvas'),ctx=canvas.getContext('2d'),image=camera[modalRole].image;
     ctx.clearRect(0,0,canvas.width,canvas.height);ctx.drawImage(image,0,0,canvas.width,canvas.height);
     const scale=Math.max(1,canvas.width/500);ctx.lineWidth=2*scale;ctx.font=`${11*scale}px sans-serif`;
-    const line=(points,color,closed=false)=>{if(!points.length)return;ctx.strokeStyle=color;ctx.fillStyle=color;ctx.beginPath();points.forEach((point,index)=>index?ctx.lineTo(...point):ctx.moveTo(...point));if(closed && points.length>=3){ctx.closePath();ctx.fillStyle=color+'25';ctx.fill();}ctx.stroke();points.forEach((point,index)=>{ctx.fillStyle=color;ctx.beginPath();ctx.arc(...point,3*scale,0,Math.PI*2);ctx.fill();if(color==='#75d6d2')ctx.fillText(String(index+1),point[0]+7*scale,point[1]-5*scale);});};
-    line(draft.polygon,'#75d6d2',true);line(draft.anchors,'#efc570',true);line(draft.rulerPoints,'#f49c6b');line(draft.stop_line,'#f1f4fa');
-    if(draft.stop_line.length===2){const[a,b]=draft.stop_line,dx=b[0]-a[0],dy=b[1]-a[1],length=Math.hypot(dx,dy);if(length){const x=(a[0]+b[0])/2,y=(a[1]+b[1])/2,nx=-dy/length*draft.crossing_direction,ny=dx/length*draft.crossing_direction;line([[x-15*scale*nx,y-15*scale*ny],[x+15*scale*nx,y+15*scale*ny]],'#efc570');ctx.fillStyle='#efc570';ctx.fillText('COUNT →',x+18*scale*nx,y+18*scale*ny);}}
+    const line=(points,color,closed=false)=>{if(!points.length)return;ctx.strokeStyle=color;ctx.fillStyle=color;ctx.beginPath();points.forEach((point,index)=>index?ctx.lineTo(...point):ctx.moveTo(...point));if(closed && points.length>=3){ctx.closePath();ctx.fillStyle=color+'25';ctx.fill();}ctx.stroke();points.forEach((point,index)=>{ctx.fillStyle=color;ctx.beginPath();ctx.arc(...point,3*scale,0,Math.PI*2);ctx.fill();if(color===ANCHOR)ctx.fillText(String(index+1),point[0]+7*scale,point[1]-5*scale);});};
+    line(draft.polygon,AREA,true);line(draft.anchors,ANCHOR,true);line(draft.rulerPoints,RULER);line(draft.stop_line,STOPLINE);
+    if(draft.stop_line.length===2){const[a,b]=draft.stop_line,dx=b[0]-a[0],dy=b[1]-a[1],length=Math.hypot(dx,dy);if(length){const x=(a[0]+b[0])/2,y=(a[1]+b[1])/2,nx=-dy/length*draft.crossing_direction,ny=dx/length*draft.crossing_direction;line([[x-15*scale*nx,y-15*scale*ny],[x+15*scale*nx,y+15*scale*ny]],STOPLINE);ctx.fillStyle=STOPLINE;ctx.fillText('COUNT →',x+18*scale*nx,y+18*scale*ny);}}
     const box=(roi,color,label)=>{if(!roi)return;ctx.strokeStyle=color;ctx.strokeRect(roi.xmin,roi.ymin,roi.xmax-roi.xmin,roi.ymax-roi.ymin);ctx.fillStyle=color;ctx.fillText(label,roi.xmin,Math.max(14*scale,roi.ymin-5*scale));};
-    box(draft.signal_roi,'#efc570','SIGNAL HEAD');for(const phase of ['RED','YELLOW','GREEN'])box(draft.lamp_rois[phase],{RED:'#f29394',YELLOW:'#efc570',GREEN:'#89d8a8'}[phase],phase);
+    box(draft.signal_roi,SIGNAL_BOX,'SIGNAL HEAD');for(const phase of ['RED','YELLOW','GREEN'])box(draft.lamp_rois[phase],{RED:'#dd5a52',YELLOW:'#d9a03c',GREEN:'#4fa36e'}[phase],phase);
     const lines=[`${draft.anchors.length}/4 perspective anchors`,`${draft.polygon.length} road/waiting points`,`${draft.rulerPoints.length}/2 ruler points`];
     if(modalRole==='acquisition')lines.push(`${draft.signal_roi ? 'Signal head drawn' : 'Signal head required'}`,`${draft.stop_line.length}/2 stop-line points`);
     $('calibrationChecklist').replaceChildren(...lines.map(text=>{const line=document.createElement('div');line.textContent=text;return line;}));
+    for(const step of ['lamp','polygon','anchors','stopline'])document.querySelector(`.stepper [data-tool="${step}"]`).classList.toggle('done',stepDone(step));
+    const count={polygon:`${draft.polygon.length} points`,anchors:`${draft.anchors.length}/4`,stopline:`${draft.stop_line.length}/2`,ruler:`${draft.rulerPoints.length}/2`}[tool];
+    $('toolHelp').textContent=toolHelp[tool]+(count ? ` · ${count}` : '');
   }
   async function openCalibration(role, initial=null) {
     previousFocus=document.activeElement;modalRole=role;await loadPreview(role);
@@ -433,7 +468,7 @@
     $('calibrationCanvas').width=image.naturalWidth;$('calibrationCanvas').height=image.naturalHeight;
     $('calibrationError').textContent='';$('calibrationModal').classList.add('active');setTool(role==='system'?'polygon':'lamp');draw();$('closeCalibration').focus();
   }
-  function closeCalibration(){ $('calibrationModal').classList.remove('active');draft=null;modalRole=null;drag=null;previousFocus?.focus(); }
+  function closeCalibration(){ $('calibrationModal').classList.remove('active');draft=null;modalRole=null;drag=null;vertexDrag=null;previousFocus?.focus(); }
   async function saveCalibration() {
     $('calibrationError').textContent='';
     if(draft.anchors.length!==4)throw new Error('Draw exactly four perspective anchors for this camera.');
@@ -541,7 +576,17 @@
     $('clearTool').onclick=()=>{if(regionKey()){if(tool==='lamp')draft.signal_roi=null;else delete draft.lamp_rois[regionKey()];}else draft[pointKey()]=[];draw();};
     $('undoTool').onclick=()=>{const key=pointKey();if(key)draft[key].pop();draw();};$('flipStopline').onclick=()=>{draft.crossing_direction*=-1;draw();};
     $('closeCalibration').onclick=$('cancelCalibration').onclick=closeCalibration;$('saveCalibration').onclick=()=>safe(saveCalibration,true);
-    document.addEventListener('keydown',event=>{if(!$('calibrationModal').classList.contains('active'))return;if(event.key==='Escape'){event.preventDefault();closeCalibration();}if(event.key==='Tab'){const focus=[...$('calibrationModal').querySelectorAll('button,input,select')].filter(e=>!e.hidden && !e.disabled && e.offsetParent!==null);const first=focus[0],last=focus.at(-1);if(! $('calibrationModal').contains(document.activeElement)){event.preventDefault();first.focus();}else if(event.shiftKey && document.activeElement===first){event.preventDefault();last.focus();}else if(!event.shiftKey && document.activeElement===last){event.preventDefault();first.focus();}}});
+    document.addEventListener('keydown',event=>{if(!$('calibrationModal').classList.contains('active'))return;if((event.ctrlKey || event.metaKey) && event.key.toLowerCase()==='z'){event.preventDefault();$('undoTool').click();return;}if(event.key==='Escape'){event.preventDefault();closeCalibration();}if(event.key==='Tab'){const focus=[...$('calibrationModal').querySelectorAll('button,input,select')].filter(e=>!e.hidden && !e.disabled && e.offsetParent!==null);const first=focus[0],last=focus.at(-1);if(! $('calibrationModal').contains(document.activeElement)){event.preventDefault();first.focus();}else if(event.shiftKey && document.activeElement===first){event.preventDefault();last.focus();}else if(!event.shiftKey && document.activeElement===last){event.preventDefault();first.focus();}}});
+    document.querySelectorAll('[data-view-tab]').forEach(tab=>tab.addEventListener('click',()=>showView(tab.dataset.viewTab)));
+    document.querySelectorAll('[data-fix]').forEach(button=>button.onclick=()=>{const target=$(button.dataset.fix);
+      if(target.tagName==='BUTTON')target.click();else{target.scrollIntoView({block:'center'});target.focus();}});
+    document.addEventListener('keydown',event=>{
+      // Run shortcuts apply only when focus is not in a control and no dialog is open.
+      if($('calibrationModal').classList.contains('active') || event.altKey || event.ctrlKey || event.metaKey)return;
+      if(event.target.closest?.('input,select,textarea,button,summary,a,[contenteditable]'))return;
+      if(event.key===' '){const button=$('btnPause').hidden ? $('btnResume') : $('btnPause');if(!button.disabled){event.preventDefault();button.click();}}
+      else if(event.key==='ArrowRight' && !$('btnStep').disabled){event.preventDefault();$('btnStep').click();}
+    });
     safe(async()=>{
       await loadVideos();await loadProfiles();
       const configs=await json('/api/configs');configs.configs.forEach(c=>$('legacyProfile').add(new Option(c.name,c.path)));
@@ -552,7 +597,7 @@
         if(mode()==='live')$(role+'LiveSource').value=bootstrap[key];else setSource(role,bootstrap[key]);
       }
       if(bootstrap.config_path)$('legacyProfile').value=bootstrap.config_path;
-      await poll();await loadRuns();
+      await poll();if(active())showView('run');await loadRuns();
       if(!runId && mode()==='replay')for(const role of roles)if(source(role))await loadPreview(role);
     }).finally(()=>setInterval(poll,500));
     updateControls();

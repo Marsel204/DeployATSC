@@ -2,35 +2,45 @@
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ATSC Edge Control & Replay Dashboard</title><link rel="stylesheet" href="/static/observation.css"></head>
 <body>
-<header><div class="brand"><div class="brandmark" aria-hidden="true">A</div><div><h1>ATSC JETSON EDGE CONTROLLER</h1><p class="subtitle">Two-camera observation experiment</p></div></div><span class="badge road">Observation only</span></header>
-<main>
-  <div class="topline"><div><h2>Intersection workspace</h2><p>Predict the upcoming green. Measure the actual cycle and each vehicle’s wait.</p></div><span id="sessionStatus" class="badge">Setup required</span></div>
-  <div class="toolbar"><div class="controls"><button id="btnStart" class="primary" disabled>Start observation</button><button id="btnPause" disabled>Pause</button><button id="btnResume" disabled>Resume</button><button id="btnStep" disabled>Step 1 frame</button><button id="btnStop" class="danger" disabled>Stop</button></div><div class="controls"><span id="runLabel" class="muted">No run started</span><button id="exportRun" class="export" disabled>Export evidence</button></div></div>
+<header class="appbar">
+  <div class="brand"><div class="brandmark" aria-hidden="true">A</div><h1>ATSC JETSON EDGE CONTROLLER</h1><span class="badge">Observation only</span></div>
+  <nav class="viewnav" role="tablist" aria-label="Workflow">
+    <button role="tab" id="tabSetup" data-view-tab="setup" aria-selected="true" aria-controls="view-setup"><span id="tabSetupMark" class="stepmark">1</span>Setup</button>
+    <button role="tab" id="tabRun" data-view-tab="run" aria-selected="false" aria-controls="view-run"><span id="tabRunMark" class="stepmark">2</span>Run</button>
+    <button role="tab" id="tabResults" data-view-tab="results" aria-selected="false" aria-controls="view-results"><span class="stepmark">3</span>Results</button>
+    <button role="tab" id="tabSaved" data-view-tab="saved" aria-selected="false" aria-controls="view-saved"><span class="stepmark">4</span>Saved runs</button>
+  </nav>
+  <span id="sessionStatus" class="badge">Setup required</span>
+</header>
+
+<div class="runbar">
+  <div class="controls">
+    <button id="btnStart" class="primary" disabled>Start observation</button>
+    <button id="btnPause" disabled title="Pause (Space)">Pause</button><button id="btnResume" disabled hidden title="Resume (Space)">Resume</button>
+    <button id="btnStep" disabled title="Step one frame (→)">Step 1 frame</button>
+    <button id="btnStop" class="danger" disabled>Stop</button>
+    <span id="startBlocked" class="why">Setup required</span>
+  </div>
+  <div class="controls"><span id="runLabel" class="muted">No run started</span><button id="exportRun" disabled>Export evidence</button><span class="shortcuts muted"><kbd>Space</kbd> pause · <kbd>→</kbd> step</span></div>
+</div>
+
+<main id="workspace" data-view="setup">
   <div id="message" class="notice" role="status" aria-live="polite">Choose each source and save its calibration before starting. Recommendations do not change the traffic signal.</div>
-  <details class="settings"><summary>Experiment settings &amp; measurement policy</summary><div class="settings-grid">
-    <div><label for="sourceMode">Sources</label><select id="sourceMode"><option value="replay">Video replay</option><option value="live">Live cameras</option></select></div>
-    <div><label for="movementId">Target movement</label><input id="movementId" value="approach-1" maxlength="100"></div>
-    <div><label for="sourceOffset">Acquisition offset (seconds)</label><input id="sourceOffset" type="number" step="0.05" value="0"></div>
-    <div><label for="startPaused">Start playback</label><select id="startPaused"><option value="no">Play immediately</option><option value="yes">Paused for inspection</option></select></div>
-    <div><label for="stoppedSpeed">Stop threshold (m/s)</label><input id="stoppedSpeed" type="number" value="0.3" min="0" step="0.05"></div>
-    <div><label for="movingSpeed">Resume threshold (m/s)</label><input id="movingSpeed" type="number" value="0.5" min="0" step="0.05"></div>
-    <div><label for="stopPersistence">Motion persistence (seconds)</label><input id="stopPersistence" type="number" value="0.3" min="0" step="0.05"></div>
-    <div><label for="gapLimit">Maximum observation gap (seconds)</label><input id="gapLimit" type="number" value="0.5" min="0.05" step="0.05"></div>
-    <div><label for="associationLimit">Track association timeout (seconds)</label><input id="associationLimit" type="number" value="1" min="0.1" step="0.1"></div>
-    <div><label for="phaseDebounce">Signal confirmation (frames)</label><input id="phaseDebounce" type="number" value="3" min="1" step="1"></div>
-    <div><label for="phaseRatio">Signal color area ratio</label><input id="phaseRatio" type="number" value="0.08" min="0.001" max="1" step="0.01"></div>
-    <div><label for="vehicleIdentityMode">Vehicle IDs and timers</label><select id="vehicleIdentityMode"><option value="native">Native tracker IDs</option><option value="persistent_v1">Persistent vehicle IDs</option></select></div>
-    <div><label for="identityRetention">Remember hidden vehicles (seconds)</label><input id="identityRetention" type="number" value="10" min="0.1" max="60" step="0.1"></div>
-    <div><label for="estimateGap">Maximum estimated hidden gap (seconds)</label><input id="estimateGap" type="number" value="5" min="0" max="30" step="0.1"></div>
-    <div><label><input id="scheduleEnabled" type="checkbox"> Compare B waits using A’s recommended green</label></div>
-    <div><label for="scheduleAMovement">Movement A</label><input id="scheduleAMovement" value="approach-A" maxlength="100"></div>
-    <div><label><input id="unchangedClearance" type="checkbox"> A is followed by B; assume unchanged transition and clearance time</label></div>
-  </div><p class="settings-note">Pilot thresholds require validation against annotated footage. Acquisition time = system time + offset. LOS remains ungraded until the study’s control-delay method and coverage are established.</p><p id="qualificationPolicy" class="settings-note">Qualification policy unknown · scale unverified. Controlled engineering evaluation; field accuracy remains unvalidated.</p></details>
-  <p id="persistentIdentityStatus" class="settings-note" hidden></p>
-  <section class="cameras" aria-label="Independent camera views">
-    <article class="camera-card" data-camera="system">
-      <div class="camera-head"><div class="camera-title"><span class="camera-number">1</span><div><h3>System camera</h3><p class="subtitle">Perspective correction · YOLO · ANFIS</p></div></div><span class="badge road">Prediction inputs</span></div>
-      <fieldset class="source-controls" id="systemSources"><legend class="sr-only">System camera source</legend>
+
+  <!-- 1 · Setup -->
+  <section class="view-setup card checklist" id="view-setup" role="tabpanel" aria-labelledby="tabSetup">
+    <div class="section-head"><div><h2>Ready to start?</h2><p>Start unlocks when every item is ticked.</p></div></div>
+    <div id="checkSystemSource" class="check-row"><span class="tick"></span><span class="check-label">Camera 1 · video source</span><button data-fix="systemSource">Choose</button></div>
+    <div id="checkSystemCalibration" class="check-row"><span class="tick"></span><span class="check-label">Camera 1 · road calibration</span><button data-fix="systemCalibrate">Calibrate</button></div>
+    <div id="checkAcquisitionSource" class="check-row"><span class="tick"></span><span class="check-label">Camera 2 · video source</span><button data-fix="acquisitionSource">Choose</button></div>
+    <div id="checkAcquisitionCalibration" class="check-row"><span class="tick"></span><span class="check-label">Camera 2 · signal, waiting area and stop line</span><button data-fix="acquisitionCalibrate">Calibrate</button></div>
+  </section>
+
+  <!-- Cameras: full controls in Setup, feeds only while a run is active -->
+  <section class="cameras view-setup view-run" aria-label="Independent camera views">
+    <article class="camera-card card" data-camera="system">
+      <div class="camera-head"><div class="camera-title"><span class="camera-number">1</span><div><h3>System camera</h3><p class="subtitle">Perspective correction · YOLO · ANFIS</p></div></div><span class="badge">Prediction inputs</span></div>
+      <fieldset class="source-controls setup-only" id="systemSources"><legend class="sr-only">System camera source</legend>
         <div class="tab-group"><button class="tab-btn active" data-tab="samples" onclick="switchSourceTab('samples', this)">Samples</button><button class="tab-btn" data-tab="upload" onclick="switchSourceTab('upload', this)">Upload</button><button class="tab-btn" data-tab="youtube" onclick="switchSourceTab('youtube', this)">YouTube</button></div>
         <div class="tab-content" data-source-tab="samples"><label for="systemSource">System video</label><select id="systemSource"></select></div>
         <div class="tab-content" data-source-tab="upload" hidden><label for="systemUpload">Local system-camera video</label><div class="row"><input id="systemUpload" type="file" accept="video/*"><button data-upload="system">Upload</button></div></div>
@@ -39,15 +49,19 @@
         <p id="systemSourceStatus" class="source-message">Choose the camera that measures the road.</p>
       </fieldset>
       <div class="viewport"><img id="systemFeed" alt="System-camera road preview" hidden><div id="systemPlaceholder" class="viewport-placeholder"><strong>System camera</strong><span>Road geometry and detection appear here.</span></div><span id="systemViewTag" class="viewport-tag">No source</span></div>
-      <div class="lens-row"><div><label for="systemLens">System lens correction</label><select id="systemLens"><option value="">None · raw preview</option><option value="configs/rectilinear_calib.npz">Rectilinear calibration</option><option value="configs/brica_fisheye_calib.npz">Brica fisheye calibration</option></select></div><div id="systemReadiness" class="readiness muted">Calibration required</div></div>
-      <div class="camera-actions"><button id="systemPreview">Refresh preview</button><button id="systemCalibrate">Calibrate road</button></div>
-      <div class="lens-row"><div><label for="systemProfile">Saved system calibration</label><select id="systemProfile"><option value="">Choose profile</option></select></div><div><label for="legacyProfile">Existing road geometry</label><select id="legacyProfile"><option value="">Review a legacy profile</option></select></div></div>
-      <div class="camera-details"><div><small>Capture readiness</small><span id="predictionReady">Awaiting calibrated source</span></div><div><small>Camera health</small><span id="systemHealth">Not started</span></div></div>
-      <button id="predictNextGreen" class="capture-button" disabled>Analyze frame &amp; predict</button><div id="predictionStatus" class="capture-note">Click shortly before green. Camera 1 runs YOLO once on the current frame, then ANFIS.</div>
+      <div class="setup-only">
+        <div class="lens-row"><div><label for="systemLens">Lens correction</label><select id="systemLens"><option value="">None · raw preview</option><option value="configs/rectilinear_calib.npz">Rectilinear calibration</option><option value="configs/brica_fisheye_calib.npz">Brica fisheye calibration</option></select></div><div><label for="systemProfile">Saved calibration</label><select id="systemProfile"><option value="">Choose profile</option></select></div></div>
+        <div class="camera-actions"><button id="systemCalibrate" class="emphasis">Calibrate road</button><button id="systemPreview">Refresh preview</button><span id="systemReadiness" class="readiness muted">Calibration required</span></div>
+        <details class="more"><summary>Import legacy road geometry</summary><label for="legacyProfile">Existing road geometry</label><select id="legacyProfile"><option value="">Review a legacy profile</option></select></details>
+      </div>
+      <div class="run-only">
+        <button id="predictNextGreen" class="capture-button" disabled>Analyze frame &amp; predict</button><div id="predictionStatus" class="capture-note">Click shortly before green. Camera 1 runs YOLO once on the current frame, then ANFIS.</div>
+        <div class="camera-details"><div><small>Capture readiness</small><span id="predictionReady">Awaiting calibrated source</span></div><div><small>Camera health</small><span id="systemHealth">Not started</span></div></div>
+      </div>
     </article>
-    <article class="camera-card" data-camera="acquisition">
-      <div class="camera-head"><div class="camera-title"><span class="camera-number">2</span><div><h3>Acquisition camera</h3><p class="subtitle">Vehicle IDs · red waits · actual timing</p></div></div><span id="phaseBadge" class="badge signal">Phase unknown</span></div>
-      <fieldset class="source-controls" id="acquisitionSources"><legend class="sr-only">Acquisition camera source</legend>
+    <article class="camera-card card" data-camera="acquisition">
+      <div class="camera-head"><div class="camera-title"><span class="camera-number">2</span><div><h3>Acquisition camera</h3><p class="subtitle">Vehicle IDs · red waits · actual timing</p></div></div><span id="phaseBadge" class="badge">Phase unknown</span></div>
+      <fieldset class="source-controls setup-only" id="acquisitionSources"><legend class="sr-only">Acquisition camera source</legend>
         <div class="tab-group"><button class="tab-btn active" data-tab="samples" onclick="switchSourceTab('samples', this)">Samples</button><button class="tab-btn" data-tab="upload" onclick="switchSourceTab('upload', this)">Upload</button><button class="tab-btn" data-tab="youtube" onclick="switchSourceTab('youtube', this)">YouTube</button></div>
         <div class="tab-content" data-source-tab="samples"><label for="acquisitionSource">Acquisition video</label><select id="acquisitionSource"></select></div>
         <div class="tab-content" data-source-tab="upload" hidden><label for="acquisitionUpload">Local acquisition-camera video</label><div class="row"><input id="acquisitionUpload" type="file" accept="video/*"><button data-upload="acquisition">Upload</button></div></div>
@@ -56,44 +70,110 @@
         <label id="sharedLabel" class="shared-check"><input id="sharedTest" type="checkbox">Reuse system video for testing</label><p id="acquisitionSourceStatus" class="source-message">Use the camera that sees the queue and this movement’s signal.</p>
       </fieldset>
       <div class="viewport"><img id="acquisitionFeed" alt="Acquisition-camera vehicle and signal preview" hidden><div id="acquisitionPlaceholder" class="viewport-placeholder"><strong>Acquisition camera</strong><span>Vehicle waits and the traffic-light box appear here.</span></div><span id="acquisitionViewTag" class="viewport-tag">Independent source required</span></div>
-      <div class="lens-row"><div><label for="acquisitionLens">Acquisition lens correction</label><select id="acquisitionLens"><option value="">None · raw preview</option><option value="configs/rectilinear_calib.npz">Rectilinear calibration</option><option value="configs/brica_fisheye_calib.npz">Brica fisheye calibration</option></select></div><div id="acquisitionReadiness" class="readiness muted">Calibration required</div></div>
-      <div class="camera-actions"><button id="acquisitionPreview">Refresh preview</button><button id="acquisitionCalibrate">Calibrate acquisition</button></div>
-      <div class="lens-row"><div><label for="acquisitionProfile">Saved acquisition calibration</label><select id="acquisitionProfile"><option value="">Choose profile</option></select></div><div class="readiness muted">Signal box · waiting area · metric scale · stop line</div></div>
-      <div class="camera-details"><div><small>Observed green</small><span id="actualGreen">—</span></div><div><small>Camera health</small><span id="acquisitionHealth">Not started</span></div><div><small>Vehicles measured</small><span id="vehicleCount">—</span></div><div><small>Frame timestamps</small><span id="sourceTimes">—</span></div></div>
+      <div class="setup-only">
+        <div class="lens-row"><div><label for="acquisitionLens">Lens correction</label><select id="acquisitionLens"><option value="">None · raw preview</option><option value="configs/rectilinear_calib.npz">Rectilinear calibration</option><option value="configs/brica_fisheye_calib.npz">Brica fisheye calibration</option></select></div><div><label for="acquisitionProfile">Saved calibration</label><select id="acquisitionProfile"><option value="">Choose profile</option></select></div></div>
+        <div class="camera-actions"><button id="acquisitionCalibrate" class="emphasis">Calibrate acquisition</button><button id="acquisitionPreview">Refresh preview</button><span id="acquisitionReadiness" class="readiness muted">Calibration required</span></div>
+      </div>
+      <div class="run-only camera-details"><div><small>Observed green</small><span id="actualGreen">—</span></div><div><small>Camera health</small><span id="acquisitionHealth">Not started</span></div><div><small>Vehicles measured</small><span id="vehicleCount">—</span></div><div><small>Frame timestamps</small><span id="sourceTimes">—</span></div></div>
     </article>
   </section>
-  <section class="metric-grid" aria-label="System metrics and recommendation">
+
+  <section class="card settings view-setup" aria-label="Experiment settings">
+    <div class="section-head"><div><h2>Experiment settings</h2><p>Defaults are fine for a first run.</p></div></div>
+    <div class="settings-grid">
+      <div><label for="sourceMode">Sources</label><select id="sourceMode"><option value="replay">Video replay</option><option value="live">Live cameras</option></select></div>
+      <div><label for="movementId">Target movement</label><input id="movementId" value="approach-1" maxlength="100"></div>
+      <div><label for="startPaused">Start playback</label><select id="startPaused"><option value="no">Play immediately</option><option value="yes">Paused for inspection</option></select></div>
+      <div><label for="vehicleIdentityMode">Vehicle IDs and timers</label><select id="vehicleIdentityMode"><option value="native">Native tracker IDs</option><option value="persistent_v1">Persistent vehicle IDs</option></select></div>
+    </div>
+    <details class="advanced"><summary>Detection thresholds, identity and A/B comparison</summary>
+      <h4>Detection thresholds</h4>
+      <div class="settings-grid">
+        <div><label for="stoppedSpeed">Stop threshold (m/s)</label><input id="stoppedSpeed" type="number" value="0.3" min="0" step="0.05"></div>
+        <div><label for="movingSpeed">Resume threshold (m/s)</label><input id="movingSpeed" type="number" value="0.5" min="0" step="0.05"></div>
+        <div><label for="stopPersistence">Motion persistence (s)</label><input id="stopPersistence" type="number" value="0.3" min="0" step="0.05"></div>
+        <div><label for="gapLimit">Maximum observation gap (s)</label><input id="gapLimit" type="number" value="0.5" min="0.05" step="0.05"></div>
+        <div><label for="associationLimit">Track association timeout (s)</label><input id="associationLimit" type="number" value="1" min="0.1" step="0.1"></div>
+        <div><label for="phaseDebounce">Signal confirmation (frames)</label><input id="phaseDebounce" type="number" value="3" min="1" step="1"></div>
+        <div><label for="phaseRatio">Signal colour area ratio</label><input id="phaseRatio" type="number" value="0.08" min="0.001" max="1" step="0.01"></div>
+        <div><label for="sourceOffset">Acquisition offset (s)</label><input id="sourceOffset" type="number" step="0.05" value="0"></div>
+      </div>
+      <h4>Persistent identity</h4>
+      <div class="settings-grid">
+        <div><label for="identityRetention">Remember hidden vehicles (s)</label><input id="identityRetention" type="number" value="10" min="0.1" max="60" step="0.1"></div>
+        <div><label for="estimateGap">Maximum estimated hidden gap (s)</label><input id="estimateGap" type="number" value="5" min="0" max="30" step="0.1"></div>
+      </div>
+      <h4>A/B schedule comparison</h4>
+      <div class="settings-grid">
+        <div><label class="inline"><input id="scheduleEnabled" type="checkbox"> Compare B waits using A’s recommended green</label></div>
+        <div><label for="scheduleAMovement">Movement A</label><input id="scheduleAMovement" value="approach-A" maxlength="100"></div>
+        <div><label class="inline"><input id="unchangedClearance" type="checkbox"> A is followed by B; assume unchanged transition and clearance time</label></div>
+      </div>
+      <p class="settings-note">Pilot thresholds require validation against annotated footage. Acquisition time = system time + offset.</p>
+    </details>
+    <p id="qualificationPolicy" class="settings-note">Qualification policy unknown · scale unverified. Controlled engineering evaluation; field accuracy remains unvalidated.</p>
+  </section>
+
+  <!-- 2 · Run -->
+  <div id="runEmpty" class="empty-state view-run">No active run. Finish <button class="link" data-view-tab="setup">Setup</button>, then press <b>Start observation</b>.</div>
+  <section class="metric-grid view-run" aria-label="System metrics and recommendation">
     <div class="card metric"><label>Weighted flow</label><div class="metric-value"><b id="metricVw">—</b><span>PCU</span></div><p id="camera1AnalysisLabel">Camera 1 not analysed yet</p></div>
     <div class="card metric"><label>Queue length</label><div class="metric-value"><b id="metricQ">—</b><span>m</span></div><p id="queueQuality">Q quality unknown · scale unverified</p></div>
     <div class="card metric"><label>Lane occupancy</label><div class="metric-value"><b id="metricL">—</b><span>%</span></div><p>Last analysed Camera 1 frame · footprint estimate</p></div>
-    <div class="card metric signal"><label>ANFIS recommendation</label><div class="metric-value"><b id="recommendedGreen">—</b><span>sec</span></div><p id="recommendationCaption">Awaiting manual capture</p></div>
+    <div class="card metric recommendation"><label>ANFIS recommendation <span class="info" tabindex="0" data-tip="Observation only: recommendations are never sent to the signal controller.">i</span></label><div class="metric-value"><b id="recommendedGreen">—</b><span>sec</span></div><p id="recommendationCaption">Awaiting manual capture</p></div>
   </section>
-  <section class="card table-card"><div class="section-head"><div><h3>Cycle comparison</h3><p>ANFIS recommendation versus observed green. Difference = recommended − actual. Wait means include partial lower bounds.</p></div><span id="validCycles" class="badge">0 timing-eligible · qualification unknown</span></div><div class="table-wrap"><table id="cycleComparison"><thead><tr><th>Cycle</th><th>Prediction lead</th><th>ANFIS green</th><th>Actual green</th><th>Difference</th><th>Observed mean red wait / samples</th><th>Served</th><th>Qualification</th></tr></thead><tbody><tr><td class="empty" colspan="8">No cycle evidence yet.</td></tr></tbody></table></div></section>
-  <section class="card table-card"><div class="section-head"><div><h3>Camera 2 · Vehicle waiting ledger</h3><p>Red wait stops at green. Total stopped time continues while the vehicle remains queued.</p></div><span id="partialVehicles" class="badge">0 partial records</span></div><div class="table-wrap"><table id="vehicleLedger"><thead><tr><th>Vehicle ID</th><th>Class</th><th>Red wait</th><th>Total stopped</th><th>State</th><th>Cycles</th><th>Stop line</th><th>Observation quality</th></tr></thead><tbody><tr><td class="empty" colspan="8">Vehicle records appear when acquisition tracking starts.</td></tr></tbody></table></div><div class="pager"><span id="vehiclePage">0 records</span><div><button id="liveVehicles">Live window</button><button id="historyVehicles">Durable history</button><button id="previousVehicles" disabled>Previous</button><button id="nextVehicles" disabled>Next</button></div></div></section>
-  <section class="footer-summary"><div class="card summary-pad"><h3>Observed waiting time</h3><div class="statline"><span>Mean red wait</span><strong id="meanWait">—</strong></div><div class="statline"><span>Median / P95</span><strong id="distributionWait">—</strong></div><div class="statline"><span>Complete vehicle journeys</span><strong id="completeVehicles">—</strong></div><button id="requestQuantiles">Compute exact durable quantiles</button><p id="quantileStatus">No durable quantiles requested.</p><p id="waitCoverage">Sample and unknown-duration coverage unknown.</p><p>All observed tracks include partial waiting-time lower bounds. Complete journeys are reported separately in the evidence export.</p></div><div class="card summary-pad"><h3>Level of service</h3><span class="badge" style="margin-top:10px">Ungraded</span><p id="losReason">Control delay methodology and measurement coverage are required. Red-light waiting time alone does not determine an LOS grade.</p><p>Observation-only results describe existing timing. Recommendations are not applied, so this run does not measure an ANFIS treatment effect.</p></div></section>
-  <p id="durabilityStatus" class="subtitle">Durability unknown.</p>
-  <button id="retryStorage" hidden>Retry evidence storage</button>
-  <p id="historyStatus" class="subtitle">Live history window.</p>
-  <section class="card summary-pad" id="savedRunsCard" aria-label="Saved evidence browser">
-    <h3>Saved runs · durable evidence</h3><p class="subtitle">Current-run controls, streams and summaries remain above. Browse saved evidence here; reading does not resume or recover a run. Exact waits include partial lower bounds.</p>
-    <div class="controls"><select id="savedRuns" aria-label="Saved runs"></select><button id="refreshRuns">Refresh list</button><button id="browseSaved" disabled>Reload selected evidence</button><button id="exportSaved" disabled>Export selected run</button></div><p id="savedRunStatus">No saved runs listed.</p>
-    <label for="savedKind">Saved evidence table</label><select id="savedKind"><option value="vehicles">Vehicles</option><option value="predictions">Predictions</option><option value="comparisons">Cycle comparisons</option><option value="schedule_episodes">A/B signal episodes</option><option value="vehicle_savings">Per-vehicle potential savings</option></select>
-    <label for="savedQuantileMetric">Wait distribution</label><select id="savedQuantileMetric"><option value="confirmed">Confirmed wait</option><option value="best_estimate">Confirmed + accepted estimated wait</option></select>
-    <p id="viewedRunStatus" role="status" aria-live="polite">No saved evidence selected.</p>
+  <p id="persistentIdentityStatus" class="settings-note view-run" hidden></p>
+  <section class="card table-card view-run"><div class="section-head"><div><h3>Camera 2 · Vehicle waiting ledger</h3><p>Red wait stops at green. Total stopped time continues while the vehicle remains queued.</p></div><span id="partialVehicles" class="badge">0 partial records</span></div><div class="table-wrap"><table id="vehicleLedger"><thead><tr><th>Vehicle ID</th><th>Class</th><th>Red wait</th><th>Total stopped</th><th>State</th><th>Cycles</th><th>Stop line</th><th>Observation quality</th></tr></thead><tbody><tr><td class="empty" colspan="8">Vehicle records appear when acquisition tracking starts.</td></tr></tbody></table></div><div class="pager"><span id="vehiclePage">0 records</span><div><button id="liveVehicles">Live window</button><button id="historyVehicles">Durable history</button><button id="previousVehicles" disabled>Previous</button><button id="nextVehicles" disabled>Next</button></div></div></section>
+  <section class="card summary-pad view-run"><div class="section-head"><h3>Observed waiting time</h3></div><div class="statline"><span>Mean red wait</span><strong id="meanWait">—</strong></div><div class="statline"><span>Median / P95</span><strong id="distributionWait">—</strong></div><div class="statline"><span>Complete vehicle journeys</span><strong id="completeVehicles">—</strong></div><div class="controls spaced"><button id="requestQuantiles">Compute exact durable quantiles</button><span id="quantileStatus" class="muted">No durable quantiles requested.</span></div><p id="waitCoverage" class="settings-note">Sample and unknown-duration coverage unknown.</p><p class="settings-note">All observed tracks include partial waiting-time lower bounds. Complete journeys are reported separately in the evidence export.</p></section>
+  <section id="scheduleSavingsPanel" class="card table-card view-run" hidden><div class="section-head"><div><h3>Per-vehicle potential red-wait saving</h3><p id="scheduleStatus">Waiting for paired A/B phases.</p><p>Schedule estimate assuming unchanged clearance. Physical queue discharge is not simulated. Hidden-time contributions remain estimated.</p></div></div><div class="table-wrap"><table id="scheduleSavings"><thead><tr><th>Vehicle</th><th>A episode / B cycle</th><th>Observed red stop</th><th>Estimated hidden stop</th><th>Under proposed schedule</th><th>Potential saving</th><th>Coverage</th><th>Status</th></tr></thead><tbody></tbody></table></div></section>
+  <div class="view-run runtime"><p id="runtimeStatus" class="settings-note">No active observation run.</p><p id="performanceAdvice" class="advice" role="note" hidden></p></div>
+
+  <!-- 3 · Results -->
+  <section class="card table-card view-results"><div class="section-head"><div><h3>Cycle comparison <span class="info" tabindex="0" data-tip="ANFIS recommendation versus observed green. Difference = recommended − actual. Wait means include partial lower bounds.">i</span></h3></div><span id="validCycles" class="badge">0 timing-eligible · qualification unknown</span></div><div class="table-wrap"><table id="cycleComparison"><thead><tr><th>Cycle</th><th>Prediction lead</th><th>ANFIS green</th><th>Actual green</th><th>Difference</th><th>Observed mean red wait / samples</th><th>Served</th><th>Qualification</th></tr></thead><tbody><tr><td class="empty" colspan="8">No cycle evidence yet.</td></tr></tbody></table></div></section>
+  <section class="card summary-pad view-results"><div class="section-head"><h3>Level of service <span class="info" tabindex="0" data-tip="Observation-only results describe existing timing. Recommendations are not applied, so this run does not measure an ANFIS treatment effect.">i</span></h3><span class="badge">Ungraded</span></div><p id="losReason">Control delay methodology and measurement coverage are required. Red-light waiting time alone does not determine an LOS grade.</p></section>
+  <section class="card summary-pad view-results"><h3>Evidence storage</h3><p id="durabilityStatus" class="settings-note">Durability unknown.</p><p id="historyStatus" class="settings-note">Live history window.</p><button id="retryStorage" hidden>Retry evidence storage</button></section>
+
+  <!-- 4 · Saved runs -->
+  <section class="card summary-pad view-saved" id="savedRunsCard" aria-label="Saved evidence browser">
+    <div class="section-head"><div><h3>Saved runs · durable evidence</h3><p>Reading a saved run never resumes or changes it. Exact waits include partial lower bounds.</p></div></div>
+    <div class="saved-controls"><div class="grow"><label for="savedRuns">Run</label><select id="savedRuns"></select></div><button id="refreshRuns">Refresh list</button><button id="browseSaved" disabled>Reload selected evidence</button><button id="exportSaved" disabled>Export selected run</button></div><p id="savedRunStatus" class="settings-note">No saved runs listed.</p>
+    <div class="settings-grid"><div><label for="savedKind">Saved evidence table</label><select id="savedKind"><option value="vehicles">Vehicles</option><option value="predictions">Predictions</option><option value="comparisons">Cycle comparisons</option><option value="schedule_episodes">A/B signal episodes</option><option value="vehicle_savings">Per-vehicle potential savings</option></select></div>
+    <div><label for="savedQuantileMetric">Wait distribution</label><select id="savedQuantileMetric"><option value="confirmed">Confirmed wait</option><option value="best_estimate">Confirmed + accepted estimated wait</option></select></div></div>
+    <p id="viewedRunStatus" class="settings-note" role="status" aria-live="polite">No saved evidence selected.</p>
     <div class="table-wrap"><table id="savedEvidence"><thead></thead><tbody></tbody></table></div>
     <div class="pager"><span id="savedPage">No page loaded.</span><div><button id="previousSaved" disabled>Previous</button><button id="nextSaved" disabled>Next</button></div></div>
-    <button id="savedQuantiles" disabled>Compute selected run exact quantiles</button><p id="savedQuantileStatus" role="status">No exact quantiles requested for this saved run.</p>
+    <div class="controls spaced"><button id="savedQuantiles" disabled>Compute selected run exact quantiles</button><span id="savedQuantileStatus" class="muted" role="status">No exact quantiles requested for this saved run.</span></div>
   </section>
-  <p id="runtimeStatus" class="subtitle" style="margin-top:18px">No active observation run.</p>
-  <p id="performanceAdvice" role="note" style="color:#c58a12;font-size:.85rem" hidden></p>
-<section id="scheduleSavingsPanel" class="card table-card" hidden><div class="section-head"><div><h3>Per-vehicle potential red-wait saving</h3><p id="scheduleStatus">Waiting for paired A/B phases.</p><p>Schedule estimate assuming unchanged clearance. Physical queue discharge is not simulated. Hidden-time contributions remain estimated.</p></div></div><div class="table-wrap"><table id="scheduleSavings"><thead><tr><th>Vehicle</th><th>A episode / B cycle</th><th>Observed red stop</th><th>Estimated hidden stop</th><th>Under proposed schedule</th><th>Potential saving</th><th>Coverage</th><th>Status</th></tr></thead><tbody></tbody></table></div></section>
 </main>
-<div id="calibrationModal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="calibrationTitle"><div class="modal-card"><div class="modal-head"><div><h2 id="calibrationTitle">Camera calibration</h2><p id="calibrationSubtitle">Draw only on this camera’s processed preview.</p></div><button id="closeCalibration">Cancel</button></div><div class="modal-body"><div class="canvas-wrap"><canvas id="calibrationCanvas"></canvas></div><div>
-  <div class="tool-grid"><button data-tool="polygon" id="toolPolygon">Road / waiting area</button><button data-tool="anchors" id="toolAnchors">Perspective anchors</button><button data-tool="ruler" id="toolRuler">Distance ruler</button><button data-tool="lamp" class="acquisition" id="toolLamp">Traffic-light box</button><button data-tool="stopline" class="acquisition" id="toolStopline">Stop line</button><button id="flipStopline" class="acquisition">Flip crossing arrow</button><button data-tool="lamp_RED" class="acquisition" id="toolRed">Red lamp region</button><button data-tool="lamp_YELLOW" class="acquisition" id="toolYellow">Yellow lamp region</button><button data-tool="lamp_GREEN" class="acquisition" id="toolGreen">Green lamp region</button><button id="clearTool">Clear current tool</button><button id="undoTool">Undo last point</button></div>
-  <p id="toolHelp" class="toolhelp"></p><p class="subtitle">Anchors: #1 Far-Left → #2 Far-Right → #3 Near-Right → #4 Near-Left.</p>
-  <div class="calibration-controls"><div class="full"><label for="calibrationName">Profile name</label><input id="calibrationName" value="jamika"></div><div><label for="groundWidth">Width (m)</label><input id="groundWidth" type="number" min="0.1" step="0.1" value="8"></div><div><label for="groundLength">Length (m)</label><input id="groundLength" type="number" min="0.1" step="0.1" value="40"></div><div class="full"><label for="scaleMethod">Scale evidence</label><select id="scaleMethod"><option value="">Unverified / diagnostic</option><option value="measured_dimensions">Measured width and length</option><option value="ruler">Measured ruler</option></select></div><div class="full"><label for="scaleReference">Measurement reference</label><input id="scaleReference" maxlength="1000" placeholder="Survey, measurement date, or evidence reference"></div><div class="full"><label><input id="bindingReviewed" type="checkbox"> I reviewed this source, lens and geometry against the measurement.</label><small>Default dimensions are unverified. Choose dimensions OR a ruler; saving creates a separate profile revision.</small></div><div class="full"><label for="rulerLength">Known ruler length (m)</label><input id="rulerLength" type="number" min="0.1" step="0.1" value="2"></div></div>
-  <div id="calibrationChecklist" class="calibration-list"></div><p id="calibrationError" class="source-message" aria-live="polite"></p><div class="modal-actions"><button id="saveCalibration" class="primary">Save calibration</button><button id="cancelCalibration">Cancel draft</button></div>
-</div></div></div></div>
+
+<div id="calibrationModal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="calibrationTitle"><div class="modal-card">
+  <div class="modal-head"><div><h2 id="calibrationTitle">Camera calibration</h2><p id="calibrationSubtitle">Draw only on this camera’s processed preview.</p></div><button id="closeCalibration" aria-label="Close calibration" title="Close (Esc)">✕</button></div>
+  <div class="tool-grid stepper" role="toolbar" aria-label="Calibration steps">
+    <button data-tool="lamp" class="acquisition" id="toolLamp"><span class="stepmark"></span>Signal box</button>
+    <button data-tool="polygon" id="toolPolygon"><span class="stepmark"></span>Road / waiting area</button>
+    <button data-tool="anchors" id="toolAnchors"><span class="stepmark"></span>Anchors</button>
+    <button data-tool="stopline" class="acquisition" id="toolStopline"><span class="stepmark"></span>Stop line</button>
+  </div>
+  <div class="modal-body"><div class="canvas-wrap"><canvas id="calibrationCanvas"></canvas></div><div class="modal-side">
+    <div class="hint"><p id="toolHelp" class="toolhelp"></p><span class="mini"><button id="undoTool" title="Undo last point (Ctrl+Z)">↶</button><button id="clearTool" title="Clear this step">Clear</button></span></div>
+    <button id="flipStopline" class="acquisition link">Flip crossing arrow</button>
+    <div id="calibrationChecklist" class="calibration-list"></div>
+    <div class="calibration-controls">
+      <div><label for="groundWidth">Anchor width (m)</label><input id="groundWidth" type="number" min="0.1" step="0.1" value="8"></div>
+      <div><label for="groundLength">Anchor length (m)</label><input id="groundLength" type="number" min="0.1" step="0.1" value="40"></div>
+      <div class="full"><label for="scaleMethod">Scale evidence</label><select id="scaleMethod"><option value="">Unverified / diagnostic</option><option value="measured_dimensions">Measured width and length</option><option value="ruler">Measured ruler</option></select></div>
+      <div class="full"><label for="scaleReference">Measurement reference</label><input id="scaleReference" maxlength="1000" placeholder="Survey, measurement date, or evidence reference"></div>
+      <div class="full"><label class="inline"><input id="bindingReviewed" type="checkbox"> I reviewed this source, lens and geometry against the measurement.</label></div>
+    </div>
+    <details class="advanced"><summary>Optional: ruler and lamp regions</summary>
+      <div class="tool-grid optional"><button data-tool="ruler" id="toolRuler">Distance ruler</button><button data-tool="lamp_RED" class="acquisition" id="toolRed">Red lamp</button><button data-tool="lamp_YELLOW" class="acquisition" id="toolYellow">Yellow lamp</button><button data-tool="lamp_GREEN" class="acquisition" id="toolGreen">Green lamp</button></div>
+      <div><label for="rulerLength">Known ruler length (m)</label><input id="rulerLength" type="number" min="0.1" step="0.1" value="2"></div>
+      <p class="settings-note">Anchor order: #1 Far-Left → #2 Far-Right → #3 Near-Right → #4 Near-Left. Choose measured dimensions OR a ruler as scale evidence; saving creates a separate profile revision.</p>
+    </details>
+    <p id="calibrationError" class="source-message error-text" aria-live="polite"></p>
+    <div class="modal-actions"><input id="calibrationName" value="jamika" aria-label="Profile name"><button id="saveCalibration" class="primary">Save calibration</button><button id="cancelCalibration">Cancel</button></div>
+  </div></div>
+</div></div>
 <script>
 function switchSourceTab(tab, btn) { window.atsc.switchSourceTab(tab, btn); }
 function setupCalibrationCanvas() { window.atsc.setupCalibrationCanvas(); }
