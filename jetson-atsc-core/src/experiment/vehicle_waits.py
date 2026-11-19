@@ -111,6 +111,9 @@ class VehicleWaits:
         self.continuation_skipped_frames = 0
         # Frames with a continuation candidate but no complete same-frame detections.
         self.continuation_unavailable_frames = 0
+        # Persistent identities record per-interval tracking continuity for
+        # acquisition collection; legacy exports keep their historical schema.
+        self.record_tracking = False
 
     def _flag(self, row, flag):
         if flag not in row["quality_flags"]: row["quality_flags"].append(flag)
@@ -245,6 +248,8 @@ class VehicleWaits:
                             "cycle_id": previous["cycle"] if continuous else None,
                             "valid": bool(continuous and previous["valid_motion"] and valid_motion),
                             "stopped": state["stopped"]}
+                # Same identity seen in consecutive frames: no tracking break.
+                if self.record_tracking: interval["tracked"] = bool(continuous)
                 row["intervals"].append(interval); self.work+=1; self._account(row, interval)
                 if not continuous:
                     self._flag(row, "observation_gap")
