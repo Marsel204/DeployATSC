@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import torch
 
-from frozen_tracking import FrozenTrackModel, failing_trackers, frozen_detector
+from frozen_tracking import HIDES_UNCONFIRMED, FrozenTrackModel, failing_trackers, frozen_detector
 from src.experiment.contracts import RunPolicy, VehicleObservation
 from src.experiment.persistent_vehicle_waits import PersistentVehicleWaits
 from src.experiment.vehicle_waits import VehicleWaits
@@ -74,8 +74,13 @@ def test_positive_control_without_competitor_still_links():
 
 def test_hidden_unconfirmed_frame_reports_every_detection_as_withheld():
     _, tracked, _ = replay(review_repro())
-    assert list(tracked[5]) == []      # Ultralytics hides the frame while a new track awaits confirmation
-    assert [w[0] for w in tracked[5].withheld] == [(59., 100., 65., 140.)]
+    if HIDES_UNCONFIRMED:
+        assert list(tracked[5]) == []      # Ultralytics 8.4 hides the frame while a new track awaits confirmation
+        assert [w[0] for w in tracked[5].withheld] == [(59., 100., 65., 140.)]
+    else:
+        # Ultralytics 8.3 passes the raw detection through untracked: an observation, not withheld.
+        assert [(v.stable_id, v.bbox) for v in tracked[5]] == [(False, [59., 100., 65., 140.])]
+        assert tracked[5].withheld == ()
     assert all(frame.withheld == () for frame in tracked[:5])
 
 
@@ -128,6 +133,8 @@ def test_callback_order_with_the_real_predictor_and_model(monkeypatch):
         return [Results(orig_imgs[0], path='scripted', names=self.model.names, boxes=boxes)]
     monkeypatch.setattr(DetectionPredictor, 'postprocess', postprocess)
     detector = DetectorTracker(path, device='cpu', imgsz=64)
+    assert getattr(detector, '_provenance', None) is None      # capture is opt-in
+    assert detector.enable_withheld_evidence() is True
     hook = detector._provenance
     assert hook in detector.model.callbacks['on_predict_batch_start']
 
@@ -266,3 +273,132 @@ def test_crowded_frame_with_300_boxes_and_300_withheld_stays_bounded():
         timings.append(time.perf_counter()-started)
         assert len(links(waits)) == 64
     assert sorted(timings)[2] < .1, timings
+
+
+# --- declared minimum Ultralytics (8.3.0) and the installed 8.4 line --------------------
+
+def tracker_postprocess_callbacks(model):
+    from ultralytics.trackers.track import on_predict_postprocess_end
+    return [cb for cb in model.callbacks['on_predict_postprocess_end'] if getattr(cb, 'func', None) is on_predict_postprocess_end]
+
+
+def counting_updates(model):
+    """Count tracker.update calls per frame (installed before the provenance wrapper)."""
+    counts = []
+    def wrap(predictor):
+        for tracker in getattr(predictor, 'trackers', ()):
+            if getattr(tracker, '_counted', False):continue
+            update = tracker.update
+            def counted(*args, _update=update, **kwargs):
+                counts[-1] += 1
+                return _update(*args, **kwargs)
+            tracker.update = counted; tracker._counted = True
+    model.callbacks['on_predict_batch_start'].insert(0, wrap)
+    return counts
+
+
+def test_reset_registers_one_tracker_callback_and_keeps_evidence_complete():
+    # 8.3.0's Model.track re-registers whenever the predictor has no trackers and appends:
+    # without dropping the old pair, each reset stacked another tracker.update per frame.
+    model = FrozenTrackModel([[box(50)]]*7+[[box(50), box(150)]]*2)
+    counts = counting_updates(model)
+    detector = frozen_detector(model)
+    seen = []
+    for f in range(9):
+        if f in (3, 5):detector.reset_tracking()
+        counts.append(0)
+        seen.append(detector.track([IMAGE], timestamp=f/FPS)[0])
+        assert len(tracker_postprocess_callbacks(model)) == 1
+    assert counts == [1]*9
+    assert all(frame.withheld is not None for frame in seen)
+    assert [frame.epoch for frame in seen] == [0]*3+[1]*2+[2]*4
+    # Frame 7 (epoch 2): box(150) is a new unconfirmed track while box(50) is emitted.
+    assert [w[0] for w in seen[7].withheld] == [(147., 100., 153., 140.)]
+
+
+def batched_detector(per_call):
+    model = FrozenTrackModel(per_call, batched=True)
+    detector = frozen_detector(model)
+    detector.is_tensorrt = False      # a PyTorch model accepts a two-image batch
+    return model, detector
+
+
+def test_mixed_batch_with_an_empty_image_keeps_per_image_provenance():
+    # Image 0 never has detections (8.3.0 skips its tracker.update); image 1 is Sol's repro.
+    model, detector = batched_detector([[[], frame] for frame in review_repro()])
+    counts = counting_updates(model)
+    scenes = []
+    for f in range(7):
+        counts.append(0)
+        empty, scene = detector.track([IMAGE, IMAGE.copy()], timestamp=f/FPS)
+        assert empty.withheld == () and list(empty) == []
+        # Every detection of image 1 is either emitted or withheld, never lost or borrowed.
+        assert scene.withheld is not None and len(scene)+len(scene.withheld) == len(review_repro()[f])
+        scenes.append(scene)
+    # 8.3.0 runs no update for the empty image; 8.4 runs one for each image.
+    assert set(counts) == ({2} if HIDES_UNCONFIRMED else {1})
+    assert any(scene.withheld for scene in scenes)
+
+
+def test_mixed_batch_with_stacked_tracker_callbacks_fails_closed_per_image():
+    # Stacked registrations (8.3.0 before the reset fix) ran two updates for the image with
+    # detections and none for the empty one: positional pairing gave image 0 image 1's call.
+    from functools import partial
+    from ultralytics.trackers.track import on_predict_postprocess_end
+    model, detector = batched_detector([[[], [box(50), box(150, conf=.2)]]]*2)
+    detector.track([IMAGE, IMAGE.copy()], timestamp=0.)
+    model.add_callback('on_predict_postprocess_end', partial(on_predict_postprocess_end, persist=True))
+    empty, scene = detector.track([IMAGE, IMAGE.copy()], timestamp=1/FPS)
+    # 8.3.0 skips the empty image (no detections: nothing withheld); 8.4 updates it twice too.
+    assert empty.withheld == (None if HIDES_UNCONFIRMED else ())
+    assert scene.withheld is None
+
+
+class FakeResult:
+    def __init__(self, image, n=0):
+        self.orig_img = image
+        self.boxes = type('B', (), {'id': None, '__len__': lambda self:n})()
+
+
+def test_frame_evidence_attribution_fails_closed():
+    detector = frozen_detector(FrozenTrackModel([]), evidence=False)
+    a, b = np.zeros((2, 2, 3), np.uint8), np.zeros((2, 2, 3), np.uint8)
+    call = (np.array([[0, 0, 4, 4.]]), np.array([1.]), np.array([.9]), np.zeros(0, int))
+    one = FakeResult(a, 1)
+    # One call per image, attributed by image identity regardless of order.
+    assert detector._frame_evidence([FakeResult(b), one], [(a, call)]) == [(), ()]
+    # A call for an image not in the batch, or ambiguous between two results: nothing is trusted.
+    assert detector._frame_evidence([one, FakeResult(b)], [(np.zeros(1), call)]) == [None, None]
+    assert detector._frame_evidence([one, FakeResult(a, 1)], [(a, call)]) == [None, None]
+    # An image with detections and no update call, or with two calls, has no evidence.
+    assert detector._frame_evidence([one, FakeResult(b, 1)], [(a, call)]) == [(), None]
+    assert detector._frame_evidence([one], [(a, call), (a, call)]) == [None]
+    # An unreadable call poisons only its own image.
+    assert detector._frame_evidence([one, FakeResult(b, 1)], [(a, None), (b, call)]) == [None, ()]
+
+
+def test_capture_is_opt_in_and_costs_nothing_when_off():
+    model = FrozenTrackModel(review_repro())
+    detector = frozen_detector(model, evidence=False)
+    for f in range(7):
+        frame, = detector.track([IMAGE], timestamp=f/FPS)
+        assert isinstance(frame, TrackedFrame) and frame.withheld is None
+    assert getattr(detector, '_provenance', None) is None
+    assert not any(isinstance(cb, type(None)) or getattr(cb, '__class__', None).__name__ == '_TrackerProvenance'
+                   for cbs in model.callbacks.values() for cb in cbs)
+    assert not hasattr(detector.model.predictor.trackers[0].update, '_atsc_provenance')
+    # Without evidence, continuation declines the link it would otherwise make.
+    waits = VehicleWaits('run', RunPolicy(fragment_continuation=True), lambda point:-1)
+    detector = frozen_detector(FrozenTrackModel(review_repro(competitor=False)), evidence=False)
+    for f in range(7):
+        frame, = detector.track([IMAGE], timestamp=f/FPS)
+        waits.observe(observations(frame), 'RED', f/FPS, f+1, 1, unassigned=_withheld_boxes(frame, detector.epoch))
+    assert links(waits) == [] and waits.continuation_unavailable_frames == 1
+
+
+def test_omitted_evidence_is_unavailable_not_empty():
+    _, tracked, _ = replay(review_repro(competitor=False))
+    waits = VehicleWaits('run', RunPolicy(fragment_continuation=True), lambda point:-1)
+    for f, frame in enumerate(tracked):
+        waits.observe(observations(frame), 'RED', f/FPS, f+1, 1)
+    assert links(waits) == [] and waits.continuation_unavailable_frames == 1

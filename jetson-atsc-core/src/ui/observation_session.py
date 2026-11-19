@@ -141,6 +141,8 @@ class ObservationSession:
         self.policy=RunPolicy(**payload.get("policy",{}))
         self.identity_policy=IdentityPolicy(**(payload.get('vehicle_identity') or {}))
         self.identity_features=IdentityFeatureExtractor() if self.identity_policy.mode=='persistent_v1' else None
+        # Native fragment continuation runs only in the legacy per-native-ID ledger.
+        self.fragment_continuation=self.policy.fragment_continuation and self.identity_features is None
         self.schedule_policy=SchedulePolicy(**(payload.get('schedule_comparison') or {}))
         self.persist_mode=payload.get("persist_mode","inline")
         self.persist_condition=threading.Condition();self.persist_thread=None;self.persist_pending=False;self.persist_inflight=False;self.persist_stopping=False
@@ -196,6 +198,11 @@ class ObservationSession:
                 self.detectors[role]=detector_factory(str(model),conf_threshold=.28,imgsz=640)
             for role in self.detectors:
                 self.detectors[role].max_gap_sec=self.policy.max_gap_sec
+            # Withheld-detection capture is opt-in: only native fragment continuation
+            # uses it (persistent identity never continues fragments), so no other run pays for it.
+            if self.fragment_continuation:
+                enable=getattr(self.detectors["acquisition"],"enable_withheld_evidence",None)
+                if enable is not None:enable()
             requested_profile=payload.get("tracking_profile","baseline")
             profile=apply_tracking_profile(self.detectors["acquisition"],requested_profile)
             self.tracking_profile={**profile,"requested":requested_profile,
@@ -317,9 +324,12 @@ class ObservationSession:
                             labels.append((tuple(int(x) for x in item.bbox),label))
                     labels=tuple(labels)
                 else:
-                    unassigned=_withheld_boxes(tracks,detector.epoch) if self.policy.fragment_continuation else ()
-                    self.engine.observe_acquisition(frame,packet.timestamp,packet.sequence,observations,generation=generation,
-                        unassigned_boxes=unassigned)
+                    if getattr(self,"fragment_continuation",False):
+                        self.engine.observe_acquisition(frame,packet.timestamp,packet.sequence,observations,generation=generation,
+                            unassigned_boxes=_withheld_boxes(tracks,detector.epoch))
+                    else:
+                        # Default-off: the historical call contract, no continuation evidence.
+                        self.engine.observe_acquisition(frame,packet.timestamp,packet.sequence,observations,generation=generation)
                     labels=None
                 data=self.runtime[packet.role]
                 data["frames"]+=1;data["preview_frames"]+=1;data["inference_total_ms"]+=elapsed;data["last_inference_ms"]=elapsed

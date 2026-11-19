@@ -38,7 +38,8 @@ def book(**policy):
 
 def play(waits, frames, start=0, phase='RED'):
     for index, observations in enumerate(frames, start):
-        waits.observe(list(observations), phase, index/FPS, index+1, 1)
+        # Complete evidence: the tracker withheld nothing (an omitted value is unavailable).
+        waits.observe(list(observations), phase, index/FPS, index+1, 1, unassigned=())
     return start+len(frames)
 
 
@@ -382,8 +383,8 @@ def dense(waits, n):
     """n lost vehicles (on a grid) and n newborns in one frame."""
     rows = [(50.+60*(k % 8), 40.+70*(k//8)) for k in range(n)]
     for f in range(6):
-        waits.observe([car(1+k, y+2*f, x=x) for k, (x, y) in enumerate(rows)], 'RED', f/FPS, f+1, 1)
-    waits.observe([car(10_000+k, y+14, x=x) for k, (x, y) in enumerate(rows)], 'RED', 7/FPS, 8, 1)
+        waits.observe([car(1+k, y+2*f, x=x) for k, (x, y) in enumerate(rows)], 'RED', f/FPS, f+1, 1, unassigned=())
+    waits.observe([car(10_000+k, y+14, x=x) for k, (x, y) in enumerate(rows)], 'RED', 7/FPS, 8, 1, unassigned=())
 
 
 @pytest.mark.parametrize('n', [32, 64])
@@ -396,7 +397,7 @@ def test_dense_frame_matching_is_bounded(n):
         waits.observe([car(1+k, y+2*f, x=x) for k, (x, y) in enumerate(rows)], 'RED', f/FPS, f+1, 1)
     newborns = [car(10_000+k, y+14, x=x) for k, (x, y) in enumerate(rows)]
     started = time.perf_counter()
-    waits._continue_fragments(newborns, 7/FPS)
+    waits._continue_fragments(newborns, 7/FPS, ())
     elapsed = time.perf_counter()-started
     assert elapsed < .05, elapsed
 
@@ -439,7 +440,7 @@ def run_engine(frames, tmp_path=None, every=None, signal=None):
         e.enable_retention(1, tmp_path)
         store = ExperimentStore(tmp_path, e.run_id, {})
     for index, observations in enumerate(frames):
-        e.observe_acquisition(signal(index) if signal else RED, index/FPS, index+1, observations)
+        e.observe_acquisition(signal(index) if signal else RED, index/FPS, index+1, observations, unassigned_boxes=())
         if every and index % every == 0:
             state, token = e.prepare_commit(); store.persist(state); e.acknowledge(token)
     e.close()
@@ -536,7 +537,7 @@ def test_persistent_waits_never_continue_native_fragments():
 def test_native_engine_snapshot_exposes_physical_vehicle_and_raw_ids():
     e = engine()
     for index, observations in enumerate(fragment()):
-        e.observe_acquisition(RED, index/FPS, index+1, observations)
+        e.observe_acquisition(RED, index/FPS, index+1, observations, unassigned_boxes=())
     vehicles = e.snapshot(evidence=True)['vehicles']
     assert len(vehicles) == 1
     assert [n['local_id'] for n in vehicles[0]['native_ids']] == [1, 2]

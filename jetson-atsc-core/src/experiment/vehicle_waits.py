@@ -192,7 +192,7 @@ class VehicleWaits:
                    completed=True,completed_at=timestamp,right_censored=False,tracking_state="SERVED")
         if attributed is None:self._flag(row,"crossing_phase_unknown")
 
-    def observe(self, observations, phase, timestamp, sequence, cycle_id, unassigned=()):
+    def observe(self, observations, phase, timestamp, sequence, cycle_id, unassigned=None):
         if sequence == self.last_sequence or (self.last_time is not None and timestamp <= self.last_time): return
         if self.first_sequence is None: self.first_sequence = sequence
         self.last_sequence = sequence; self.last_time = timestamp
@@ -340,7 +340,7 @@ class VehicleWaits:
         if identity in self.active or identity in self.handed_off or identity in self.outside_seen:return False
         return self.archived is None or self.archived(vehicle_key(self.run_id, *identity)) is None
 
-    def _continue_fragments(self, observations, timestamp, unassigned=()):
+    def _continue_fragments(self, observations, timestamp, unassigned=None):
         """Link a never-seen native ID to a just-lost row when nothing else competes.
 
         Work is O(newborns x lost) gate arithmetic (motion fitted once per lost

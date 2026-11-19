@@ -114,7 +114,8 @@ def frozen_factory(competitor):
         if index <= 4:return [box(100)]
         if index == 5:return [box(112)]
         return [box(112)]+([box(94)] if competitor and index == 6 else [])
-    return lambda *args, **kwargs:frozen_detector(FrozenTrackModel(boxes))
+    # Capture starts disabled: the session's opt-in must enable it.
+    return lambda *args, **kwargs:frozen_detector(FrozenTrackModel(boxes), evidence=False)
 
 
 @pytest.mark.parametrize('competitor', [True, False])
@@ -126,3 +127,51 @@ def test_session_vetoes_with_bytetrack_withheld_competitor(video_factory, tmp_pa
         assert linked == [] and {'acquisition:0:1', 'acquisition:0:2'} <= set(rows)
     else:
         assert [[n['local_id'] for n in r['native_ids']] for r in linked] == [[1, 2]]
+
+
+class EvidenceSpyDetector(ScriptedDetector):
+    enabled = []
+    def enable_withheld_evidence(self):
+        type(self).enabled.append(self)
+        return True
+
+
+@pytest.mark.parametrize('enabled,identity,expect', [(False, None, False), (True, None, True),
+                                                     (True, 'persistent_v1', False), (False, 'persistent_v1', False)])
+def test_withheld_capture_is_enabled_only_for_native_fragment_continuation(video_factory, tmp_path,
+                                                                           enabled, identity, expect):
+    settings = run_payload(video_factory)
+    settings['policy'] = {'debounce_frames': 1, 'stop_persistence_sec': .1, 'fragment_continuation': enabled}
+    if identity:settings['vehicle_identity'] = {'mode': identity}
+    class Manual(ObservationSession):
+        def _worker(self):self.ready.set()
+    EvidenceSpyDetector.enabled = []
+    session = Manual(settings, tmp_path/'runs', detector_factory=EvidenceSpyDetector, anfis_factory=FakeANFIS)
+    try:
+        assert session.fragment_continuation is expect
+        # Only the acquisition detector, and only when continuation can use the evidence.
+        assert EvidenceSpyDetector.enabled == ([session.detectors['acquisition']] if expect else [])
+    finally:
+        session.state = session.applied_state = 'stopped';session._cleanup()
+
+
+def test_default_off_session_keeps_the_historical_observe_acquisition_contract(video_factory, tmp_path, monkeypatch):
+    """A previously compatible engine override (no unassigned_boxes) still works when continuation is off."""
+    from src.ui import observation_session as module
+    calls = []
+    class Legacy(module.ObservationEngine):
+        def observe_acquisition(self, frame, timestamp, sequence, observations, *, generation=None):
+            calls.append(sequence)
+            return super().observe_acquisition(frame, timestamp, sequence, observations, generation=generation)
+    monkeypatch.setattr(module, 'ObservationEngine', Legacy)
+    settings = run_payload(video_factory)
+    settings['policy'] = {'debounce_frames': 1, 'stop_persistence_sec': .1}
+    class Manual(ObservationSession):
+        def _worker(self):self.ready.set()
+    session = Manual(settings, tmp_path/'runs', detector_factory=frozen_factory(True), anfis_factory=FakeANFIS)
+    try:
+        for _ in range(8):session._process_batch()
+        assert calls and session.fragment_continuation is False
+        assert getattr(session.detectors['acquisition'], '_provenance', None) is None
+    finally:
+        session.state = session.applied_state = 'stopped';session._cleanup()

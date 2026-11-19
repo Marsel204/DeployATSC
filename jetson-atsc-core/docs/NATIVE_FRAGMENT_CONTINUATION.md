@@ -44,17 +44,28 @@ continues a row whose last observation was at most `max_gap_sec` earlier, when:
 4. that same-frame evidence is complete. `DetectorTracker.track` returns
    per-frame lists carrying it (`TrackedFrame.withheld`). When it is
    unavailable (tracker error and predict fallback, a detector without the
-   provenance hook, a frame from an older tracker epoch) no link is made in
-   that frame (`continuation_unavailable_frames`). Direct `VehicleWaits` /
-   `ObservationEngine` callers pass `unassigned_boxes` themselves; the default
-   `()` asserts that the observations are every detection of the frame.
+   provenance hook, a frame from an older tracker epoch, an image whose
+   tracker updates cannot be attributed to it) no link is made in that frame
+   (`continuation_unavailable_frames`). Direct `VehicleWaits` /
+   `ObservationEngine` callers pass `unassigned_boxes` themselves: `()`
+   asserts that the observations are every detection of the frame, and the
+   default (`None`) declares the evidence unavailable.
 
 A row is continued at most 8 times. A frame with more than 4,096
 newborn x lost pairs skips continuation (`continuation_skipped_frames`).
 The provenance hook is an `on_predict_batch_start` callback: it runs after
 Ultralytics' `on_predict_start` created the trackers and before
-`on_predict_postprocess_end` updates them, and records each update's input
-detections and output indices without a second inference.
+`on_predict_postprocess_end` updates them, and records each update's image,
+input detections and output indices without a second inference. Capture is
+opt-in (`DetectorTracker.enable_withheld_evidence`): a session enables it on
+the Camera 2 detector only when continuation is on and identity is native, so
+default-off and persistent-identity runs pay nothing and keep the historical
+`observe_acquisition` call. Updates are attributed to images by identity, not
+position: Ultralytics 8.3.x skips the update for an image without
+detections (that image has nothing withheld); an image with detections and no
+update, or with more than one update, has no evidence. `reset_tracking`
+removes the installed tracker callbacks before dropping the predictor, since
+8.3.x would otherwise append a second registration and update twice per frame.
 
 ## Accounting
 
