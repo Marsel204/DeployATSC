@@ -101,6 +101,68 @@ class TrackedVehicle:
         return getattr(self, "obs_count", 5) >= 5 and self.velocity_mps <= 1.0
 
 
+class TrackedFrame(list):
+    """One frame's tracked vehicles (a plain list to every caller), plus the
+    frame's actual post-NMS detections the native tracker did not emit.
+
+    ``withheld`` holds (bbox, class_name, confidence) for vehicle-class boxes
+    ByteTrack discarded or kept unconfirmed in this very frame, identified by
+    the tracker's own detection index (never by box matching, which tracker
+    smoothing would make a guess). ``None`` means that evidence is unavailable
+    (predict fallback, injected model, incomplete capture): callers must then
+    not infer anything that needs it. Evidence only; never a vehicle.
+    """
+    __slots__ = ("withheld", "epoch")
+
+    def __init__(self, vehicles=(), withheld=None, epoch=None):
+        super().__init__(vehicles)
+        self.withheld = withheld
+        self.epoch = epoch
+
+
+class _TrackerProvenance:
+    """Record each native tracker update's input detections and output indices.
+
+    Installed as an ``on_predict_batch_start`` callback, which runs after the
+    installed Ultralytics ``on_predict_start`` created the trackers and before
+    its ``on_predict_postprocess_end`` calls ``tracker.update``; so the order
+    relative to the tracker callbacks is fixed by the predictor, not by
+    registration order. Records only while armed by DetectorTracker.track.
+    """
+
+    def __init__(self) -> None:
+        self.armed = False
+        self.calls: List[Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]] = []
+
+    def __call__(self, predictor) -> None:
+        if getattr(getattr(predictor, "args", None), "mode", None) != "track":
+            return
+        for tracker in getattr(predictor, "trackers", ()) or ():
+            update = getattr(tracker, "update", None)
+            if update is None or getattr(update, "_atsc_provenance", None) is self:
+                continue
+            tracker.update = self._wrap(update)
+
+    def _wrap(self, update):
+        def recorded(results, *args, **kwargs):
+            tracks = update(results, *args, **kwargs)
+            if self.armed:
+                try:
+                    xyxy = np.array(results.xyxy, dtype=np.float64).reshape(-1, 4)
+                    cls = np.array(results.cls, dtype=np.float64).reshape(-1)
+                    conf = np.array(results.conf, dtype=np.float64).reshape(-1)
+                    out = np.asarray(tracks)
+                    idx = out[:, -1].astype(int).copy() if out.ndim == 2 and len(out) else np.zeros(0, dtype=int)
+                    if not (len(xyxy) == len(cls) == len(conf)):raise ValueError("ragged detections")
+                    self.calls.append((xyxy, cls, conf, idx))
+                except Exception:
+                    # Unreadable evidence: poison this frame rather than guess.
+                    self.calls.append(None)
+            return tracks
+        recorded._atsc_provenance = self
+        return recorded
+
+
 class DetectorTracker:
     """
     Batched vehicle detection and ByteTrack tracking system.
@@ -145,6 +207,45 @@ class DetectorTracker:
         self.epoch = 0
 
         self._load_model()
+        self._attach_provenance()
+
+    def _attach_provenance(self) -> None:
+        """Register the frame-local detection provenance hook once per model."""
+        if getattr(self, "_provenance", None) is not None:
+            return
+        add = getattr(self.model, "add_callback", None)
+        if add is None:
+            return
+        self._provenance = _TrackerProvenance()
+        add("on_predict_batch_start", self._provenance)
+
+    def _withheld(self, result, call) -> Optional[tuple]:
+        """Post-NMS vehicle boxes of this result the tracker did not emit, or None."""
+        if call is None:
+            return None
+        xyxy, cls, conf, idx = call
+        boxes = getattr(result, "boxes", None)
+        emitted_count = 0 if boxes is None else len(boxes)
+        if boxes is not None and boxes.id is not None:
+            if emitted_count != len(idx) or (len(idx) and (idx.min() < 0 or idx.max() >= len(xyxy))):
+                return None
+            emitted = set(idx.tolist())
+        elif emitted_count == 0:
+            emitted = set()         # all hidden (e.g. new tracks awaiting confirmation)
+        elif emitted_count == len(xyxy) and len(idx) == 0:
+            return ()               # untracked passthrough: every detection is an observation
+        else:
+            return None
+        withheld = []
+        for j in range(len(xyxy)):
+            if j in emitted:
+                continue
+            name = self.map_class(int(cls[j]))
+            box = tuple(float(v) for v in xyxy[j])
+            if name is None or not np.isfinite(box).all() or box[2] <= box[0] or box[3] <= box[1]:
+                continue
+            withheld.append((box, name, float(conf[j])))
+        return tuple(withheld)
 
     def set_tracking_profile(self, name: str) -> None:
         """Select before tracking starts; reset_tracking preserves this choice."""
@@ -207,7 +308,7 @@ class DetectorTracker:
         self,
         frames: List[np.ndarray],
         timestamp: Optional[float] = None,
-    ) -> List[List[TrackedVehicle]]:
+    ) -> List[TrackedFrame]:
         """
         Performs batched inference and multi-object tracking across 1 or 2 frames.
 
@@ -226,6 +327,14 @@ class DetectorTracker:
         if self.is_tensorrt and len(frames)!=1:
             raise ValueError("This TensorRT engine accepts exactly one frame per call")
 
+        provenance = getattr(self, "_provenance", None)
+        if provenance is None and getattr(self, "model", None) is not None:
+            self._attach_provenance()
+            provenance = getattr(self, "_provenance", None)
+        tracked = False
+        if provenance is not None:
+            provenance.calls = []
+            provenance.armed = True
         # Batched inference via Ultralytics track
         try:
             results = self.model.track(
@@ -238,6 +347,7 @@ class DetectorTracker:
                 tracker=self.tracking_profile.tracker_argument,
                 verbose=False,
             )
+            tracked = True
         except Exception as e:
             # Fallback if tracker config fails or tracking fails
             print(f"[Detector Tracker] Warning in track(): {e}. Running predict without tracker...")
@@ -249,11 +359,19 @@ class DetectorTracker:
                 device=getattr(self,"inference_device",self.device),
                 verbose=False,
             )
+        finally:
+            if provenance is not None:
+                provenance.armed = False
+        calls = provenance.calls if provenance is not None else []
+        if provenance is not None:
+            provenance.calls = []
+        complete = tracked and provenance is not None and len(calls) == len(results)
 
-        batch_outputs: List[List[TrackedVehicle]] = []
+        batch_outputs: List[TrackedFrame] = []
 
-        for res in results:
-            frame_vehicles: List[TrackedVehicle] = []
+        for index, res in enumerate(results):
+            frame_vehicles = TrackedFrame(
+                withheld=self._withheld(res, calls[index]) if complete else None, epoch=self.epoch)
             boxes = getattr(res, "boxes", None)
             if boxes is not None and len(boxes) > 0:
                 xyxy_arr = boxes.xyxy.cpu().numpy()

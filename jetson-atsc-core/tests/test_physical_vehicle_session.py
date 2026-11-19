@@ -8,7 +8,8 @@ import zipfile
 
 import pytest
 
-from src.perception.detector_tracker import TrackedVehicle
+from frozen_tracking import FrozenTrackModel, frozen_detector
+from src.perception.detector_tracker import TrackedFrame, TrackedVehicle
 from src.ui.observation_session import ObservationSession
 from test_observation_sessions import FakeANFIS, run_payload
 
@@ -25,11 +26,12 @@ def script(index):
 
 
 class ScriptedDetector:
+    """Scripted tracks; declares that the tracker withheld nothing in any frame."""
     def __init__(self, *args, **kwargs):self.epoch = 0;self.track_trajectories = {}
     def track(self, frames, timestamp=None):
         index = round(timestamp*FPS)
-        return [[TrackedVehicle(track_id, 2, 'car', [x-14, y-30, x+14, y], .9, timestamp, obs_count=6, epoch=self.epoch)
-                 for track_id, y, x in script(index)] for _ in frames]
+        return [TrackedFrame([TrackedVehicle(track_id, 2, 'car', [x-14, y-30, x+14, y], .9, timestamp, obs_count=6, epoch=self.epoch)
+                 for track_id, y, x in script(index)], withheld=(), epoch=self.epoch) for _ in frames]
     def update_velocities(self, vehicles, project, timestamp=None):
         for v in vehicles:v.velocity_valid = True;v.velocity_mps = 2.;v.ground_pos = project(*v.bottom_center)
     def reset_tracking(self):self.epoch += 1
@@ -77,3 +79,50 @@ def test_session_handoff_and_late_return_reach_telemetry_and_export(video_factor
     # The row finished before ID 1 returned, so it is not rewritten; the return is its own row.
     assert 'identity_link_contested' not in continued['quality_flags']
     assert returned['left_censored'] and not returned['crossed_stop_line']
+
+
+class PlainListDetector(ScriptedDetector):
+    """A detector without frame evidence (plain lists, as any non-DetectorTracker returns)."""
+    def track(self, frames, timestamp=None):
+        return [list(frame) for frame in super().track(frames, timestamp)]
+
+
+def run_session(video_factory, tmp_path, factory, steps):
+    settings = run_payload(video_factory)
+    settings['policy'] = {'debounce_frames': 1, 'stop_persistence_sec': .1, 'fragment_continuation': True}
+    class Manual(ObservationSession):
+        def _worker(self):self.ready.set()
+    session = Manual(settings, tmp_path/'runs', detector_factory=factory, anfis_factory=FakeANFIS)
+    try:
+        for _ in range(steps):session._process_batch()
+        waits = session.engine.waits
+        return ({k.split(':', 1)[1]: r for k, r in waits.records.items()}, waits.continuation_unavailable_frames)
+    finally:
+        session.state = session.applied_state = 'stopped';session._cleanup()
+
+
+def test_session_without_frame_evidence_never_guesses_a_handoff(video_factory, tmp_path):
+    rows, unavailable = run_session(video_factory, tmp_path, PlainListDetector, 40)
+    assert not any(r.get('identity_links') for r in rows.values())
+    assert {'acquisition:0:1', 'acquisition:0:2'} <= set(rows) and unavailable >= 1
+
+
+def frozen_factory(competitor):
+    """Sol's repro geometry (40x6 px) through the installed tracker callbacks, inside the ROI."""
+    def boxes(index, image):
+        def box(x):return [x-3, 100, x+3, 140, .95, 1]
+        if index <= 4:return [box(100)]
+        if index == 5:return [box(112)]
+        return [box(112)]+([box(94)] if competitor and index == 6 else [])
+    return lambda *args, **kwargs:frozen_detector(FrozenTrackModel(boxes))
+
+
+@pytest.mark.parametrize('competitor', [True, False])
+def test_session_vetoes_with_bytetrack_withheld_competitor(video_factory, tmp_path, competitor):
+    rows, unavailable = run_session(video_factory, tmp_path, frozen_factory(competitor), 12)
+    linked = [r for r in rows.values() if r.get('identity_links')]
+    assert unavailable == 0
+    if competitor:
+        assert linked == [] and {'acquisition:0:1', 'acquisition:0:2'} <= set(rows)
+    else:
+        assert [[n['local_id'] for n in r['native_ids']] for r in linked] == [[1, 2]]

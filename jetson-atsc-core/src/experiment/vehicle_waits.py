@@ -56,6 +56,20 @@ def _fit(history):
     return slope(1), slope(2)
 
 
+def _competitors(observations, unassigned):
+    """(observation or None, footpoint, height, bbox) for every box of the frame.
+
+    ``unassigned`` are the frame's actual detections the tracker did not emit:
+    they can only veto a link, never become rows."""
+    found = [(o, o.point, _height(o), o.bbox) for o in observations]
+    for box in unassigned:
+        try:x1, y1, x2, y2 = (float(v) for v in box[:4])
+        except (TypeError, ValueError, IndexError):continue
+        if all(map(math.isfinite, (x1, y1, x2, y2))) and x2 > x1 and y2 > y1:
+            found.append((None, ((x1+x2)/2, y2), y2-y1, (x1, y1, x2, y2)))
+    return found
+
+
 def _overlap_of_smaller(a, b):
     width = min(a[2], b[2])-max(a[0], b[0]); height = min(a[3], b[3])-max(a[1], b[1])
     if width <= 0 or height <= 0:return 0.
@@ -72,6 +86,10 @@ class VehicleWaits:
     size agree, and no other observed box competes. The interval across the
     handoff is unknown coverage (no wait, no crossing, no motion history), and
     every raw ID keeps its own segment and crossing history.
+
+    ``unassigned`` boxes (``observe``) are the frame's other actual detections
+    that the tracker withheld; they only veto links. ``None`` declares that
+    evidence unavailable, and then no link is made in that frame.
     """
     fragment_continuation = True
     def __init__(self, run_id, policy: RunPolicy, side):
@@ -91,6 +109,8 @@ class VehicleWaits:
         # Stable raw IDs recently seen outside the region (never "newborn").
         self.outside_seen = {}
         self.continuation_skipped_frames = 0
+        # Frames with a continuation candidate but no complete same-frame detections.
+        self.continuation_unavailable_frames = 0
 
     def _flag(self, row, flag):
         if flag not in row["quality_flags"]: row["quality_flags"].append(flag)
@@ -169,14 +189,16 @@ class VehicleWaits:
                    completed=True,completed_at=timestamp,right_censored=False,tracking_state="SERVED")
         if attributed is None:self._flag(row,"crossing_phase_unknown")
 
-    def observe(self, observations, phase, timestamp, sequence, cycle_id):
+    def observe(self, observations, phase, timestamp, sequence, cycle_id, unassigned=()):
         if sequence == self.last_sequence or (self.last_time is not None and timestamp <= self.last_time): return
         if self.first_sequence is None: self.first_sequence = sequence
         self.last_sequence = sequence; self.last_time = timestamp
         if phase == "UNKNOWN":cycle_id = None
         continuing = self.fragment_continuation and self.policy.fragment_continuation
         if continuing:
-            self._continue_fragments(observations, timestamp)
+            # Read twice (prepass, accounting): a one-shot iterator must be materialized once.
+            observations = observations if isinstance(observations, (list, tuple)) else list(observations)
+            self._continue_fragments(observations, timestamp, unassigned)
         present = set()
         for observation in observations:
             if observation.local_id is None or not observation.stable_id: continue
@@ -313,7 +335,7 @@ class VehicleWaits:
         if identity in self.active or identity in self.handed_off or identity in self.outside_seen:return False
         return self.archived is None or self.archived(vehicle_key(self.run_id, *identity)) is None
 
-    def _continue_fragments(self, observations, timestamp):
+    def _continue_fragments(self, observations, timestamp, unassigned=()):
         """Link a never-seen native ID to a just-lost row when nothing else competes.
 
         Work is O(newborns x lost) gate arithmetic (motion fitted once per lost
@@ -346,6 +368,10 @@ class VehicleWaits:
             else:continue
             lost.append((identity, state, dt, (x+motion[0]*dt, y+motion[1]*dt), height, gate, fitted))
         if not lost:return
+        if unassigned is None:
+            # Without the frame's withheld detections a competitor may be invisible: do not guess.
+            self.continuation_unavailable_frames += 1
+            return
         if len(newborns)*len(lost) > MAX_PAIR_CHECKS:
             self.continuation_skipped_frames += 1
             return
@@ -358,24 +384,25 @@ class VehicleWaits:
                 error = math.hypot(predicted[0]-px, predicted[1]-py)/height
                 if error <= gate:
                     new_degree[i] += 1; lost_degree[j] += 1; edge[i] = (j, error)
+        competitors = None
         for i, (j, error) in edge.items():
             if new_degree[i] != 1 or lost_degree[j] != 1:continue
             new, o, new_height = newborns[i]
             old, state, dt, predicted, height, gate, fitted = lost[j]
             if state["row"]["class_name"] != o.class_name:continue
             if max(height, new_height)/min(height, new_height) > MAX_HEIGHT_RATIO:continue
-            if self._competed(o, new_height, predicted, height, gate, observations):continue
+            if competitors is None:competitors = _competitors(observations, unassigned)
+            if self._competed(o, new_height, predicted, height, gate, competitors):continue
             self._link(old, new, state, o, timestamp, dt, error, gate, predicted, fitted)
 
     @staticmethod
-    def _competed(newborn, new_height, predicted, height, gate, observations):
-        for other in observations:
+    def _competed(newborn, new_height, predicted, height, gate, competitors):
+        for other, point, other_height, bbox in competitors:
             if other is newborn:continue
-            if math.dist(predicted, other.point)/height <= gate:return True
-            other_height = _height(other)
-            if newborn.bbox is None or other.bbox is None or other_height is None:continue
-            if (_overlap_of_smaller(newborn.bbox, other.bbox) >= COMPETITOR_OVERLAP and
-                    math.dist(newborn.point, other.point)/min(new_height, other_height) <= COMPETITOR_FOOTPOINT_HEIGHTS):
+            if math.dist(predicted, point)/height <= gate:return True
+            if newborn.bbox is None or bbox is None or other_height is None:continue
+            if (_overlap_of_smaller(newborn.bbox, bbox) >= COMPETITOR_OVERLAP and
+                    math.dist(newborn.point, point)/min(new_height, other_height) <= COMPETITOR_FOOTPOINT_HEIGHTS):
                 return True
         return False
 

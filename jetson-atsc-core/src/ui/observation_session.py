@@ -61,11 +61,26 @@ def source_identity(value):
     return str(Path(value).resolve()) if "://" not in value else value
 
 
-def _box(track):
-    """The raw image box as finite floats, or None (continuation evidence only)."""
-    try:box=tuple(float(value) for value in getattr(track,"bbox",None)[:4])
+def _finite_box(values):
+    try:box=tuple(float(value) for value in values[:4])
     except (TypeError,IndexError,ValueError):return None
     return box if len(box)==4 and all(map(math.isfinite,box)) and box[3]>box[1] and box[2]>box[0] else None
+
+
+def _box(track):
+    """The raw image box as finite floats, or None (continuation evidence only)."""
+    return _finite_box(getattr(track,"bbox",None))
+
+
+def _withheld_boxes(tracks,epoch):
+    """This frame's detections the native tracker withheld, as raw boxes, or None.
+
+    Only a DetectorTracker frame carries this; any other detector, a predict
+    fallback, or a frame from another tracker epoch yields None (unavailable)."""
+    withheld=getattr(tracks,"withheld",None)
+    if withheld is None or getattr(tracks,"epoch",None)!=epoch:return None
+    boxes=tuple(_finite_box(item[0]) for item in withheld)
+    return None if None in boxes else boxes
 
 
 class ObservationConflict(RuntimeConflict):
@@ -302,7 +317,9 @@ class ObservationSession:
                             labels.append((tuple(int(x) for x in item.bbox),label))
                     labels=tuple(labels)
                 else:
-                    self.engine.observe_acquisition(frame,packet.timestamp,packet.sequence,observations,generation=generation)
+                    unassigned=_withheld_boxes(tracks,detector.epoch) if self.policy.fragment_continuation else ()
+                    self.engine.observe_acquisition(frame,packet.timestamp,packet.sequence,observations,generation=generation,
+                        unassigned_boxes=unassigned)
                     labels=None
                 data=self.runtime[packet.role]
                 data["frames"]+=1;data["preview_frames"]+=1;data["inference_total_ms"]+=elapsed;data["last_inference_ms"]=elapsed

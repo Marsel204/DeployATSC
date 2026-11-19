@@ -32,13 +32,29 @@ continues a row whose last observation was at most `max_gap_sec` earlier, when:
    gap when at least three samples show image motion; without motion only a
    gap of up to 0.1 s is bridged);
 2. the class matches and the box heights differ by at most 1.5x;
-3. no other observed box, of any class, size or ID state, has its footpoint
-   in the gate, or covers at least half of the smaller box with footpoints
-   within half a box height of the newborn's (the f66 case in the
-   0SgQn95Q07U replay).
+3. no other box of the same frame, of any vehicle class, size or ID state,
+   has its footpoint in the gate, or covers at least half of the smaller box
+   with footpoints within half a box height of the newborn's (the f66 case in
+   the 0SgQn95Q07U replay). "Other boxes" include the frame's actual post-NMS
+   detections that ByteTrack withheld (discarded low-score boxes and new
+   tracks awaiting confirmation). They are identified by the tracker's own
+   detection index, so the newborn's own detection is never its competitor
+   however much the tracker smoothed its box. Withheld boxes only veto links;
+   they never become ledger rows.
+4. that same-frame evidence is complete. `DetectorTracker.track` returns
+   per-frame lists carrying it (`TrackedFrame.withheld`). When it is
+   unavailable (tracker error and predict fallback, a detector without the
+   provenance hook, a frame from an older tracker epoch) no link is made in
+   that frame (`continuation_unavailable_frames`). Direct `VehicleWaits` /
+   `ObservationEngine` callers pass `unassigned_boxes` themselves; the default
+   `()` asserts that the observations are every detection of the frame.
 
 A row is continued at most 8 times. A frame with more than 4,096
 newborn x lost pairs skips continuation (`continuation_skipped_frames`).
+The provenance hook is an `on_predict_batch_start` callback: it runs after
+Ultralytics' `on_predict_start` created the trackers and before
+`on_predict_postprocess_end` updates them, and records each update's input
+detections and output indices without a second inference.
 
 ## Accounting
 
@@ -55,6 +71,11 @@ newborn x lost pairs skips continuation (`continuation_skipped_frames`).
   the archive index, so eviction timing, acknowledgment order and index
   rebuilds give the same rows.
 
-Ledger rows are not physical vehicle counts. Frame review of the 0SgQn95Q07U
-replay supports the three links the rule makes there; it is not a validation
-of physical identity in general.
+Ledger rows are not physical vehicle counts. On the frozen 0SgQn95Q07U
+post-NMS boxes (both 220-frame ROIs) the rule makes two links (#191 -> #213,
+#670 -> #692), which frame review supports. The third pairing the frames
+support, #368 -> #534 at f132, is declined: ByteTrack withheld a 0.343
+motorcycle box on the same motorcycle, and the rule cannot tell a duplicate
+box from a neighbour. On the 660-frame junction clip the one link
+(#626 -> #648) is unchanged. None of this validates physical identity in
+general.
