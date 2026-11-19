@@ -16,6 +16,7 @@ class PersistentVehicleWaits(VehicleWaits):
         self.previous_phase = 'UNKNOWN'
         self.previous_cycle = None
         self.first_source_time=None
+        self.record_tracking = True
 
     def _new(self, observation, timestamp, sequence, segment=0):
         state = super()._new(observation, timestamp, sequence, segment)
@@ -76,7 +77,7 @@ class PersistentVehicleWaits(VehicleWaits):
         if 'end' not in gap:
             row = self.active[key]['row']
             interval = {'start': gap['start'], 'end': timestamp, 'phase': 'UNKNOWN',
-                'cycle_id': None, 'valid': False, 'stopped': False}
+                'cycle_id': None, 'valid': False, 'tracked': False, 'stopped': False}
             if timestamp > gap['start']:
                 row['intervals'].append(interval)
                 self.work += 1
@@ -174,7 +175,7 @@ class PersistentVehicleWaits(VehicleWaits):
     def _coalesce(self):
         # Preserve revisable hysteresis/gap suffixes. Older identical evidence is
         # represented by a duration, not one dictionary for every decoded frame.
-        fields=('phase','cycle_id','valid','stopped','native_reference','identity_association')
+        fields=('phase','cycle_id','valid','tracked','stopped','native_reference','identity_association')
         for state in self.active.values():
             intervals=state['row'].get('intervals',[])
             candidates=[state[k] for k in ('stop_candidate','move_candidate','gap_candidate','exit_candidate') if state.get(k) is not None]

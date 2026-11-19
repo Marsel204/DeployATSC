@@ -13,6 +13,10 @@ class SchedulePolicy:
     phase_source: str = 'camera_roi'
     max_phase_skew_sec: float = .5
     max_episode_sec: float = 300.
+    # Acquisition sampling: a vehicle is collected for an A-green episode only when
+    # Camera 2 tracks it within this many seconds of A-green onset and keeps tracking
+    # it, without a break, until B is released or the vehicle crosses the stop line.
+    collection_start_tolerance_sec: float = 1.
 
     def __post_init__(self):
         if type(self.enabled) is not bool or type(self.unchanged_clearance) is not bool:
@@ -24,12 +28,62 @@ class SchedulePolicy:
                 raise ValueError('Explicit A and B movement names are required')
         if self.a_movement_id == self.b_movement_id:
             raise ValueError('A and B must be different movements')
-        for key, bounds in {'max_phase_skew_sec': (.01, 2.), 'max_episode_sec': (10., 600.)}.items():
+        for key, bounds in {'max_phase_skew_sec': (.01, 2.), 'max_episode_sec': (10., 600.),
+                            'collection_start_tolerance_sec': (0., 10.)}.items():
             value = getattr(self, key)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not bounds[0] <= value <= bounds[1]:
                 raise ValueError(f'Invalid schedule setting: {key}')
         if self.enabled and not self.unchanged_clearance:
             raise ValueError('A/B comparison requires an explicit unchanged-clearance assumption')
+
+
+COLLECTION_POLICY = 'tracked_from_a_green_start_to_b_release_v1'
+EPSILON = 1e-6
+
+
+def tracked_spans(row):
+    """Merge consecutive break-free intervals into [start, end] tracking spans."""
+    spans = []
+    for interval in sorted(row.get('intervals', []), key=lambda i: i['start']):
+        if not interval.get('tracked'):
+            continue
+        if spans and interval['start'] <= spans[-1][1]+EPSILON:
+            spans[-1][1] = max(spans[-1][1], interval['end'])
+        else:
+            spans.append([interval['start'], interval['end']])
+    return spans
+
+
+def collection_eligibility(row, episode, tolerance_sec=1.):
+    """Did Camera 2 see this vehicle at the start of the A-green cycle and follow it to the end?
+
+    Cycle start is A-green onset (B red); cycle end is B release. A vehicle that
+    crosses the stop line earlier has completed its journey at the crossing.
+    """
+    start, end = episode.get('a_start'), episode.get('b_release')
+    result = {'collected': False, 'collection_reasons': [], 'collection_policy': COLLECTION_POLICY,
+              'collection_window': {'start': start, 'end': end, 'start_tolerance_sec': tolerance_sec}}
+    if start is None or end is None or not math.isfinite(start) or not math.isfinite(end):
+        result['collection_reasons'].append('cycle_boundaries_unknown')
+        return result
+    target = end
+    if row.get('crossed_stop_line') and row.get('crossing_at') is not None and start < row['crossing_at'] < end:
+        target = row['crossing_at']
+    spans = tracked_spans(row)
+    # Condition 1: tracked at some moment inside [start, start+tolerance].
+    present = [s for s in spans if s[0] <= start+tolerance_sec+EPSILON and s[1] >= start-EPSILON]
+    if not present:
+        result['collection_reasons'].append('not_detected_at_cycle_start')
+        return result
+    # Condition 2: that same unbroken span lasts to the end of the cycle.
+    span = max(present, key=lambda s: s[1])
+    result['tracked_from'] = round(max(span[0], start), 6)
+    result['tracked_until'] = round(span[1], 6)
+    if span[1] < target-EPSILON:
+        result['collection_reasons'].append('tracking_broken_before_cycle_end')
+        return result
+    result['collected'] = True
+    return result
 
 
 def vehicle_savings(row, episode):

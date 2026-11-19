@@ -214,9 +214,9 @@
     $('savedEvidence').querySelector('thead').replaceChildren(header);
     populateTable('savedEvidence',page?.rows || [],columns.length,(row,record)=>{
       if(view.kind==='schedule_episodes'){
-        cell(row,record.episode_id);cell(row,record.b_episode_id || 'Unpaired');cell(row,record.a_end==null ? 'Pending' : fmt(record.a_end-record.a_start)+' s');cell(row,fmt(record.recommended_green_sec)+' s');cell(row,record.status);cell(row,(record.reasons || []).join(' · '));
+        cell(row,record.episode_id);cell(row,record.b_episode_id || 'Unpaired');cell(row,record.a_end==null ? 'Pending' : fmt(record.a_end-record.a_start)+' s');cell(row,fmt(record.recommended_green_sec)+' s');cell(row,record.status+episodeCollectionLabel(record));cell(row,(record.reasons || []).join(' · '));
       }else if(view.kind==='vehicle_savings'){
-        cell(row,record.vehicle_id);cell(row,record.episode_id);cell(row,fmt(record.observed_red_stop_sec)+' s');cell(row,fmt(record.estimated_actual_red_stop_sec)+' s');cell(row,fmt(record.estimated_schedule_red_stop_sec)+' s');cell(row,savingLabel(record));cell(row,record.available ? record.comparison_mode : (record.reasons || []).join(' · '));
+        cell(row,record.vehicle_id);cell(row,record.episode_id);cell(row,fmt(record.observed_red_stop_sec)+' s');cell(row,fmt(record.estimated_actual_red_stop_sec)+' s');cell(row,fmt(record.estimated_schedule_red_stop_sec)+' s');cell(row,savingLabel(record));cell(row,[collectionLabel(record),record.available ? record.comparison_mode : (record.reasons || []).join(' · ')].filter(Boolean).join(' · '));
       }else if(view.kind==='predictions'){
         cell(row,record.request_id);cell(row,record.cycle_id ?? 'unknown');cell(row,fmt(record.recommended_green_sec)+' s');cell(row,record.status);cell(row,qualificationLabel(record));
       }else if(view.kind==='comparisons'){
@@ -368,6 +368,20 @@
     else if(last?.error)show('Recommendation failed: '+last.error,'error');
     updateControls();
   }
+  const collectionReasonText={not_detected_at_cycle_start:'not seen in the first second of A green',
+    tracking_broken_before_cycle_end:'tracking broke before B release',cycle_boundaries_unknown:'cycle boundaries unknown'};
+  function collectionLabel(record) {
+    if(record.collected===undefined)return '';
+    return record.collected ? 'Collected' : 'Not collected: '+(record.collection_reasons || []).map(r=>collectionReasonText[r] || r).join(', ');
+  }
+  function savingStatus(record) {
+    const status=record.available ? (record.online_eligible ? 'Schedule estimate' : 'Retrospective estimate') : (record.reasons || []).join(' · ');
+    return [collectionLabel(record),status].filter(Boolean).join(' · ');
+  }
+  function episodeCollectionLabel(episode) {
+    const c=episode?.collection;
+    return c ? ` · collected ${c.collected_vehicle_count}/${c.candidate_vehicle_count} vehicles (tracked from A-green start ±${fmt(c.start_tolerance_sec)} s to B release)` : '';
+  }
   function savingLabel(record) {
     if(!record.available)return '—';
     return `${fmt(record.potential_saving_sec)} s (${fmt(record.confirmed_potential_saving_sec)} from observed + ${fmt(record.estimated_potential_saving_sec)} from hidden time)`;
@@ -378,11 +392,11 @@
     $('predictNextGreen').textContent=enabled ? 'Automatic A-green capture' : 'Analyze frame & predict';
     if(!enabled)return;
     const episode=data.schedule_episodes?.at(-1);
-    $('scheduleStatus').textContent=`Movement A: ${(data.a_phase?.measurement_phase || 'UNKNOWN').toLowerCase()} · ${data.schedule_episodes?.length || 0} recent A episodes${episode ? ' · '+episode.status+(episode.reasons?.length ? ' · '+episode.reasons.join(', ') : '') : ''}.`;
+    $('scheduleStatus').textContent=`Movement A: ${(data.a_phase?.measurement_phase || 'UNKNOWN').toLowerCase()} · ${data.schedule_episodes?.length || 0} recent A episodes${episode ? ' · '+episode.status+(episode.reasons?.length ? ' · '+episode.reasons.join(', ') : '')+episodeCollectionLabel(episode) : ''}.`;
     $('predictionReady').textContent='One Camera 1 image is analysed automatically per observed A-green episode.';
     if(!episode)$('predictionStatus').textContent='Waiting for A green and a fresh observed B red. Configure A’s signal head in Camera 1 calibration.';
     populateTable('scheduleSavings',data.vehicle_savings || [],8,(row,value)=>{
-      cell(row,value.vehicle_id);cell(row,`${value.episode_id} / ${value.b_cycle_id ?? 'unknown'}`);cell(row,fmt(value.observed_red_stop_sec)+' s');cell(row,fmt(value.estimated_actual_red_stop_sec)+' s');cell(row,fmt(value.estimated_schedule_red_stop_sec)+' s');cell(row,savingLabel(value));cell(row,value.measurement_coverage || 'unknown');cell(row,value.available ? (value.online_eligible ? 'Schedule estimate' : 'Retrospective estimate') : (value.reasons || []).join(' · '));
+      cell(row,value.vehicle_id);cell(row,`${value.episode_id} / ${value.b_cycle_id ?? 'unknown'}`);cell(row,fmt(value.observed_red_stop_sec)+' s');cell(row,fmt(value.estimated_actual_red_stop_sec)+' s');cell(row,fmt(value.estimated_schedule_red_stop_sec)+' s');cell(row,savingLabel(value));cell(row,value.measurement_coverage || 'unknown');cell(row,savingStatus(value));
     },'No completed paired A/B episode yet.');
   }
   function renderPersistentIdentity(data) {

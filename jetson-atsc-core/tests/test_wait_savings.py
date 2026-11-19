@@ -72,3 +72,41 @@ def test_schedule_policy_requires_explicit_controller_assumption():
         SchedulePolicy(enabled=True)
     with pytest.raises(ValueError):
         SchedulePolicy(enabled=True, unchanged_clearance=True, a_movement_id='same', b_movement_id='same')
+
+
+from src.experiment.wait_savings import collection_eligibility
+
+
+def tracked_row(*spans, crossing_at=None):
+    intervals = []
+    for start, end in spans:
+        t = start
+        while t < end-1e-9:
+            intervals.append({'start': t, 'end': min(end, t+.1), 'tracked': True})
+            t += .1
+    for (_, a), (b, _) in zip(spans, spans[1:]):
+        intervals.append({'start': a, 'end': b, 'tracked': False})
+    return {'vehicle_id': 'V', 'intervals': intervals, 'crossed_stop_line': crossing_at is not None,
+            'crossing_at': crossing_at}
+
+
+@pytest.mark.parametrize('spans,crossing_at,collected,reason', [
+    (((-5., 13.),), None, True, None),                 # already queued, tracked through B release
+    (((.8, 13.),), None, True, None),                  # first seen inside the 1 s tolerance
+    (((1.5, 13.),), None, False, 'not_detected_at_cycle_start'),
+    (((-5., -1.),), None, False, 'not_detected_at_cycle_start'),
+    (((-5., 6.), (6.5, 13.)), None, False, 'tracking_broken_before_cycle_end'),
+    (((-5., 11.),), None, False, 'tracking_broken_before_cycle_end'),
+    (((0., 9.),), 9., True, None),                     # journey completed by crossing
+])
+def test_collection_requires_start_detection_and_unbroken_tracking(spans, crossing_at, collected, reason):
+    result = collection_eligibility(tracked_row(*spans, crossing_at=crossing_at), episode(), 1.)
+    assert result['collected'] is collected
+    assert result['collection_reasons'] == ([] if reason is None else [reason])
+
+
+def test_collection_tolerance_is_configurable_and_bounded():
+    late = tracked_row((1.5, 13.))
+    assert collection_eligibility(late, episode(), 2.)['collected']
+    with pytest.raises(ValueError):
+        SchedulePolicy(collection_start_tolerance_sec=-1)

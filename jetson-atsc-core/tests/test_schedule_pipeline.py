@@ -28,7 +28,7 @@ def frame(phase):
     return np.full((16, 16, 3), {'RED': (0, 0, 255), 'GREEN': (0, 255, 0), 'YELLOW': (0, 255, 255)}[phase], np.uint8)
 
 
-def replay(book, store=None, cycles=3):
+def replay(book, store=None, cycles=3, occlude=True):
     calls = []
     def analyze():
         calls.append(1)
@@ -41,7 +41,7 @@ def replay(book, store=None, cycles=3):
         book.observe_system_frame(timestamp)
         book.observe_a(frame(a), timestamp, seq, analyze, {'timestamp': timestamp, 'sequence': seq})
         book.observe_acquisition(frame(b), timestamp, seq, (),
-            identity_evidence=() if 8 < local < 10 else (detection(4 if local < 8 else 228),))
+            identity_evidence=() if occlude and 8 < local < 10 else (detection(4 if local < 8 else 228),))
         if a == 'GREEN' and local == 1:
             book.schedule.await_idle()
         if store is not None and seq % 9 == 0:
@@ -75,6 +75,31 @@ def test_paired_phases_savings_survive_eviction_and_export(tmp_path):
         assert 'potential_saving_sec' in bundle.read('vehicle_savings.csv').decode()
         assert 'schedule_episodes.csv' in bundle.namelist()
     assert len(book.waits.records) <= 1
+
+
+@pytest.mark.parametrize('occlude,collected,reasons', [
+    (False, True, []), (True, False, ['tracking_broken_before_cycle_end'])])
+def test_acquisition_collects_only_vehicles_tracked_from_a_green_start_to_b_release(tmp_path, occlude, collected, reasons):
+    oracle = make_engine()
+    replay(oracle, occlude=occlude)
+    book = make_engine()
+    book.enable_retention(1, tmp_path)
+    store = ExperimentStore(tmp_path, 'paired', {})
+    replay(book, store, occlude=occlude)
+    state, token = book.prepare_commit()
+    store.persist(state)
+    book.acknowledge(token)
+    saved = store.read()
+    for rows in (oracle.snapshot(evidence=True)['vehicle_savings'], saved['vehicle_savings']):
+        assert len(rows) == 3
+        for row in rows:
+            assert row['collected'] is collected and row['collection_reasons'] == reasons
+            # Excluded vehicles stay visible with their computed estimate.
+            assert row['available']
+    for episode in saved['schedule_episodes']:
+        assert episode['collection']['candidate_vehicle_count'] == 1
+        assert episode['collection']['collected_vehicle_count'] == int(collected)
+        assert episode['collection']['start_tolerance_sec'] == 1.
 
 
 def test_a_green_without_fresh_b_red_cannot_claim_a_valid_pair():

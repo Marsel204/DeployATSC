@@ -7,7 +7,7 @@ import threading
 import time
 
 from src.common.source_identity import public_data, safe_text
-from src.experiment.wait_savings import vehicle_savings
+from src.experiment.wait_savings import COLLECTION_POLICY, collection_eligibility, vehicle_savings
 
 
 class ScheduleEpisodes:
@@ -96,7 +96,7 @@ class ScheduleEpisodes:
                 'completed_at': None, 'b_episode_id': None, 'b_cycle_id': None, 'b_red_start': None,
                 'b_start_complete': False, 'b_release': None, 'recommended_green_sec': None,
                 'unchanged_clearance': self.policy.unchanged_clearance, 'generation': self.generation,
-                'status': 'predicting', 'sealed': False, 'reasons': [], 'camera_analysis': {'inference_calls': 0,'state':'pending'},
+                'status': 'predicting', 'sealed': False, 'reasons': [], 'collection': None, 'camera_analysis': {'inference_calls': 0,'state':'pending'},
                 'qualification': {'state': 'diagnostic', 'reasons': ['single_frame_spatial_proxy', 'schedule_assumptions']}}
             self._bind(record)
             self.records[identity] = record
@@ -176,10 +176,25 @@ class ScheduleEpisodes:
                 probe=vehicle_savings({'vehicle_id':'episode-validation'},record)
                 if not probe['available']:
                     record['reasons']=list(dict.fromkeys(record['reasons']+probe['reasons']))
+                tolerance = self.policy.collection_start_tolerance_sec
+                candidates = collected = 0
+                observed, saving = [], []
                 for row in rows:
                     if cycle in row.get('cycles', []):
                         value = vehicle_savings(row, record)
+                        value.update(collection_eligibility(row, record, tolerance))
                         self.savings[value['savings_id']] = value
+                        candidates += 1
+                        if value['collected']:
+                            collected += 1
+                            if value['available']:
+                                observed.append(value['observed_red_stop_sec'])
+                                saving.append(value['potential_saving_sec'])
+                record['collection'] = {'policy': COLLECTION_POLICY, 'start_tolerance_sec': tolerance,
+                    'candidate_vehicle_count': candidates, 'collected_vehicle_count': collected,
+                    'excluded_vehicle_count': candidates-collected,
+                    'collected_mean_observed_red_stop_sec': round(sum(observed)/len(observed), 6) if observed else None,
+                    'collected_mean_potential_saving_sec': round(sum(saving)/len(saving), 6) if saving else None}
                 record.update(sealed=True, status='unavailable' if record['reasons'] else 'complete')
                 if record['camera_analysis']['state'] in ('pending','analysing'):
                     record['camera_analysis']['state']='discarded_after_unavailable'
