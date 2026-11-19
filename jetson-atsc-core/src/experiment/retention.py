@@ -188,11 +188,20 @@ class Retention:
         if kind=='vehicles':
             base,_,ordinal=row['vehicle_id'].partition(':segment-')
             segments=int(ordinal)+1 if ordinal else 1
-            self.index.put(b'v'+base.encode(),segments*2+bool(row['crossed_stop_line']),keep=lambda old,new:old>>1>new>>1)
-            # Native IDs that continued this physical vehicle stay bound to it after eviction.
+            # Each raw ID keeps its own history: rows it started, and whether the
+            # last row it drove crossed. A continued row (native_ids) was driven
+            # last by its final native ID; earlier ones handed it off uncrossed
+            # and aliases started no rows. Max segments wins, so archive order
+            # and index rebuilds give the same lookups.
+            natives=row.get('native_ids') or []
+            driver=natives[-1] if natives else None
+            handed=driver is not None and (driver['epoch'],driver['local_id'])!=(row['tracker_epoch'],row['local_id'])
+            keep=lambda old,new:old>>1>new>>1
+            self.index.put(b'v'+base.encode(),segments*2+(bool(row['crossed_stop_line']) and not handed),keep=keep)
             prefix=base.rsplit(':',2)[0]
-            for native in row.get('native_ids',[])[1:]:
-                self.index.put(f"v{prefix}:{native['epoch']}:{native['local_id']}".encode(),2+bool(row['crossed_stop_line']),keep=lambda old,new:old>>1>new>>1)
+            for native in natives[1:]:
+                self.index.put(f"v{prefix}:{native['epoch']}:{native['local_id']}".encode(),
+                               int(bool(row['crossed_stop_line']) and native is driver),keep=keep)
         elif kind=='predictions':
             self.index.put(b'p'+row['request_id'].encode('utf-8','surrogatepass'),1)
 
@@ -252,6 +261,7 @@ class Retention:
                 for cycle in change['cycles']:
                     row['wait_by_cycle'].pop(cycle,None)
                     if int(cycle) in row['cycles']:row['cycles'].remove(int(cycle))
+        engine.waits.release()
         for identity,active in list(engine.waits.active.items()):
             if active['row']['vehicle_id'] not in engine.waits.records:
                 if engine.waits.last_time-active.get('_last_seen',active['row']['last_seen'])>engine.waits.policy.association_gap_sec:

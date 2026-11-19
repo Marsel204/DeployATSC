@@ -8,25 +8,40 @@ from src.common.json_data import clone as deepcopy
 from src.experiment.contracts import RunPolicy, vehicle_key
 
 
-# Image-motion evidence (pixels, scaled by the vehicle's own box height).
-HISTORY_SAMPLES = 8          # recent observations, gaps <= max_gap_sec only
+# Opt-in native fragment continuation (RunPolicy.fragment_continuation).
+# Image-motion evidence is in pixels scaled by the vehicle's own box height.
+HISTORY_SAMPLES = 8          # recent observations of one raw ID, gaps <= max_gap_sec
 MIN_FIT_SAMPLES = 3
 MIN_FIT_SPAN_SEC = .1
-MIN_APPROACH_HEIGHTS_PER_SEC = .5   # speed toward the line, in box heights/s
 MIN_MOVING_HEIGHTS_PER_SEC = .5     # image speed that counts as motion evidence
-OCCUPIED_HEIGHTS = .35       # another box this close to the projection hides ours
 CONTINUATION_BASE_HEIGHTS = .35
 CONTINUATION_HEIGHTS_PER_SEC = .3
 MAX_HEIGHT_RATIO = 1.5
-# Without moving-motion evidence (no fit, or a stationary fit) a newborn nearby
-# is as likely a neighbour as the same vehicle, so only a flicker-length gap may
-# be bridged (frame review: a stationary motorcycle hidden by a pedestrian for
-# 0.4 s was otherwise linked to the neighbouring motorcycle).
+# Without moving-motion evidence a newborn nearby is as likely a neighbour as
+# the same vehicle, so only a flicker-length gap may be bridged.
 STATIC_CONTINUATION_MAX_GAP_SEC = MIN_FIT_SPAN_SEC
+# Another observed box (any class, size or ID state) covering this much of the
+# smaller of it and the newborn, with footpoints this close (in smaller-box
+# heights), may be the same body or its neighbour: the link is ambiguous.
+COMPETITOR_OVERLAP = .5
+COMPETITOR_FOOTPOINT_HEIGHTS = .5
+# Bounded work and memory: one row is continued at most this many times, and a
+# frame with more newborn x lost pairs than this skips continuation entirely.
+MAX_LINKS_PER_ROW = 8
+MAX_PAIR_CHECKS = 4096
+
+
+def _height(observation):
+    height = observation.height
+    if height is None and observation.bbox is not None:
+        height = observation.bbox[3]-observation.bbox[1]
+    try:height = float(height)
+    except (TypeError, ValueError):return None
+    return height if math.isfinite(height) and height > 0 else None
 
 
 def _fit(history):
-    """Least-squares image velocity and approach rate over timed samples."""
+    """Least-squares image velocity over timed (t, x, y, height) samples."""
     if len(history) < MIN_FIT_SAMPLES or history[-1][0]-history[0][0] < MIN_FIT_SPAN_SEC-1e-9:
         return None
     times = [h[0] for h in history]
@@ -38,21 +53,27 @@ def _fit(history):
         values = [h[index] for h in history]
         centre = sum(values)/len(values)
         return sum((t-mean)*(v-centre) for t, v in zip(times, values))/denominator
-    return {'vx': slope(2), 'vy': slope(3), 'rate': slope(4)}
+    return slope(1), slope(2)
+
+
+def _overlap_of_smaller(a, b):
+    width = min(a[2], b[2])-max(a[0], b[0]); height = min(a[3], b[3])-max(a[1], b[1])
+    if width <= 0 or height <= 0:return 0.
+    smaller = min((a[2]-a[0])*(a[3]-a[1]), (b[2]-b[0])*(b[3]-b[1]))
+    return width*height/smaller if smaller > 0 else 0.
 
 
 class VehicleWaits:
     """Integrate observed intervals. Missing observations are never imputed.
 
-    Physical-vehicle persistence (both bounded and evidenced on the row):
-    * native fragment continuation: a newborn native ID continues a vehicle
-      lost <= max_gap_sec earlier only when each is the other's sole match;
-    * departure inference: a moving vehicle vanishing just before the stop
-      line is closed as a crossing marked ``dead_reckoned``; the hidden span
-      is unknown coverage, never wait.
+    Opt-in native fragment continuation (``RunPolicy.fragment_continuation``):
+    a never-seen native ID continues a vehicle row lost <= max_gap_sec earlier
+    only when the pair is mutually unique on position alone, the class and box
+    size agree, and no other observed box competes. The interval across the
+    handoff is unknown coverage (no wait, no crossing, no motion history), and
+    every raw ID keeps its own segment and crossing history.
     """
     fragment_continuation = True
-
     def __init__(self, run_id, policy: RunPolicy, side):
         self.run_id = run_id
         self.policy = policy
@@ -64,8 +85,12 @@ class VehicleWaits:
         self.last_time = None
         # Derived lookup of identities whose rows were archived and evicted.
         self.archived = None
-        # Native identity -> the continued row it handed its vehicle to.
-        self.continued_from = {}
+        # Raw IDs that handed their row to a continuation: {identity: {"row_id", "segments"}}.
+        # Pruned once the row is evicted; the archive index answers after that.
+        self.handed_off = {}
+        # Stable raw IDs recently seen outside the region (never "newborn").
+        self.outside_seen = {}
+        self.continuation_skipped_frames = 0
 
     def _flag(self, row, flag):
         if flag not in row["quality_flags"]: row["quality_flags"].append(flag)
@@ -99,11 +124,6 @@ class VehicleWaits:
         base = vehicle_key(self.run_id, *identity)
         # The identity's own row count, as in the full-history oracle.
         key = base if segment == 0 else f"{base}:segment-{segment}"
-        reused = False
-        while key in self.records:
-            # This native ID's row now belongs to a continued physical vehicle.
-            segment += 1; reused = True
-            key = f"{base}:segment-{segment}"
         row = {"vehicle_id": key, "local_id": observation.local_id,
             "camera": "acquisition", "tracker_epoch": observation.epoch,
             "class_name": observation.class_name, "first_seen": timestamp,
@@ -116,18 +136,9 @@ class VehicleWaits:
             "crossing_cycle": None, "crossing_at":None,"crossing_phase":None,
             "crossing_direction":None,"crossing_evidence":None,
             "completed_at": None, "tracking_state": "UNKNOWN"}
-        if reused:
-            row["quality_flags"].append("native_id_reused")
-            continued = self.continued_from.get(identity)
-            if continued is not None and continued.get("vehicle_id") in self.records:
-                # The handed-over ID is back as a separate vehicle: the link is contradicted.
-                self._flag(continued, "identity_link_contested")
-                for link in continued.get("identity_links", []):
-                    if (link["from"]["epoch"], link["from"]["local_id"]) == identity:link.setdefault("contested_at", timestamp)
         self.records[key] = row
         state = {"row": row, "previous": None, "stopped": False,
-                 "stop_candidate": None, "move_candidate": None, "segments": segment+1,
-                 "history": deque(maxlen=HISTORY_SAMPLES), "projection": None}
+                 "stop_candidate": None, "move_candidate": None, "segments": segment+1}
         self.active[identity] = state
         return state
 
@@ -137,7 +148,9 @@ class VehicleWaits:
         found = self.archived(base)
         if found is None:return None
         segments, crossed = found
-        row = {"vehicle_id": base if segments == 1 else f"{base}:segment-{segments-1}",
+        # segments == 0: the raw ID only ever continued another row (an alias).
+        row = {"vehicle_id": base if segments == 1 else f"{base}:segment-{segments-1}" if segments else f"{base}:alias",
+               "tracker_epoch": identity[0], "local_id": identity[1],
                "completed": True, "crossed_stop_line": crossed, "last_seen": timestamp}
         state = {"row": row, "previous": None, "stopped": False, "stop_candidate": None,
                  "move_candidate": None, "segments": segments, "_last_seen": timestamp}
@@ -150,7 +163,7 @@ class VehicleWaits:
         if not row["completed"]:self.work+=1
         row.update(crossed_stop_line=True,crossing_cycle=attributed,
                    crossing_at=timestamp,crossing_phase=crossing_phase,crossing_direction=1,
-                   crossing_evidence={"method":"observed","from_point":previous["point"],"to_point":observation.point,
+                   crossing_evidence={"from_point":previous["point"],"to_point":observation.point,
                                       "from_time":previous["time"],"to_time":timestamp,
                                       "from_side":self.side(previous["point"]),"to_side":self.side(observation.point)},
                    completed=True,completed_at=timestamp,right_censored=False,tracking_state="SERVED")
@@ -159,14 +172,10 @@ class VehicleWaits:
     def observe(self, observations, phase, timestamp, sequence, cycle_id):
         if sequence == self.last_sequence or (self.last_time is not None and timestamp <= self.last_time): return
         if self.first_sequence is None: self.first_sequence = sequence
-        frame_gap = self.last_time is not None and timestamp-self.last_time > self.policy.max_gap_sec+1e-9
         self.last_sequence = sequence; self.last_time = timestamp
         if phase == "UNKNOWN":cycle_id = None
-        if frame_gap:
-            # Absence during a camera/packet gap is not evidence of departure.
-            for state in self.active.values():
-                state["projection"] = None; state["unobserved_gap"] = True
-        if self.fragment_continuation and self.policy.fragment_continuation:
+        continuing = self.fragment_continuation and self.policy.fragment_continuation
+        if continuing:
             self._continue_fragments(observations, timestamp)
         present = set()
         for observation in observations:
@@ -174,36 +183,40 @@ class VehicleWaits:
             identity = (observation.epoch, observation.local_id)
             present.add(identity)
             state = self.active.get(identity)
-            if state is None and observation.in_region and self.archived is not None:
+            segment = 0; seen_before = False
+            if state is None and identity in self.handed_off:
+                handed = self.handed_off[identity]
+                self._contest(handed["row_id"], identity, timestamp)
+                if not observation.in_region:continue
+                # The raw ID is back as its own vehicle: its own next segment.
+                del self.handed_off[identity]
+                segment = handed["segments"]; seen_before = True
+            elif state is None and observation.in_region and self.archived is not None:
                 state = self._restore(identity, timestamp)
-            segment = 0
             if state and state["row"]["completed"]:
                 if state["row"]["crossed_stop_line"]:
                     state["_last_seen"]=timestamp
-                    row = state["row"]; evidence = row.get("crossing_evidence") or {}
-                    if (evidence.get("method") == "dead_reckoned" and observation.in_region and
-                            self.side(observation.point) < 0 and "contradicted_at" not in evidence):
-                        # Seen again before the line under the same ID: the inferred
-                        # event is contradicted. Kept (it may be archived) but flagged.
-                        evidence["contradicted_at"] = timestamp
-                        self._flag(row, "departure_inference_contradicted")
                     continue
-                segment = state["segments"]
+                segment = self._own_segments(identity, state); seen_before = True
                 state = None
             if not observation.in_region:
+                if state is None and continuing:self.outside_seen[identity] = timestamp
                 if state and not state["row"]["completed"]:
                     row=state["row"];previous=state["previous"]
-                    crossing=bool(previous and previous["sequence"]==sequence-1 and
+                    crossing=bool(previous and not previous.get("handoff") and previous["sequence"]==sequence-1 and
                         0<timestamp-previous["time"]<=self.policy.max_gap_sec and
                         self.side(previous["point"])<0<=self.side(observation.point))
                     if crossing:self._cross(row,previous,observation,phase,timestamp,cycle_id)
                     else:
                         row.update(completed=True,completed_at=timestamp,tracking_state="EXITED",right_censored=False);self.work+=1
                 continue
-            if state is None: state = self._new(observation, timestamp, sequence, segment)
+            if state is None:
+                state = self._new(observation, timestamp, sequence, segment)
+                if seen_before:state["row"]["left_censored"] = True
             row = state["row"]; previous = state["previous"]
             valid_motion = observation.velocity_valid and observation.speed_mps is not None
-            continuous = previous is not None and previous["sequence"] == sequence-1 and 0 < timestamp-previous["time"] <= self.policy.max_gap_sec
+            # A heuristic ID handoff is never continuous, even on adjacent frames.
+            continuous = previous is not None and not previous.get("handoff") and previous["sequence"] == sequence-1 and 0 < timestamp-previous["time"] <= self.policy.max_gap_sec
             if previous is not None:
                 interval = {"start": previous["time"], "end": timestamp,
                             "phase": previous["phase"] if continuous else "UNKNOWN",
@@ -242,15 +255,14 @@ class VehicleWaits:
             if phase == "UNKNOWN": self._flag(row, "phase_unknown")
             if cycle_id is not None and cycle_id not in row["cycles"]: row["cycles"].append(cycle_id)
             row["last_seen"] = timestamp
-            history = state.setdefault("history", deque(maxlen=HISTORY_SAMPLES))
-            # Samples stay comparable across short native flicker (<= max_gap_sec);
-            # a longer or unknown gap starts a new motion history.
-            recent = previous is not None and 0 < timestamp-previous["time"] <= self.policy.max_gap_sec+1e-9
-            if not recent or not observation.height or observation.height <= 0: history.clear()
-            if observation.height and observation.height > 0:
-                history.append((timestamp, sequence, float(observation.point[0]), float(observation.point[1]),
-                                float(self.side(observation.point)), float(observation.height)))
-            state["projection"] = None; state["unobserved_gap"] = False
+            if continuing:
+                history = state.setdefault("history", deque(maxlen=HISTORY_SAMPLES))
+                recent = (previous is not None and not previous.get("handoff") and
+                          0 < timestamp-previous["time"] <= self.policy.max_gap_sec+1e-9)
+                height = _height(observation)
+                if not recent or height is None:history.clear()
+                if height is not None:
+                    history.append((timestamp, float(observation.point[0]), float(observation.point[1]), height))
             state["previous"] = {"time": timestamp, "sequence": sequence,
                 "phase": str(phase), "cycle": cycle_id, "valid_motion": valid_motion,
                 "point": observation.point}
@@ -261,13 +273,35 @@ class VehicleWaits:
                 continue
             if identity not in present and not row["completed"]:
                 row["tracking_state"] = "LOST"
-                if self._infer_departure(identity, state, observations, timestamp):continue
                 if timestamp-row["last_seen"] > self.policy.association_gap_sec:
                     row.update(completed=True, completed_at=timestamp);self.work+=1
                     self._flag(row, "tracking_lost")
+        if self.outside_seen:
+            self.outside_seen = {k: t for k, t in self.outside_seen.items()
+                                 if timestamp-t <= self.policy.association_gap_sec}
+
+    def _own_segments(self, identity, state):
+        """Rows this raw ID itself started; an alias of another row started none."""
+        row = state["row"]
+        return state["segments"] if identity == (row.get("tracker_epoch"), row.get("local_id")) else 0
+
+    def _contest(self, row_id, identity, timestamp):
+        """A handed-off raw ID is seen again: the live link is contradicted.
+
+        Only an unfinished row is flagged; a finished row may already be archived."""
+        row = self.records.get(row_id)
+        if row is None or row["completed"]:return
+        self._flag(row, "identity_link_contested")
+        for link in row.get("identity_links", []):
+            if (link["from"]["epoch"], link["from"]["local_id"]) == identity:link.setdefault("contested_at", timestamp)
+
+    def release(self):
+        """Drop handoff references to evicted rows (the archive index answers for them)."""
+        if self.handed_off:
+            self.handed_off = {k: v for k, v in self.handed_off.items() if v["row_id"] in self.records}
 
     def physical(self, identity):
-        """The physical vehicle row a raw (epoch, native ID) currently drives."""
+        """The vehicle row a raw (epoch, native ID) currently drives, if any."""
         state = self.active.get(identity)
         if state is None or state["row"].get("vehicle_id") not in self.records:return None
         row = state["row"]
@@ -275,114 +309,93 @@ class VehicleWaits:
                 "tracker_epoch": row["tracker_epoch"], "native": {"epoch": identity[0], "local_id": identity[1]},
                 "continued": bool(row.get("identity_links"))}
 
+    def _fresh(self, identity):
+        if identity in self.active or identity in self.handed_off or identity in self.outside_seen:return False
+        return self.archived is None or self.archived(vehicle_key(self.run_id, *identity)) is None
+
     def _continue_fragments(self, observations, timestamp):
-        """Link a newborn native ID to a just-lost vehicle when the pair is mutually unique."""
-        stable = [o for o in observations if o.local_id is not None and o.stable_id]
-        present = {(o.epoch, o.local_id) for o in stable}
+        """Link a never-seen native ID to a just-lost row when nothing else competes.
+
+        Work is O(newborns x lost) gate arithmetic (motion fitted once per lost
+        row) plus O(observations) per surviving pair, and capped per frame."""
         newborns = []
-        for o in stable:
+        for o in observations:
+            if o.local_id is None or not o.stable_id or not o.in_region:continue
             identity = (o.epoch, o.local_id)
-            if identity in self.active or not o.in_region or not o.height or o.height <= 0:continue
-            if self.archived is not None and self.archived(vehicle_key(self.run_id, *identity)) is not None:continue
-            newborns.append(o)
+            height = _height(o)
+            if height is not None and self._fresh(identity):newborns.append((identity, o, height))
         if not newborns:return
-        candidates = []
+        present = {(o.epoch, o.local_id) for o in observations if o.local_id is not None and o.stable_id}
+        lost = []
         for identity, state in self.active.items():
             row, previous, history = state["row"], state["previous"], state.get("history")
             if identity in present or row["completed"] or previous is None or not history:continue
-            if "red_wait_sec" not in row or row["vehicle_id"] not in self.records:continue
+            if row["vehicle_id"] not in self.records or len(row.get("identity_links", ())) >= MAX_LINKS_PER_ROW:continue
             dt = timestamp-previous["time"]
             if not 0 < dt <= self.policy.max_gap_sec+1e-9:continue
-            candidates.append((identity, state, dt))
-        if not candidates:return
-        matches = {}
-        for o in newborns:
-            for identity, state, dt in candidates:
-                row = state["row"]; last = state["history"][-1]
-                if identity[0] != o.epoch or row["class_name"] != o.class_name:continue
-                height = last[5]
-                if max(height, o.height)/min(height, o.height) > MAX_HEIGHT_RATIO:continue
-                motion = _fit(state["history"])
-                fitted = motion is not None and math.hypot(motion["vx"], motion["vy"]) >= MIN_MOVING_HEIGHTS_PER_SEC*height
-                if not fitted:
-                    if dt > STATIC_CONTINUATION_MAX_GAP_SEC+1e-9:continue
-                    motion = {"vx": 0., "vy": 0.}
-                    gate = CONTINUATION_BASE_HEIGHTS
-                else:
-                    gate = CONTINUATION_BASE_HEIGHTS+CONTINUATION_HEIGHTS_PER_SEC*dt
-                predicted = (last[2]+motion["vx"]*dt, last[3]+motion["vy"]*dt)
-                error = math.dist(predicted, o.point)/height
+            last_time, x, y, height = history[-1]
+            if last_time != previous["time"]:continue
+            motion = _fit(history)
+            fitted = motion is not None and math.hypot(*motion) >= MIN_MOVING_HEIGHTS_PER_SEC*height
+            if fitted:
+                gate = CONTINUATION_BASE_HEIGHTS+CONTINUATION_HEIGHTS_PER_SEC*dt
+            elif dt <= STATIC_CONTINUATION_MAX_GAP_SEC+1e-9:
+                motion = (0., 0.); gate = CONTINUATION_BASE_HEIGHTS
+            else:continue
+            lost.append((identity, state, dt, (x+motion[0]*dt, y+motion[1]*dt), height, gate, fitted))
+        if not lost:return
+        if len(newborns)*len(lost) > MAX_PAIR_CHECKS:
+            self.continuation_skipped_frames += 1
+            return
+        # Degrees on position alone: class and size do not make a nearby box less of a competitor.
+        new_degree = [0]*len(newborns); lost_degree = [0]*len(lost); edge = {}
+        for i, (new, o, _) in enumerate(newborns):
+            px, py = o.point
+            for j, (old, _, _, predicted, height, gate, _) in enumerate(lost):
+                if old[0] != new[0]:continue
+                error = math.hypot(predicted[0]-px, predicted[1]-py)/height
                 if error <= gate:
-                    matches[(o.epoch, o.local_id), identity] = (o, state, dt, error, gate, predicted, fitted)
-        for (new, old), (o, state, dt, error, gate, predicted, fitted) in matches.items():
-            if sum(1 for n, _ in matches if n == new) != 1 or sum(1 for _, c in matches if c == old) != 1:continue
-            row = state["row"]
-            del self.active[old]
-            self.active[new] = state
-            state["projection"] = None
-            native = {"epoch": new[0], "local_id": new[1]}
-            # Added on the first link only, so rows of unchanged runs keep their schema.
-            row.setdefault("native_ids", [{"epoch": row["tracker_epoch"], "local_id": row["local_id"]}])
-            if native not in row["native_ids"]:row["native_ids"].append(native)
-            row.setdefault("identity_links", []).append({"from": {"epoch": old[0], "local_id": old[1]}, "to": native,
-                "lost_at": state["previous"]["time"], "linked_at": timestamp, "gap_sec": dt,
-                "predicted_point": list(predicted), "observed_point": list(o.point),
-                "error_heights": error, "gate_heights": gate, "moving_fit": fitted,
-                "rule": "mutually_unique_motion_gate"})
-            self._flag(row, "identity_continued")
-            self.continued_from[old] = row
-            if len(self.continued_from) > 4*max(64, len(self.records)):
-                self.continued_from = {k: r for k, r in self.continued_from.items() if r.get("vehicle_id") in self.records}
+                    new_degree[i] += 1; lost_degree[j] += 1; edge[i] = (j, error)
+        for i, (j, error) in edge.items():
+            if new_degree[i] != 1 or lost_degree[j] != 1:continue
+            new, o, new_height = newborns[i]
+            old, state, dt, predicted, height, gate, fitted = lost[j]
+            if state["row"]["class_name"] != o.class_name:continue
+            if max(height, new_height)/min(height, new_height) > MAX_HEIGHT_RATIO:continue
+            if self._competed(o, new_height, predicted, height, gate, observations):continue
+            self._link(old, new, state, o, timestamp, dt, error, gate, predicted, fitted)
 
-    def _infer_departure(self, identity, state, observations, timestamp):
-        """Close a vanished, approaching vehicle as a dead-reckoned stop-line crossing."""
+    @staticmethod
+    def _competed(newborn, new_height, predicted, height, gate, observations):
+        for other in observations:
+            if other is newborn:continue
+            if math.dist(predicted, other.point)/height <= gate:return True
+            other_height = _height(other)
+            if newborn.bbox is None or other.bbox is None or other_height is None:continue
+            if (_overlap_of_smaller(newborn.bbox, other.bbox) >= COMPETITOR_OVERLAP and
+                    math.dist(newborn.point, other.point)/min(new_height, other_height) <= COMPETITOR_FOOTPOINT_HEIGHTS):
+                return True
+        return False
+
+    def _link(self, old, new, state, observation, timestamp, dt, error, gate, predicted, fitted):
         row = state["row"]
-        if (not self.policy.departure_inference or "red_wait_sec" not in row or state.get("previous") is None
-                or state.get("unobserved_gap")):
-            return False
-        projection = state.get("projection")
-        if projection is None:
-            history = state.get("history")
-            motion = _fit(history) if history and history[-1][0] == state["previous"]["time"] else None
-            if motion is None or state["stopped"]:return False
-            time, _, x, y, side, height = history[-1]
-            if side >= 0 or motion["rate"] < MIN_APPROACH_HEIGHTS_PER_SEC*height:return False
-            delay = -side/motion["rate"]
-            if delay > self.policy.max_gap_sec+1e-9:return False
-            projection = state["projection"] = {"last_time": time, "last_point": [x, y], "last_side": side,
-                "height": height, "vx": motion["vx"], "vy": motion["vy"], "rate": motion["rate"],
-                "samples": len(history), "crossing_at": time+delay, "blocked": False}
-        if projection["blocked"]:return False
-        elapsed = timestamp-projection["last_time"]
-        predicted = (projection["last_point"][0]+projection["vx"]*elapsed,
-                     projection["last_point"][1]+projection["vy"]*elapsed)
-        for o in observations:
-            if o.local_id is not None and (o.epoch, o.local_id) == identity:continue
-            if math.dist(predicted, o.point) <= OCCUPIED_HEIGHTS*projection["height"]:
-                projection["blocked"] = True
-                self._flag(row, "departure_inference_blocked")
-                return False
-        due = timestamp >= projection["crossing_at"]+self.policy.max_gap_sec-1e-9
-        lost = timestamp-row["last_seen"] > self.policy.association_gap_sec and timestamp >= projection["crossing_at"]
-        if not (due or lost):return False
-        crossing = projection["crossing_at"]
-        if crossing > row["last_seen"]:
-            interval = {"start": row["last_seen"], "end": crossing, "phase": "UNKNOWN", "cycle_id": None,
-                        "valid": False, "stopped": False}
-            row["intervals"].append(interval); self.work += 1; self._account(row, interval)
-        previous = state["previous"]
-        row.update(crossed_stop_line=True, crossing_cycle=None, crossing_at=crossing, crossing_phase="UNKNOWN",
-                   crossing_direction=1, completed=True, completed_at=crossing, right_censored=False,
-                   tracking_state="SERVED", crossing_evidence={"method": "dead_reckoned",
-                   "last_point": projection["last_point"], "last_time": projection["last_time"],
-                   "last_side": projection["last_side"], "approach_px_per_sec": projection["rate"],
-                   "image_velocity_px_per_sec": [projection["vx"], projection["vy"]],
-                   "box_height_px": projection["height"], "samples": projection["samples"],
-                   "predicted_crossing_at": crossing, "decided_at": timestamp,
-                   "last_observed_phase": previous["phase"], "last_observed_cycle": previous["cycle"]})
-        self.work += 1
-        self._flag(row, "departure_inferred"); self._flag(row, "crossing_phase_unknown")
-        return True
+        own = (row["tracker_epoch"], row["local_id"])
+        del self.active[old]
+        self.handed_off[old] = {"row_id": row["vehicle_id"], "segments": state["segments"] if old == own else 0}
+        self.active[new] = state
+        # The handoff is a heuristic: nothing (wait, crossing, motion) is carried across it.
+        state["previous"] = dict(state["previous"], handoff=True)
+        state["history"].clear()
+        state["stopped"] = False; state["stop_candidate"] = state["move_candidate"] = None
+        native = {"epoch": new[0], "local_id": new[1]}
+        # Added on the first link only, so rows of unchanged runs keep their schema.
+        row.setdefault("native_ids", [{"epoch": own[0], "local_id": own[1]}]).append(native)
+        row.setdefault("identity_links", []).append({"from": {"epoch": old[0], "local_id": old[1]}, "to": native,
+            "lost_at": state["previous"]["time"], "linked_at": timestamp, "gap_sec": dt,
+            "predicted_point": list(predicted), "observed_point": list(observation.point),
+            "error_heights": error, "gate_heights": gate, "moving_fit": fitted,
+            "rule": "mutually_unique_uncontested_motion_gate"})
+        self._flag(row, "identity_continued")
 
     def invalidate(self, timestamp, reason):
         for state in self.active.values():
@@ -391,8 +404,7 @@ class VehicleWaits:
                 self._flag(row, reason)
                 state["previous"] = None
                 state["stop_candidate"] = state["move_candidate"] = None
-                if "history" in state: state["history"].clear()
-                state["projection"] = None
+                if "history" in state:state["history"].clear()
                 row["tracking_state"] = "UNKNOWN"
 
     def close(self, timestamp, reason="recording_end"):

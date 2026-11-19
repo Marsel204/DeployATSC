@@ -61,11 +61,11 @@ def source_identity(value):
     return str(Path(value).resolve()) if "://" not in value else value
 
 
-def _box_height(track):
-    box=getattr(track,"bbox",None)
-    try:height=float(box[3])-float(box[1])
+def _box(track):
+    """The raw image box as finite floats, or None (continuation evidence only)."""
+    try:box=tuple(float(value) for value in getattr(track,"bbox",None)[:4])
     except (TypeError,IndexError,ValueError):return None
-    return height if math.isfinite(height) and height>0 else None
+    return box if len(box)==4 and all(map(math.isfinite,box)) and box[3]>box[1] and box[2]>box[0] else None
 
 
 class ObservationConflict(RuntimeConflict):
@@ -281,7 +281,7 @@ class ObservationSession:
                     v.bottom_center,stable_id=getattr(v,"stable_id",False),
                     velocity_valid=getattr(v,"velocity_valid",False),
                     in_region=calibration.homography.is_in_approach_corridor(*v.bottom_center),
-                    epoch=getattr(v,"epoch",detector.epoch),height=_box_height(v)) for v in tracks]
+                    epoch=getattr(v,"epoch",detector.epoch),bbox=_box(v)) for v in tracks]
                 if identity_evidence is not None:
                     resolution=self.engine.observe_acquisition(frame,packet.timestamp,packet.sequence,(),generation=generation,
                         identity_evidence=identity_evidence.detections,camera_stable=identity_evidence.camera_stable,
