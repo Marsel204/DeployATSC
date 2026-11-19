@@ -84,6 +84,9 @@ class TrackedVehicle:
         self.stable_id = stable_id
         self.epoch = epoch
         self.velocity_valid = False
+        # The post-NMS detection the tracker matched to this output (raw, not
+        # Kalman-smoothed), when withheld-evidence capture attributed it; else None.
+        self.source_bbox: Optional[Tuple[float, float, float, float]] = None
 
         # Contact point: center of bottom edge
         self.bottom_center = (
@@ -111,6 +114,10 @@ class TrackedFrame(list):
     smoothing would make a guess). ``None`` means that evidence is unavailable
     (predict fallback, injected model, incomplete capture): callers must then
     not infer anything that needs it. Evidence only; never a vehicle.
+
+    Whenever ``withheld`` is not None, every vehicle of the frame also carries
+    ``source_bbox``: the raw detection the tracker emitted it from, by the same
+    index. A smoothed emitted box can sit outside a gate its raw detection is in.
     """
     __slots__ = ("withheld", "epoch")
 
@@ -169,6 +176,46 @@ class _TrackerProvenance:
         return recorded
 
 
+_TRACKER_EVENTS = ("on_predict_start", "on_predict_postprocess_end")
+
+
+def _native_tracker_callbacks():
+    try:
+        from ultralytics.trackers import track as installed
+    except Exception:
+        return set()
+    return {getattr(installed, "on_predict_start", None), getattr(installed, "on_predict_postprocess_end", None)} - {None}
+
+
+class _WithoutTrackerCallbacks:
+    """Detach the installed tracker callbacks for one untracked ``predict``.
+
+    Ultralytics 8.3.x runs ``tracker.update`` from ``on_predict_postprocess_end``
+    in predict mode too, so a detection-only fallback after a tracker error
+    would otherwise return tracker IDs (one-shot failure) or raise again
+    (repeated failure). The registrations are restored in place afterwards, so
+    the next ``track`` continues the same trackers."""
+
+    def __init__(self, model) -> None:
+        self.saved = {}
+        callbacks = getattr(model, "callbacks", None)
+        if not isinstance(callbacks, dict):
+            return
+        native = _native_tracker_callbacks()
+        for event in _TRACKER_EVENTS:
+            registered = callbacks.get(event)
+            if isinstance(registered, list):
+                self.saved[event] = (registered, list(registered))
+                registered[:] = [cb for cb in registered if getattr(cb, "func", cb) not in native]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        for registered, original in self.saved.values():
+            registered[:] = original
+
+
 def _drop_tracker_callbacks(model) -> None:
     """Remove the installed Ultralytics tracker callbacks before the predictor is dropped.
 
@@ -179,12 +226,10 @@ def _drop_tracker_callbacks(model) -> None:
     callbacks = getattr(model, "callbacks", None)
     if not isinstance(callbacks, dict):
         return
-    try:
-        from ultralytics.trackers import track as installed
-    except Exception:
+    native = _native_tracker_callbacks()
+    if not native:
         return
-    native = {getattr(installed, "on_predict_start", None), getattr(installed, "on_predict_postprocess_end", None)} - {None}
-    for event in ("on_predict_start", "on_predict_postprocess_end"):
+    for event in _TRACKER_EVENTS:
         registered = callbacks.get(event)
         if isinstance(registered, list):
             registered[:] = [cb for cb in registered if getattr(cb, "func", cb) not in native]
@@ -255,49 +300,58 @@ class DetectorTracker:
         self._provenance = _TrackerProvenance()
         add("on_predict_batch_start", self._provenance)
 
-    def _frame_evidence(self, results, calls) -> List[Optional[tuple]]:
-        """Per-image withheld detections from the recorded tracker updates.
+    def _frame_evidence(self, results, calls) -> List[Tuple[Optional[tuple], Optional[tuple]]]:
+        """Per-image (withheld detections, emitted source boxes) from the recorded updates.
 
         Calls are attributed by image identity, never by position: Ultralytics
         8.3.x skips ``tracker.update`` for an image without detections, so a
         mixed batch has fewer calls than images. An image with no call has
         evidence only if it has no detections at all; an image with several
-        calls (stacked tracker callbacks) or an unattributable call has none."""
+        calls (stacked tracker callbacks) or an unattributable call has none,
+        reported as (None, None). ``sources`` aligns with the result's rows."""
         images = [getattr(result, "orig_img", None) for result in results]
         per_image: List[List[Any]] = [[] for _ in results]
         for image, evidence in calls:
             matches = [j for j, candidate in enumerate(images) if image is not None and candidate is image]
             if len(matches) != 1:
-                return [None]*len(results)
+                return [(None, None)]*len(results)
             per_image[matches[0]].append(evidence)
-        frames: List[Optional[tuple]] = []
+        frames: List[Tuple[Optional[tuple], Optional[tuple]]] = []
         for result, found in zip(results, per_image):
             if len(found) == 1:
-                frames.append(self._withheld(result, found[0]))
+                frames.append(self._evidence(result, found[0]))
             elif not found:
                 boxes = getattr(result, "boxes", None)
-                frames.append(() if boxes is not None and len(boxes) == 0 else None)
+                frames.append(((), ()) if boxes is not None and len(boxes) == 0 else (None, None))
             else:
-                frames.append(None)
+                frames.append((None, None))
         return frames
 
     def _withheld(self, result, call) -> Optional[tuple]:
         """Post-NMS vehicle boxes of this result the tracker did not emit, or None."""
+        return self._evidence(result, call)[0]
+
+    def _evidence(self, result, call) -> Tuple[Optional[tuple], Optional[tuple]]:
+        """(withheld vehicle boxes, raw source box per emitted row), or (None, None)."""
         if call is None:
-            return None
+            return None, None
         xyxy, cls, conf, idx = call
         boxes = getattr(result, "boxes", None)
         emitted_count = 0 if boxes is None else len(boxes)
         if boxes is not None and boxes.id is not None:
             if emitted_count != len(idx) or (len(idx) and (idx.min() < 0 or idx.max() >= len(xyxy))):
-                return None
+                return None, None
             emitted = set(idx.tolist())
+            order = idx.tolist()
         elif emitted_count == 0:
             emitted = set()         # all hidden (e.g. new tracks awaiting confirmation)
+            order = []
         elif emitted_count == len(xyxy) and len(idx) == 0:
-            return ()               # untracked passthrough: every detection is an observation
+            # Untracked passthrough: every detection is an observation, in detection order.
+            return (), tuple(tuple(float(v) for v in xyxy[j]) for j in range(len(xyxy)))
         else:
-            return None
+            return None, None
+        sources = tuple(tuple(float(v) for v in xyxy[j]) for j in order)
         withheld = []
         for j in range(len(xyxy)):
             if j in emitted:
@@ -307,7 +361,7 @@ class DetectorTracker:
             if name is None or not np.isfinite(box).all() or box[2] <= box[0] or box[3] <= box[1]:
                 continue
             withheld.append((box, name, float(conf[j])))
-        return tuple(withheld)
+        return tuple(withheld), sources
 
     def set_tracking_profile(self, name: str) -> None:
         """Select before tracking starts; reset_tracking preserves this choice."""
@@ -412,14 +466,18 @@ class DetectorTracker:
         except Exception as e:
             # Fallback if tracker config fails or tracking fails
             print(f"[Detector Tracker] Warning in track(): {e}. Running predict without tracker...")
-            results = self.model.predict(
-                source=frames,
-                conf=self.conf_threshold,
-                iou=self.iou_threshold,
-                imgsz=self.imgsz,
-                device=getattr(self,"inference_device",self.device),
-                verbose=False,
-            )
+            if provenance is not None:
+                provenance.armed = False
+            # Detection only: 8.3.x would otherwise run the tracker callbacks in predict mode too.
+            with _WithoutTrackerCallbacks(self.model):
+                results = self.model.predict(
+                    source=frames,
+                    conf=self.conf_threshold,
+                    iou=self.iou_threshold,
+                    imgsz=self.imgsz,
+                    device=getattr(self,"inference_device",self.device),
+                    verbose=False,
+                )
         finally:
             if provenance is not None:
                 provenance.armed = False
@@ -430,13 +488,16 @@ class DetectorTracker:
         if tracked and provenance is not None:
             evidence = self._frame_evidence(results, calls)
         else:
-            evidence = [None]*len(results)
+            evidence = [(None, None)]*len(results)
 
         batch_outputs: List[TrackedFrame] = []
 
         for index, res in enumerate(results):
-            frame_vehicles = TrackedFrame(withheld=evidence[index], epoch=self.epoch)
+            withheld, sources = evidence[index]
             boxes = getattr(res, "boxes", None)
+            if sources is None or len(sources) != (0 if boxes is None else len(boxes)):
+                withheld = sources = None   # no attributed source for some emitted box: no evidence
+            frame_vehicles = TrackedFrame(withheld=withheld, epoch=self.epoch)
             if boxes is not None and len(boxes) > 0:
                 xyxy_arr = boxes.xyxy.cpu().numpy()
                 conf_arr = boxes.conf.cpu().numpy()
@@ -467,6 +528,8 @@ class DetectorTracker:
                         stable_id=boxes.id is not None,
                         epoch=self.epoch,
                     )
+                    if sources is not None:
+                        v.source_bbox = sources[i]
                     frame_vehicles.append(v)
 
             batch_outputs.append(frame_vehicles)

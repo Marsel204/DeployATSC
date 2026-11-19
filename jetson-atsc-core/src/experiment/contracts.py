@@ -74,6 +74,9 @@ class VehicleObservation:
     height: float | None = None
     # Raw image box (x1, y1, x2, y2): competing-box checks for continuation.
     bbox: tuple[float, float, float, float] | None = None
+    # The detector's own post-NMS box behind ``bbox`` when ``bbox`` is a tracker
+    # (Kalman-smoothed) state. Continuation lets both veto another vehicle's link.
+    source_bbox: tuple[float, float, float, float] | None = None
 
 
 def vehicle_key(run_id: str, epoch: int, local_id: int) -> str:

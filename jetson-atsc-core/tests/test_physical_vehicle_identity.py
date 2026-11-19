@@ -541,3 +541,90 @@ def test_native_engine_snapshot_exposes_physical_vehicle_and_raw_ids():
     vehicles = e.snapshot(evidence=True)['vehicles']
     assert len(vehicles) == 1
     assert [n['local_id'] for n in vehicles[0]['native_ids']] == [1, 2]
+
+
+# --- review follow-ups: emitted source boxes, return-on-crossing order, stale sightings ---
+
+def lost_and_newborn(competitor):
+    """ID 1 lost at x=50 moving down; ID 2 is born in its gate; ``competitor`` joins the newborn's frame."""
+    frames = fragment(gap=3, width=6.)     # narrow boxes (as in the review): no overlap veto
+    frames[13] = frames[13]+[competitor]
+    return frames
+
+
+def test_tracked_competitor_vetoes_by_its_raw_source_box_too():
+    # The predicted point is (50, 40+80*13/30); the gate is .35+.3*4/30 = .39 heights = 15.6 px.
+    # Competitor ID 3 is tracked already (seen since frame 0, far away): its Kalman box is 16.8 px
+    # from the predicted point (outside the gate), its raw detection 12.0 px (inside).
+    y = 40+80*13/FPS
+    def three(x, source_x=None):
+        observation = car(3, y, x=x, width=6.)
+        if source_x is None:return observation
+        half = observation.bbox[2]-x
+        return VehicleObservation(3, 'car', 2., (x, y), height=40., bbox=observation.bbox,
+                                  source_bbox=(source_x-half, y-40, source_x+half, y))
+    def run(competitor):
+        waits = book()
+        frames = lost_and_newborn(competitor)
+        for i in range(13):frames[i] = frames[i]+[car(3, y, x=300., width=6.)]
+        play(waits, frames)
+        return [(l['from']['local_id'], l['to']['local_id']) for r in waits.records.values() for l in r.get('identity_links', ())]
+    assert run(three(33.2, source_x=38.)) == []
+    # The same smoothed box without its source attribution does not compete: the review's 1 -> 3 case.
+    assert run(three(33.2)) == [(1, 2)]
+    # A competitor whose raw box is also outside the gate does not veto.
+    assert run(three(33.2, source_x=30.)) == [(1, 2)]
+
+
+def test_newborns_own_source_box_never_vetoes_it():
+    waits = book()
+    frames = fragment(gap=3)
+    newborn = frames[13][0]
+    # Its raw detection sits well inside the gate but is its own: not a competitor.
+    frames[13] = [VehicleObservation(2, 'car', 2., newborn.point, height=40., bbox=newborn.bbox,
+                                     source_bbox=(newborn.bbox[0]+3, newborn.bbox[1]+2, newborn.bbox[2]+3, newborn.bbox[3]+2))]
+    play(waits, frames)
+    assert [n['local_id'] for n in only_row(waits)['native_ids']] == [1, 2]
+
+
+@pytest.mark.parametrize('returned_first', [False, True])
+def test_return_on_the_crossing_frame_contests_the_link_in_either_order(returned_first):
+    waits = book()
+    end = play(waits, fragment())
+    end = play(waits, [[car(2, 40+80*i/FPS)] for i in range(end, 23)], end)
+    crossing, back = car(2, 40+80*23/FPS), car(1, 30.)
+    play(waits, [[back, crossing] if returned_first else [crossing, back]], end)
+    row = waits.records['run:acquisition:0:1']
+    # The crossing is still observed on ID 2's own consecutive frames ...
+    assert row['crossed_stop_line'] and row['crossing_at'] == pytest.approx(23/FPS)
+    # ... and the simultaneous return contradicts the live link whatever the observation order.
+    assert 'identity_link_contested' in row['quality_flags']
+    assert row['identity_links'][0]['contested_at'] == pytest.approx(23/FPS)
+    assert 'run:acquisition:0:1:segment-1' in waits.records
+
+
+def test_stale_outside_sighting_expires_before_matching():
+    def run(outside_at):
+        waits = book()
+        waits.observe([car(2, 0., in_region=False)], 'RED', outside_at, 1, 1, unassigned=())
+        for k, t in enumerate((.4, .6, .8)):
+            waits.observe([car(1, 40+80*(t-.4))], 'RED', t, k+2, 1, unassigned=())
+        waits.observe([car(2, 72+80*.24)], 'RED', 1.04, 5, 1, unassigned=())
+        return [n['local_id'] for n in waits.records['run:acquisition:0:1'].get('native_ids', ())]
+    # Seen outside 1.04 s earlier (> association_gap_sec 1.0): a newborn on this very frame.
+    assert run(0.) == [1, 2]
+    # Seen outside within the association timeout: not a newborn.
+    assert run(.1) == []
+
+
+@pytest.mark.parametrize('gap_frames', [1, 2])
+def test_three_nonconsecutive_sightings_within_max_gap_are_enough_history(gap_frames):
+    # The rule counts box sightings, each within max_gap_sec of the previous, not consecutive frames.
+    waits = book()
+    frames = []
+    for i in range(3):
+        frames += [[car(1, 40+80*(i*(gap_frames+1))/FPS)]]+[[]]*gap_frames
+    t0 = len(frames)+1
+    frames += [[]]+[[car(2, 40+80*(t0+i)/FPS)] for i in range(3)]
+    play(waits, frames)
+    assert [n['local_id'] for n in only_row(waits)['native_ids']] == [1, 2]

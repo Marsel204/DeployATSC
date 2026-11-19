@@ -30,7 +30,7 @@ def review_repro(competitor=True):
 
 def observations(frame):
     return [VehicleObservation(v.track_id, v.class_name, None, v.bottom_center, stable_id=v.stable_id,
-                               epoch=v.epoch, bbox=tuple(v.bbox)) for v in frame]
+                               epoch=v.epoch, bbox=tuple(v.bbox), source_bbox=v.source_bbox) for v in frame]
 
 
 def replay(frames, *, enabled=True, evidence=True, waits_type=VehicleWaits):
@@ -107,13 +107,22 @@ def test_own_source_box_is_excluded_by_tracker_index_despite_kalman_jitter():
 
 
 def test_non_vehicle_and_degenerate_withheld_boxes_are_not_evidence():
-    detector = frozen_detector(FrozenTrackModel([[box(50)], [box(50), box(120, cls=1)]]))
+    # Frame 1: the tracked car, a new valid car, a person and a zero-width car (all withheld by ByteTrack).
+    degenerate = [200., 100., 200., 140., .95, 1]
+    detector = frozen_detector(FrozenTrackModel([[box(50)], [box(50), box(120), box(160, cls=4), degenerate]]))
     detector.model.names = {0: 'motorcycle', 1: 'car', 2: 'bus', 3: 'truck', 4: 'person'}
     detector.track([IMAGE], timestamp=0.)
     frame, = detector.track([IMAGE], timestamp=1/FPS)
-    assert [w[1] for w in frame.withheld] == ['car']
-    assert detector._withheld(type('R', (), {'boxes': None})(), (np.array([[0, 0, 1, 1.]]), np.array([4.]),
-                              np.array([.9]), np.zeros(0, int))) == ()
+    assert [v.track_id for v in frame] == [1]
+    # Only the valid vehicle-class box is evidence: the person and the zero-area box are not.
+    assert [(w[0], w[1]) for w in frame.withheld] == [((117., 100., 123., 140.), 'car')]
+    none = type('R', (), {'boxes': None})()
+    calls = [(np.array([[0, 0, 1, 1.]]), np.array([4.])),              # valid person
+             (np.array([[5, 5, 5, 9.]]), np.array([1.])),              # zero-width car
+             (np.array([[5, 9, 8, 5.]]), np.array([1.])),              # inverted car
+             (np.array([[0, 0, np.nan, 4.]]), np.array([1.]))]          # non-finite car
+    for xyxy, cls in calls:
+        assert detector._withheld(none, (xyxy, cls, np.array([.9]), np.zeros(0, int))) == ()
 
 
 def test_callback_order_with_the_real_predictor_and_model(monkeypatch):
@@ -232,9 +241,12 @@ def test_default_off_and_persistent_rows_ignore_evidence(evidence):
     assert rows(True, evidence, PersistentVehicleWaits) == rows(False, (), PersistentVehicleWaits)
 
 
+@pytest.mark.parametrize('competitor', [False, True])
 @pytest.mark.parametrize('enabled', [False, True])
-def test_one_shot_iterators_and_lists_give_identical_rows(enabled):
-    _, tracked, _ = replay(review_repro(competitor=False))
+def test_one_shot_iterators_and_lists_give_identical_rows(enabled, competitor):
+    _, tracked, _ = replay(review_repro(competitor=competitor))
+    # With the competitor, frame 6 carries a nonempty withheld box that must veto through a one-shot iterator.
+    assert bool(tracked[6].withheld) is competitor
     def run(wrap):
         waits = VehicleWaits('run', RunPolicy(fragment_continuation=enabled), lambda point:-1)
         for f, frame in enumerate(tracked):
@@ -242,7 +254,7 @@ def test_one_shot_iterators_and_lists_give_identical_rows(enabled):
         return waits.rows(include_intervals=True)
     as_list = run(list)
     assert as_list == run(iter) == run(lambda items:(x for x in items)) == run(tuple)
-    assert len(as_list) == (1 if enabled else 2)
+    assert len(as_list) == (1 if enabled and not competitor else 2)
 
 
 def test_crowded_frame_with_300_boxes_and_300_withheld_stays_bounded():
@@ -323,21 +335,36 @@ def batched_detector(per_call):
     return model, detector
 
 
-def test_mixed_batch_with_an_empty_image_keeps_per_image_provenance():
-    # Image 0 never has detections (8.3.0 skips its tracker.update); image 1 is Sol's repro.
-    model, detector = batched_detector([[[], frame] for frame in review_repro()])
+@pytest.mark.parametrize('empty_first', [True, False])
+def test_mixed_batch_with_an_empty_image_keeps_per_image_provenance(empty_first):
+    # One image never has detections (8.3.0 skips its tracker.update); the other is Sol's repro.
+    order = (lambda empty, scene:[empty, scene]) if empty_first else (lambda empty, scene:[scene, empty])
+    model, detector = batched_detector([order([], frame) for frame in review_repro()])
     counts = counting_updates(model)
-    scenes = []
-    for f in range(7):
+    withheld = []
+    for f, detections in enumerate(review_repro()):
         counts.append(0)
-        empty, scene = detector.track([IMAGE, IMAGE.copy()], timestamp=f/FPS)
+        empty, scene = order(*detector.track([IMAGE, IMAGE.copy()], timestamp=f/FPS))
         assert empty.withheld == () and list(empty) == []
-        # Every detection of image 1 is either emitted or withheld, never lost or borrowed.
-        assert scene.withheld is not None and len(scene)+len(scene.withheld) == len(review_repro()[f])
-        scenes.append(scene)
+        # Exact provenance: the raw sources of the emitted boxes plus the withheld boxes are
+        # exactly this image's detections, each once (a wrong box of the same count fails).
+        raw = sorted(tuple(float(v) for v in d[:4]) for d in detections)
+        assert scene.withheld is not None
+        assert sorted([v.source_bbox for v in scene]+[w[0] for w in scene.withheld]) == raw
+        withheld.append([w[0] for w in scene.withheld])
+    # The scene's own withheld boxes, frame by frame, exactly. 8.3 skips the empty image's update, so
+    # the scene tracks as if alone. 8.4 runs the one shared (non-stream) tracker on both images: with
+    # the empty image first, the scene's first update is not tracker frame 1, so x=50 is never confirmed.
+    car50, car62, car44 = (47., 100., 53., 140.), (59., 100., 65., 140.), (41., 100., 47., 140.)
+    if not HIDES_UNCONFIRMED:
+        expected = [[]]*6+[[car44]]
+    elif empty_first:
+        expected = [[car50]]*5+[[car62], [car62, car44]]
+    else:
+        expected = [[]]*5+[[car62], [car62, car44]]
+    assert withheld == expected
     # 8.3.0 runs no update for the empty image; 8.4 runs one for each image.
     assert set(counts) == ({2} if HIDES_UNCONFIRMED else {1})
-    assert any(scene.withheld for scene in scenes)
 
 
 def test_mixed_batch_with_stacked_tracker_callbacks_fails_closed_per_image():
@@ -362,6 +389,8 @@ class FakeResult:
 
 def test_frame_evidence_attribution_fails_closed():
     detector = frozen_detector(FrozenTrackModel([]), evidence=False)
+    real = detector._frame_evidence
+    detector._frame_evidence = lambda *args:[withheld for withheld, _ in real(*args)]
     a, b = np.zeros((2, 2, 3), np.uint8), np.zeros((2, 2, 3), np.uint8)
     call = (np.array([[0, 0, 4, 4.]]), np.array([1.]), np.array([.9]), np.zeros(0, int))
     one = FakeResult(a, 1)
@@ -402,3 +431,128 @@ def test_omitted_evidence_is_unavailable_not_empty():
     for f, frame in enumerate(tracked):
         waits.observe(observations(frame), 'RED', f/FPS, f+1, 1)
     assert links(waits) == [] and waits.continuation_unavailable_frames == 1
+
+
+def test_emitted_boxes_carry_their_raw_source_and_missing_attribution_fails_closed():
+    _, tracked, _ = replay(review_repro())
+    for frame in tracked:
+        assert all(v.source_bbox is not None for v in frame)
+    # The smoothed emitted box and its raw detection are both reported; the detection is exact.
+    assert tracked[4][0].source_bbox == (47., 100., 53., 140.)
+    # A frame claiming complete withheld evidence with an unattributed emitted box is unavailable.
+    frame = TrackedFrame(list(tracked[4]), withheld=(), epoch=0)
+    assert _withheld_boxes(frame, 0) == ()
+    frame[0].source_bbox = None
+    assert _withheld_boxes(frame, 0) is None
+    # Evidence without sources (an emitted row the call cannot explain) is withdrawn by the detector.
+    detector = frozen_detector(FrozenTrackModel([]), evidence=False)
+    one = FakeResult(np.zeros((2, 2, 3), np.uint8), 2)
+    assert detector._evidence(one, (np.array([[0, 0, 4, 4.]]), np.array([1.]), np.array([.9]), np.zeros(0, int))) == (None, None)
+
+
+# --- the real predictor (models/Final.pt), only the network's post-NMS output scripted -------
+
+def real_detector(monkeypatch, frames, fail=lambda frame:False):
+    """DetectorTracker on the real YOLO predictor and installed ByteTrack; ``fail(frame)`` makes
+    BYTETracker.update raise on that frame (each call, so a fallback that re-runs it fails too)."""
+    path = os.path.join(os.path.dirname(__file__), '..', 'models', 'Final.pt')
+    if not os.path.exists(path):
+        pytest.skip('models/Final.pt not available')
+    from ultralytics.engine.results import Results
+    from ultralytics.models.yolo.detect.predict import DetectionPredictor
+    from ultralytics.trackers.byte_tracker import BYTETracker
+    current = [0]
+    updates = []
+
+    def postprocess(self, preds, img, orig_imgs):
+        boxes = torch.tensor(frames[current[0]], dtype=torch.float32).reshape(-1, 6)
+        return [Results(orig_imgs[0], path='scripted', names=self.model.names, boxes=boxes)]
+    original = BYTETracker.update
+
+    def update(self, *args, **kwargs):
+        updates.append(current[0])
+        if fail(current[0]):
+            raise RuntimeError('injected tracker failure')
+        return original(self, *args, **kwargs)
+    monkeypatch.setattr(DetectionPredictor, 'postprocess', postprocess)
+    monkeypatch.setattr(BYTETracker, 'update', update)
+    detector = DetectorTracker(path, device='cpu', imgsz=64)
+    assert detector.enable_withheld_evidence() is True
+    image = IMAGE.copy()      # 240x320: no box is clipped
+
+    def step(f):
+        current[0] = f
+        frame, = detector.track([image], timestamp=f/FPS)
+        return frame
+    return detector, step, updates
+
+
+def test_real_predictor_tracked_competitor_vetoes_by_its_raw_source_box(monkeypatch):
+    """Sol's probe: ID 1 lost at x=100 (gate .35 x 40 px = 14 px); newborn at x=112; an existing
+    track's detection jumps to x=86.1 (inside the gate) while its Kalman box stays outside."""
+    def frames(competitor_x):
+        # 10x40 px boxes: the competitor (ID 2) sits at x=84 and its detection steps to competitor_x.
+        steady = [box(100, width=10), box(84, width=10)]
+        return [steady]*5+[[box(112, width=10), box(84, width=10)]]+[[box(112, width=10), box(competitor_x, width=10)]]
+    def run(competitor_x, attributed=True):
+        detector, step, _ = real_detector(monkeypatch, frames(competitor_x))
+        waits = VehicleWaits('run', RunPolicy(fragment_continuation=True), lambda point:-1)
+        seen = []
+        for f in range(7):
+            frame = step(f)
+            seen.append(frame)
+            if not attributed:
+                for v in frame:v.source_bbox = tuple(v.bbox)
+            waits.observe(observations(frame), 'RED', f/FPS, f+1, 1, unassigned=_withheld_boxes(frame, detector.epoch))
+        return waits, seen
+    waits, seen = run(86.1)
+    newborn, = [v for v in seen[6] if v.track_id not in (1, 2)]
+    competitor, = [v for v in seen[6] if v.track_id == 2]
+    smoothed = (competitor.bbox[0]+competitor.bbox[2])/2
+    raw = (competitor.source_bbox[0]+competitor.source_bbox[2])/2
+    assert raw == pytest.approx(86.1, abs=1e-4) and abs(100-raw) <= 14 < abs(100-smoothed)
+    assert seen[6].withheld == ()          # the competitor is emitted, not withheld
+    assert links(waits) == []
+    # Without the raw source the same frames link 1 -> newborn (the reported failure).
+    blind, _ = run(86.1, attributed=False)
+    assert links(blind) == [(1, newborn.track_id)]
+    # Positive control: the competitor's raw box stays outside the gate too.
+    control, _ = run(85.)
+    assert links(control) == [(1, newborn.track_id)]
+
+
+@pytest.mark.parametrize('failing', [{6}, {6, 7}])
+def test_real_predictor_tracker_failure_falls_back_to_detection_only(monkeypatch, failing):
+    """One-shot and repeated BYTETracker.update failures: the fallback never runs the tracker (8.3.x
+    callbacks would run it in predict mode), returns untracked detections without evidence, and the
+    next frame tracks normally with exactly one tracker registration."""
+    from ultralytics.trackers.track import on_predict_postprocess_end
+    frames = review_repro(competitor=False)+[[box(62)]]*4
+    detector, step, updates = real_detector(monkeypatch, frames, fail=lambda f:f in failing)
+    waits = VehicleWaits('run', RunPolicy(fragment_continuation=True), lambda point:-1)
+    seen = []
+    for f in range(len(frames)):
+        frame = step(f)          # never raises
+        seen.append(frame)
+        waits.observe(observations(frame), 'RED', f/FPS, f+1, 1, unassigned=_withheld_boxes(frame, detector.epoch))
+        registered = [cb for cb in detector.model.callbacks['on_predict_postprocess_end']
+                      if getattr(cb, 'func', cb) is on_predict_postprocess_end]
+        assert len(registered) == 1
+    for f in failing:
+        assert [v.bbox for v in seen[f]] == [[59., 100., 65., 140.]]
+        assert not any(v.stable_id for v in seen[f]) and seen[f].withheld is None
+        assert all(v.source_bbox is None for v in seen[f])
+        # The tracker ran once, for the failed track() call; never again in the fallback predict.
+        assert updates.count(f) == 1
+    resumed = max(failing)+1
+    assert all(updates.count(f) == 1 for f in range(len(frames)))
+    assert seen[resumed].withheld is not None and [v.stable_id for v in seen[resumed]] == [True]
+    assert detector._provenance.armed is False and detector._provenance.calls == []
+    # Missing evidence is never guessed through: a link, if any, is made only on a tracked frame.
+    for row in waits.records.values():
+        for link in row.get('identity_links', ()):
+            assert round(link['linked_at']*FPS) >= resumed
+    # Reset after a fallback: a new epoch, one registration, normal evidence.
+    detector.reset_tracking()
+    frame = step(len(frames)-1)
+    assert frame.epoch == 1 and frame.withheld is not None

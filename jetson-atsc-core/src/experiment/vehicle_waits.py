@@ -56,17 +56,31 @@ def _fit(history):
     return slope(1), slope(2)
 
 
+def _raw_box(box):
+    try:x1, y1, x2, y2 = (float(v) for v in box[:4])
+    except (TypeError, ValueError, IndexError):return None
+    return (x1, y1, x2, y2) if all(map(math.isfinite, (x1, y1, x2, y2))) and x2 > x1 and y2 > y1 else None
+
+
 def _competitors(observations, unassigned):
     """(observation or None, footpoint, height, bbox) for every box of the frame.
 
+    An observation competes with its own box and, when it carries one, with
+    the raw detection the tracker emitted it from (``source_bbox``): smoothing
+    can move a tracked box out of a gate its detection is in. Both entries
+    belong to the observation, so a newborn's own source never vetoes it.
     ``unassigned`` are the frame's actual detections the tracker did not emit:
     they can only veto a link, never become rows."""
     found = [(o, o.point, _height(o), o.bbox) for o in observations]
+    for o in observations:
+        source = getattr(o, "source_bbox", None)
+        source = None if source is None else _raw_box(source)
+        if source is not None and source != o.bbox:
+            found.append((o, ((source[0]+source[2])/2, source[3]), source[3]-source[1], source))
     for box in unassigned:
-        try:x1, y1, x2, y2 = (float(v) for v in box[:4])
-        except (TypeError, ValueError, IndexError):continue
-        if all(map(math.isfinite, (x1, y1, x2, y2))) and x2 > x1 and y2 > y1:
-            found.append((None, ((x1+x2)/2, y2), y2-y1, (x1, y1, x2, y2)))
+        box = _raw_box(box)
+        if box is not None:
+            found.append((None, ((box[0]+box[2])/2, box[3]), box[3]-box[1], box))
     return found
 
 
@@ -199,8 +213,20 @@ class VehicleWaits:
         if phase == "UNKNOWN":cycle_id = None
         continuing = self.fragment_continuation and self.policy.fragment_continuation
         if continuing:
-            # Read twice (prepass, accounting): a one-shot iterator must be materialized once.
+            # Read more than once (prepasses, accounting): a one-shot iterator is materialized once.
             observations = observations if isinstance(observations, (list, tuple)) else list(observations)
+            # A sighting older than the association timeout no longer makes an ID "not newborn".
+            if self.outside_seen:
+                self.outside_seen = {k: t for k, t in self.outside_seen.items()
+                                     if timestamp-t <= self.policy.association_gap_sec}
+            # A handed-off ID seen again contests the live link before any row of this
+            # frame completes (e.g. the continuing ID crossing the line): order-independent.
+            if self.handed_off:
+                for observation in observations:
+                    if observation.local_id is None or not observation.stable_id:continue
+                    identity = (observation.epoch, observation.local_id)
+                    if identity in self.handed_off:
+                        self._contest(self.handed_off[identity]["row_id"], identity, timestamp)
             self._continue_fragments(observations, timestamp, unassigned)
         present = set()
         for observation in observations:
@@ -303,9 +329,6 @@ class VehicleWaits:
                 if timestamp-row["last_seen"] > self.policy.association_gap_sec:
                     row.update(completed=True, completed_at=timestamp);self.work+=1
                     self._flag(row, "tracking_lost")
-        if self.outside_seen:
-            self.outside_seen = {k: t for k, t in self.outside_seen.items()
-                                 if timestamp-t <= self.policy.association_gap_sec}
 
     def _own_segments(self, identity, state):
         """Rows this raw ID itself started; an alias of another row started none."""

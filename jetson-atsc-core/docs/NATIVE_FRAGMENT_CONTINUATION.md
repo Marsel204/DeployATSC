@@ -9,8 +9,10 @@ instead. It is opt-in and does nothing in **Persistent vehicle IDs** mode.
 
 - Dashboard: *Setup → Detection thresholds, identity and A/B comparison →
   Native tracker IDs →* tick **Continue a lost vehicle with a new native ID
-  (experimental)**, then start the run. A saved run reloads with the box set
-  as it was recorded.
+  (experimental)**, then start the run. While a run is current, the page
+  restores the box from that run's live telemetry (`policy`). The saved-run
+  browser loads evidence rows only, not the settings form; a saved run's
+  setting is in its manifest policy and export.
 - API: `POST /api/observation/start` with
   `"policy": {"fragment_continuation": true, ...}`.
 - Python: `RunPolicy(fragment_continuation=True)`.
@@ -24,9 +26,10 @@ A native ID that this run has never seen (not active, not handed off, not seen
 outside the region in the last association timeout, not in the archive index)
 continues a row whose last observation was at most `max_gap_sec` earlier, when:
 
-0. the lost ID was seen with a box in at least its last three frames before
-   the gap (a one- or two-frame fragment, such as an edge sliver, is never
-   continued);
+0. the lost ID has at least three recent box sightings, each at most
+   `max_gap_sec` after the previous one, spanning at least 0.1 s (a one- or
+   two-frame fragment, such as an edge sliver, is never continued). The
+   sightings need not be on consecutive frames: frames 0, 2 and 4 qualify;
 1. on position alone, the newborn and the lost row are each other's only
    candidate within the motion gate (0.35 box heights, plus 0.3 per second of
    gap when at least three samples show image motion; without motion only a
@@ -35,21 +38,36 @@ continues a row whose last observation was at most `max_gap_sec` earlier, when:
 3. no other box of the same frame, of any vehicle class, size or ID state,
    has its footpoint in the gate, or covers at least half of the smaller box
    with footpoints within half a box height of the newborn's (the f66 case in
-   the 0SgQn95Q07U replay). "Other boxes" include the frame's actual post-NMS
-   detections that ByteTrack withheld (discarded low-score boxes and new
-   tracks awaiting confirmation). They are identified by the tracker's own
+   the 0SgQn95Q07U replay). "Other boxes" are:
+   - every other observation's emitted (Kalman-smoothed) box, **and** its raw
+     post-NMS detection (`source_bbox`) when the tracker emitted it from one.
+     Smoothing can move an emitted box out of the gate while its detection is
+     in it (review probe: ID 1 lost at x=100, 14 px gate, newborn at x=112;
+     an existing track's detection at x=86.1 was emitted at x=85.47), so
+     either one vetoes;
+   - the frame's actual post-NMS detections that ByteTrack withheld
+     (discarded low-score boxes and new tracks awaiting confirmation).
+   Raw sources and withheld boxes are identified by the tracker's own
    detection index, so the newborn's own detection is never its competitor
-   however much the tracker smoothed its box. Withheld boxes only veto links;
-   they never become ledger rows.
+   however much the tracker smoothed its box. They only veto links; they
+   never become ledger rows.
 4. that same-frame evidence is complete. `DetectorTracker.track` returns
-   per-frame lists carrying it (`TrackedFrame.withheld`). When it is
-   unavailable (tracker error and predict fallback, a detector without the
-   provenance hook, a frame from an older tracker epoch, an image whose
-   tracker updates cannot be attributed to it) no link is made in that frame
-   (`continuation_unavailable_frames`). Direct `VehicleWaits` /
-   `ObservationEngine` callers pass `unassigned_boxes` themselves: `()`
+   per-frame lists carrying it (`TrackedFrame.withheld`, plus `source_bbox`
+   on every emitted vehicle). When it is unavailable (tracker error and
+   detection-only fallback, a detector without the provenance hook, a frame
+   from an older tracker epoch, an image whose tracker updates cannot be
+   attributed to it, an emitted vehicle without an attributed `source_bbox`)
+   no link is made in that frame (`continuation_unavailable_frames`, counted
+   when a newborn and a lost row were both present).
+   Direct callers pass the withheld boxes themselves:
+   `VehicleWaits.observe(..., unassigned=...)` and
+   `ObservationEngine.observe_acquisition(..., unassigned_boxes=...)`. `()`
    asserts that the observations are every detection of the frame, and the
-   default (`None`) declares the evidence unavailable.
+   default (`None`) declares the evidence unavailable. A direct caller's
+   `VehicleObservation.source_bbox=None` means `bbox` is itself the raw
+   detection; a custom detector that sets `TrackedFrame.withheld` must also
+   set `source_bbox` on each vehicle, or the session treats the frame as
+   unavailable.
 
 A row is continued at most 8 times. A frame with more than 4,096
 newborn x lost pairs skips continuation (`continuation_skipped_frames`).
@@ -66,6 +84,18 @@ detections (that image has nothing withheld); an image with detections and no
 update, or with more than one update, has no evidence. `reset_tracking`
 removes the installed tracker callbacks before dropping the predictor, since
 8.3.x would otherwise append a second registration and update twice per frame.
+When `track` fails (for example a tracker exception), the detection-only
+`predict` fallback runs with the installed tracker callbacks detached and
+restored afterwards: 8.3.x would otherwise run `tracker.update` in predict
+mode, returning tracker IDs after a one-shot failure or raising again after a
+repeated one. Fallback frames have no stable IDs and no evidence; the next
+`track` continues the same trackers.
+
+A handed-off native ID seen again contests the link before any row of that
+frame is completed, so a return on the frame where the continuing ID crosses
+the stop line flags the link whatever the observation order. Sightings
+outside the region older than `association_gap_sec` are expired before
+matching, so they never block a newborn on the frame they lapse.
 
 ## Accounting
 

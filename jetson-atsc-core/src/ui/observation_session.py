@@ -72,13 +72,20 @@ def _box(track):
     return _finite_box(getattr(track,"bbox",None))
 
 
+def _source_box(track):
+    """The detector's raw box behind a tracked box, or None."""
+    return _finite_box(getattr(track,"source_bbox",None))
+
+
 def _withheld_boxes(tracks,epoch):
     """This frame's detections the native tracker withheld, as raw boxes, or None.
 
     Only a DetectorTracker frame carries this; any other detector, a predict
-    fallback, or a frame from another tracker epoch yields None (unavailable)."""
+    fallback, a frame from another tracker epoch, or a frame with an emitted
+    box whose raw source detection is unattributed yields None (unavailable)."""
     withheld=getattr(tracks,"withheld",None)
     if withheld is None or getattr(tracks,"epoch",None)!=epoch:return None
+    if any(_source_box(track) is None for track in tracks):return None
     boxes=tuple(_finite_box(item[0]) for item in withheld)
     return None if None in boxes else boxes
 
@@ -303,7 +310,7 @@ class ObservationSession:
                     v.bottom_center,stable_id=getattr(v,"stable_id",False),
                     velocity_valid=getattr(v,"velocity_valid",False),
                     in_region=calibration.homography.is_in_approach_corridor(*v.bottom_center),
-                    epoch=getattr(v,"epoch",detector.epoch),bbox=_box(v)) for v in tracks]
+                    epoch=getattr(v,"epoch",detector.epoch),bbox=_box(v),source_bbox=_source_box(v)) for v in tracks]
                 if identity_evidence is not None:
                     resolution=self.engine.observe_acquisition(frame,packet.timestamp,packet.sequence,(),generation=generation,
                         identity_evidence=identity_evidence.detections,camera_stable=identity_evidence.camera_stable,

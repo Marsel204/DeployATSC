@@ -25,12 +25,18 @@ def script(index):
     return []
 
 
+def scripted_vehicle(track_id, x, y, timestamp, epoch):
+    vehicle = TrackedVehicle(track_id, 2, 'car', [x-14, y-30, x+14, y], .9, timestamp, obs_count=6, epoch=epoch)
+    vehicle.source_bbox = tuple(vehicle.bbox)      # its own raw detection: complete attribution
+    return vehicle
+
+
 class ScriptedDetector:
     """Scripted tracks; declares that the tracker withheld nothing in any frame."""
     def __init__(self, *args, **kwargs):self.epoch = 0;self.track_trajectories = {}
     def track(self, frames, timestamp=None):
         index = round(timestamp*FPS)
-        return [TrackedFrame([TrackedVehicle(track_id, 2, 'car', [x-14, y-30, x+14, y], .9, timestamp, obs_count=6, epoch=self.epoch)
+        return [TrackedFrame([scripted_vehicle(track_id, x, y, timestamp, self.epoch)
                  for track_id, y, x in script(index)], withheld=(), epoch=self.epoch) for _ in frames]
     def update_velocities(self, vehicles, project, timestamp=None):
         for v in vehicles:v.velocity_valid = True;v.velocity_mps = 2.;v.ground_pos = project(*v.bottom_center)
