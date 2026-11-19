@@ -24,6 +24,9 @@ A native ID that this run has never seen (not active, not handed off, not seen
 outside the region in the last association timeout, not in the archive index)
 continues a row whose last observation was at most `max_gap_sec` earlier, when:
 
+0. the lost ID was seen with a box in at least its last three frames before
+   the gap (a one- or two-frame fragment, such as an edge sliver, is never
+   continued);
 1. on position alone, the newborn and the lost row are each other's only
    candidate within the motion gate (0.35 box heights, plus 0.3 per second of
    gap when at least three samples show image motion; without motion only a

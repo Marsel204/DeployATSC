@@ -334,7 +334,9 @@ class VehicleWaits:
             dt = timestamp-previous["time"]
             if not 0 < dt <= self.policy.max_gap_sec+1e-9:continue
             last_time, x, y, height = history[-1]
-            if last_time != previous["time"]:continue
+            # A fragment seen in fewer than MIN_FIT_SAMPLES frames has no position or
+            # size consistency to continue (junction f475: a one-frame edge sliver).
+            if last_time != previous["time"] or len(history) < MIN_FIT_SAMPLES:continue
             motion = _fit(history)
             fitted = motion is not None and math.hypot(*motion) >= MIN_MOVING_HEIGHTS_PER_SEC*height
             if fitted:

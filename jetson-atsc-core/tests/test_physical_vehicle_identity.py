@@ -238,8 +238,17 @@ def test_invalidation_breaks_continuation():
 def test_without_motion_evidence_only_a_very_short_gap_is_bridged():
     for gap, linked in ((2, True), (6, False)):
         waits = book()
-        play(waits, [[car(1, 60.)], [car(1, 60.)]] + [[]]*gap + [[car(2, 64.)]])
+        play(waits, [[car(1, 60.)]]*3 + [[]]*gap + [[car(2, 64.)]])
         assert (len(waits.records) == 1) == linked, gap
+
+
+@pytest.mark.parametrize('samples', [1, 2])
+def test_a_fragment_seen_in_fewer_than_three_frames_is_not_continued(samples):
+    """Junction f475: raw #1717, a one-frame sliver at the image edge, was handed to
+    the white car #1721 two frames later and came back itself at f499."""
+    waits = book()
+    play(waits, [[car(1, 60.)]]*samples + [[]]*2 + [[car(2, 62.)]])
+    assert len(waits.records) == 2
 
 
 def test_stationary_vehicle_is_bridged_only_across_flicker():
