@@ -28,6 +28,12 @@ class RunPolicy:
     debounce_frames: int = 3
     phase_ratio: float = 0.08
     los_method: str | None = None
+    # Infer a stop-line departure from a moving vehicle's last consecutive
+    # image track when it vanishes just before the line (event only, no wait).
+    departure_inference: bool = True
+    # Native IDs only: continue a just-lost vehicle row with a newborn ID when
+    # each is the other's only physically plausible match.
+    fragment_continuation: bool = True
 
     def __post_init__(self):
         numeric=("offset_sec","stopped_speed_mps","moving_speed_mps","stop_persistence_sec",
@@ -37,6 +43,9 @@ class RunPolicy:
                 raise ValueError(f"{key} must be a number")
         if isinstance(self.debounce_frames,bool) or not isinstance(self.debounce_frames,int):
             raise ValueError("Signal debounce requires a whole number of frames")
+        for key in ("departure_inference","fragment_continuation"):
+            if not isinstance(getattr(self,key),bool):
+                raise ValueError(f"{key} must be true or false")
         for key, value in vars(self).items():
             if isinstance(value, (int, float)) and not math.isfinite(value):
                 raise ValueError(f"{key} must be finite")
@@ -64,6 +73,8 @@ class VehicleObservation:
     velocity_valid: bool = False
     in_region: bool = True
     epoch: int = 0
+    # Bounding-box height in pixels: the image scale for motion gates.
+    height: float | None = None
 
 
 def vehicle_key(run_id: str, epoch: int, local_id: int) -> str:

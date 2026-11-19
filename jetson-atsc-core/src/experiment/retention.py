@@ -189,6 +189,10 @@ class Retention:
             base,_,ordinal=row['vehicle_id'].partition(':segment-')
             segments=int(ordinal)+1 if ordinal else 1
             self.index.put(b'v'+base.encode(),segments*2+bool(row['crossed_stop_line']),keep=lambda old,new:old>>1>new>>1)
+            # Native IDs that continued this physical vehicle stay bound to it after eviction.
+            prefix=base.rsplit(':',2)[0]
+            for native in row.get('native_ids',[])[1:]:
+                self.index.put(f"v{prefix}:{native['epoch']}:{native['local_id']}".encode(),2+bool(row['crossed_stop_line']),keep=lambda old,new:old>>1>new>>1)
         elif kind=='predictions':
             self.index.put(b'p'+row['request_id'].encode('utf-8','surrogatepass'),1)
 

@@ -8,6 +8,10 @@ from src.experiment.identity_contracts import ASSOCIATION_VERSION
 
 
 class PersistentVehicleWaits(VehicleWaits):
+    # The resolver owns identity; it deliberately refuses appearance-less
+    # links of moving vehicles, so native-style continuation never runs here.
+    fragment_continuation = False
+
     def __init__(self, run_id, policy, side, identity_policy):
         super().__init__(run_id, replace(policy, association_gap_sec=identity_policy.occlusion_retention_sec), side)
         self.identity_policy = identity_policy
@@ -117,7 +121,7 @@ class PersistentVehicleWaits(VehicleWaits):
         observations = [VehicleObservation(x.logical_id, x.detection.class_name,
             x.speed_mps, x.detection.point, stable_id=True,
             velocity_valid=x.velocity_valid, in_region=x.detection.in_region or x.exit_pending,
-            epoch=x.generation) for x in resolved]
+            epoch=x.generation, height=x.detection.bbox[3]-x.detection.bbox[1]) for x in resolved]
         super().observe(observations, phase, timestamp, sequence, cycle_id)
         self.previous_phase, self.previous_cycle = phase, cycle_id if phase != 'UNKNOWN' else None
         for key, item in present.items():
@@ -151,6 +155,12 @@ class PersistentVehicleWaits(VehicleWaits):
             row['pending_estimated_red_wait_sec'] = self._amount(gap, end)
             row['identity_state'] = 'AMBIGUOUS' if key[1] in ambiguous_ids else ('RECOVERING' if key in present else 'OCCLUDED')
             if row['completed']:
+                if (row.get('crossing_evidence') or {}).get('method') == 'dead_reckoned' and 'end' not in gap:
+                    # The hidden span up to the inferred crossing is already unknown coverage.
+                    gap['end'] = max(gap['start'], row['completed_at'])
+                    self._decide(key, 'unresolved', 'departure_inferred')
+                    row['identity_state'] = 'CROSSED'
+                    continue
                 self._finish_missing(key, timestamp)
             elif 'end' in gap:
                 item = present.get(key)

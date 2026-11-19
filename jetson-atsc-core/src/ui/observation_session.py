@@ -7,6 +7,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from functools import lru_cache, partial
 import hashlib
+import math
 import importlib.metadata
 import json
 from pathlib import Path
@@ -58,6 +59,13 @@ def source_identity(value):
     value=resolve_source(value)
     if value.isdigit():value="/dev/video"+value
     return str(Path(value).resolve()) if "://" not in value else value
+
+
+def _box_height(track):
+    box=getattr(track,"bbox",None)
+    try:height=float(box[3])-float(box[1])
+    except (TypeError,IndexError,ValueError):return None
+    return height if math.isfinite(height) and height>0 else None
 
 
 class ObservationConflict(RuntimeConflict):
@@ -273,7 +281,7 @@ class ObservationSession:
                     v.bottom_center,stable_id=getattr(v,"stable_id",False),
                     velocity_valid=getattr(v,"velocity_valid",False),
                     in_region=calibration.homography.is_in_approach_corridor(*v.bottom_center),
-                    epoch=getattr(v,"epoch",detector.epoch)) for v in tracks]
+                    epoch=getattr(v,"epoch",detector.epoch),height=_box_height(v)) for v in tracks]
                 if identity_evidence is not None:
                     resolution=self.engine.observe_acquisition(frame,packet.timestamp,packet.sequence,(),generation=generation,
                         identity_evidence=identity_evidence.detections,camera_stable=identity_evidence.camera_stable,
@@ -511,7 +519,12 @@ class ObservationSession:
                 label=f"#{v.track_id} {v.class_name}" if getattr(v,"stable_id",False) else v.class_name+" (ID unknown)"
                 if role=="acquisition":
                     state=self.engine.waits.active.get((getattr(v,"epoch",0),v.track_id))
-                    if state and "red_wait_sec" in state["row"]:label+=f" | red wait {state['row']['red_wait_sec']:.1f}s"
+                    if state and "red_wait_sec" in state["row"]:
+                        row=state["row"]
+                        if getattr(v,"stable_id",False) and row.get("identity_links") and row["local_id"]!=v.track_id:
+                            # One physical vehicle: show its row's ID; keep the raw native ID visible.
+                            label=f"#{row['local_id']} {v.class_name} (native #{v.track_id})"
+                        label+=f" | red wait {row['red_wait_sec']:.1f}s"
                 labels.append((p,label))
         return tuple(labels)
 

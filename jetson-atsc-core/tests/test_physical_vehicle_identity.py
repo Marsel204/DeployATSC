@@ -16,7 +16,7 @@ FPS = 30.
 LINE = 100.  # side(point) = y - LINE; positive is past the stop line
 
 
-def car(local_id, y, x=50., height=40., kind='car', epoch=0, in_region=True, speed=None, valid=False):
+def car(local_id, y, x=50., height=40., kind='car', epoch=0, in_region=True, speed=2., valid=True):
     return VehicleObservation(local_id, kind, speed, (x, y), velocity_valid=valid,
                               in_region=in_region, epoch=epoch, height=height)
 
@@ -187,7 +187,7 @@ def test_continuation_is_refused_without_a_physical_match(name, frames):
     waits = book()
     play(waits, frames)
     assert len(waits.records) == 2, name
-    assert not any(r['identity_links'] for r in waits.records.values())
+    assert not any(r.get('identity_links') for r in waits.records.values())
 
 
 def test_gap_boundary_at_max_gap_is_linked_and_one_frame_more_is_not():
@@ -206,7 +206,7 @@ def test_competing_newborns_are_not_linked():
     frames += [[car(2, 40+80*(13+i)/FPS), car(3, 40+80*(13+i)/FPS, x=56.)] for i in range(4)]
     play(waits, frames)
     assert len(waits.records) == 3
-    assert not any(r['identity_links'] for r in waits.records.values())
+    assert not any(r.get('identity_links') for r in waits.records.values())
 
 
 def test_competing_lost_vehicles_are_not_linked():
@@ -215,7 +215,7 @@ def test_competing_lost_vehicles_are_not_linked():
     frames += [[car(2, 40+80*(13+i)/FPS, x=53.)] for i in range(4)]
     play(waits, frames)
     assert len(waits.records) == 3
-    assert not any(r['identity_links'] for r in waits.records.values())
+    assert not any(r.get('identity_links') for r in waits.records.values())
 
 
 def test_simultaneous_ids_are_two_vehicles():
@@ -235,7 +235,9 @@ def test_old_native_id_reappearing_starts_a_separate_segment():
     assert set(waits.records) == {'run:acquisition:0:1', 'run:acquisition:0:1:segment-1'}
     reused = waits.records['run:acquisition:0:1:segment-1']
     assert reused['local_id'] == 1 and 'native_id_reused' in reused['quality_flags']
-    assert not reused['identity_links']
+    assert 'identity_link_contested' in continued['quality_flags']
+    assert continued['identity_links'][0]['contested_at'] == pytest.approx(end/FPS)
+    assert 'identity_links' not in reused
     assert continued['first_seen'] == before['first_seen']
     assert continued['last_seen'] == pytest.approx((end+2)/FPS)
     assert waits.physical((0, 1))['vehicle_id'] == reused['vehicle_id']
@@ -249,7 +251,7 @@ def test_new_row_never_overwrites_an_existing_record():
     end = play(waits, [[]]*40, end)
     play(waits, [[car(1, 20.)]], end)
     assert len(waits.records) == 2
-    assert waits.records['run:acquisition:0:1']['identity_links']
+    assert waits.records['run:acquisition:0:1'].get('identity_links')
 
 
 def test_continuation_switch_restores_old_behaviour():
@@ -314,3 +316,66 @@ def test_native_engine_snapshot_exposes_physical_vehicle_and_raw_ids():
     vehicles = engine.snapshot(evidence=True)['vehicles']
     assert len(vehicles) == 1
     assert [n['local_id'] for n in vehicles[0]['native_ids']] == [1, 2]
+
+
+def test_without_motion_evidence_only_a_very_short_gap_is_bridged():
+    """A vehicle seen too briefly to fit motion has no bounded position over a long gap."""
+    for gap, linked in ((2, True), (6, False)):
+        waits = book()
+        frames = [[car(1, 60.)], [car(1, 60.)]] + [[]]*gap + [[car(2, 64.)]]
+        play(waits, frames)
+        assert (len(waits.records) == 1) == linked, gap
+
+
+def test_motion_history_survives_short_native_flicker():
+    """Flicker within max_gap_sec keeps the timed samples; departure is still inferred."""
+    waits = book()
+    frames = [[car(1, 60+80*i/FPS)] if i % 3 else [] for i in range(10)]
+    play(waits, [*frames, *[[]]*45])
+    assert only_row(waits)['crossing_evidence']['method'] == 'dead_reckoned'
+
+
+def test_stationary_vehicle_is_bridged_only_across_flicker():
+    """A stopped vehicle hidden for longer is not handed to a newborn neighbour."""
+    for gap, linked in ((2, True), (8, False)):
+        waits = book()
+        frames = [[car(1, 60.)] for _ in range(10)] + [[]]*gap + [[car(2, 66.)]]
+        play(waits, frames)
+        assert (len(waits.records) == 1) == linked, gap
+
+
+def test_same_id_seen_before_the_line_after_inference_is_flagged_as_contradicted():
+    waits = book()
+    end = play(waits, [*approach(), *[[]]*45])
+    play(waits, [[car(1, 90.)]], end)
+    row = only_row(waits)
+    assert 'departure_inference_contradicted' in row['quality_flags']
+    assert row['crossing_evidence']['contradicted_at'] == pytest.approx(end/FPS)
+
+
+def test_camera_gap_absence_is_not_departure_evidence():
+    waits = book()
+    end = play(waits, approach())
+    for k in range(45):                       # frames resume 2 s later without the vehicle
+        waits.observe([], 'RED', 2+(end+k)/FPS, end+k+1, 1)
+    row = only_row(waits)
+    assert not row['crossed_stop_line'] and 'tracking_lost' in row['quality_flags']
+
+
+def test_continued_native_id_stays_bound_after_archive_eviction(tmp_path):
+    from src.experiment.export import ExperimentStore
+    engine = ObservationEngine('run', RunPolicy(debounce_frames=1, stop_persistence_sec=0),
+        {'xmin': 0, 'ymin': 0, 'xmax': 8, 'ymax': 8}, lambda p: p[1]-LINE, lambda *_: None)
+    engine.enable_retention(1, tmp_path)
+    store = ExperimentStore(tmp_path, engine.run_id, {})
+    frame = np.full((8, 8, 3), (0, 0, 255), np.uint8)
+    frames = fragment() + [[car(2, 40+80*i/FPS)] for i in range(17, 30)]   # native 2 crosses
+    frames += [[]]*60 + [[car(2, 90.)] for _ in range(3)]                    # and is seen again later
+    for index, observations in enumerate(frames):
+        engine.observe_acquisition(frame, index/FPS, index+1, observations)
+        state, token = engine.prepare_commit(); store.persist(state); engine.acknowledge(token)
+    engine.close()
+    state, token = engine.prepare_commit(); store.persist(state); engine.acknowledge(token)
+    rows = store.read()['vehicles']
+    assert len(rows) == 1 and rows[0]['crossed_stop_line']
+    assert [n['local_id'] for n in rows[0]['native_ids']] == [1, 2]
