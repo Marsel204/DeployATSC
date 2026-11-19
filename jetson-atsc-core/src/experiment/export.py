@@ -297,7 +297,7 @@ class ExperimentStore:
                     row['unknown_sec']=row.get('unknown_sec',0.)+duration
                     row['phase_unknown_sec']=row.get('phase_unknown_sec',0.)+duration
                     row.setdefault('intervals',[]).append({'start':gap['start'],'end':gap['through_time'],
-                        'phase':'UNKNOWN','cycle_id':None,'valid':False,'stopped':False,
+                        'phase':'UNKNOWN','cycle_id':None,'valid':False,'tracked':False,'stopped':False,
                         'gap_evidence':{'status':'unresolved','reason':'unclean_recovery'}})
                 row['pending_estimated_red_wait_sec']=0.
                 row['display_red_wait_sec']=row['red_wait_sec']+row.get('estimated_red_wait_sec',0.)
