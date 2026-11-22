@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Mapping
 import math
 
 from src.common.json_data import clone as deepcopy
@@ -35,7 +36,7 @@ def _height(observation):
     height = observation.height
     if height is None and observation.bbox is not None:
         box = _raw_box(observation.bbox)
-        return None if box is None else box[3]-box[1]
+        height = None if box is None else box[3]-box[1]
     try:height = float(height)
     except (TypeError, ValueError, OverflowError):return None
     return height if math.isfinite(height) and height > 0 else None
@@ -58,10 +59,11 @@ def _fit(history):
 
 
 def _raw_box(box):
-    if isinstance(box, (str, bytes)):return None
+    if isinstance(box, (str, bytes, Mapping)):return None
     try:x1, y1, x2, y2 = (float(v) for v in box[:4])
-    except (TypeError, ValueError, IndexError, OverflowError):return None
-    return (x1, y1, x2, y2) if all(map(math.isfinite, (x1, y1, x2, y2))) and x2 > x1 and y2 > y1 else None
+    except (TypeError, ValueError, IndexError, OverflowError, KeyError):return None
+    w, h = x2-x1, y2-y1
+    return (x1, y1, x2, y2) if all(map(math.isfinite, (x1, y1, x2, y2, w, h, (x1+x2)/2, w*h))) and w > 0 and h > 0 else None
 
 
 def _competitors(observations, unassigned):
@@ -87,7 +89,7 @@ def _competitors(observations, unassigned):
             if source is None:return None
             if source != box:
                 found.append((o, ((source[0]+source[2])/2, source[3]), source[3]-source[1], source))
-    if isinstance(unassigned, (str, bytes)):return None
+    if isinstance(unassigned, (str, bytes, Mapping)):return None
     try:
         for raw in unassigned:
             box = _raw_box(raw)

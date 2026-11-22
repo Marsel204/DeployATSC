@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import deque
 from src.common.json_data import clone as deepcopy
+from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import datetime, timezone
 from functools import lru_cache, partial
@@ -62,10 +63,12 @@ def source_identity(value):
 
 
 def _finite_box(values):
-    if isinstance(values,(str,bytes)):return None
+    if isinstance(values,(str,bytes,Mapping)):return None
     try:box=tuple(float(value) for value in values[:4])
-    except (TypeError,IndexError,ValueError,OverflowError):return None
-    return box if len(box)==4 and all(map(math.isfinite,box)) and box[3]>box[1] and box[2]>box[0] else None
+    except (TypeError,IndexError,ValueError,OverflowError,KeyError):return None
+    if len(box)!=4 or not all(map(math.isfinite,box)):return None
+    w,h=box[2]-box[0],box[3]-box[1]
+    return box if w>0 and h>0 and all(map(math.isfinite,(w,h,(box[0]+box[2])/2,w*h))) else None
 
 
 def _box(track):
@@ -85,7 +88,7 @@ def _withheld_boxes(tracks,epoch):
     fallback, a frame from another tracker epoch, or a frame with an emitted
     box whose raw source detection is unattributed yields None (unavailable)."""
     withheld=getattr(tracks,"withheld",None)
-    if withheld is None or isinstance(withheld,(str,bytes)) or getattr(tracks,"epoch",None)!=epoch:return None
+    if withheld is None or isinstance(withheld,(str,bytes,Mapping)) or getattr(tracks,"epoch",None)!=epoch:return None
     if any(_box(track) is None or _source_box(track) is None for track in tracks):return None
     try:boxes=tuple(_finite_box(item[0]) for item in withheld)
     except (TypeError,IndexError,KeyError):return None

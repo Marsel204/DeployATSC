@@ -183,14 +183,15 @@ def test_default_off_session_keeps_the_historical_observe_acquisition_contract(v
         session.state = session.applied_state = 'stopped';session._cleanup()
 
 
-@pytest.mark.parametrize('bad_withheld', [[()], [((0, 0, 10**400, 4), 'car', .9)]])
+@pytest.mark.parametrize('bad_withheld', [[()], [((0, 0, 10**400, 4), 'car', .9)], {}, [((-1e308, -1e308, 1e308, 1e308), 'car', .9)]])
 def test_malformed_withheld_entries_degrade_to_unavailable_evidence_without_crashing(video_factory, tmp_path, bad_withheld):
-    """Sol S3: malformed entries (including integer overflow) in TrackedFrame.withheld yield
-    unavailable evidence (None) and never crash ObservationSession."""
+    """Sol S3/S6/S7: malformed entries (mappings, integer overflow, infinite-span coordinates) in
+    TrackedFrame.withheld yield unavailable evidence (None) and never crash ObservationSession."""
     from src.ui.observation_session import _withheld_boxes
     clean_frame = TrackedFrame([scripted_vehicle(1, 100., 60., 0., 0)], withheld=(), epoch=0)
     assert _withheld_boxes(clean_frame, 0) == ()
-    for bad in ([()], [None], [123], [('', 'car', .9)], [((0, 0, 10**400, 4), 'car', .9)], 42, ''):
+    for bad in ([()], [None], [123], [('', 'car', .9)], [({}, 'car', .9)],
+                [((0, 0, 10**400, 4), 'car', .9)], [((-1e308, -1e308, 1e308, 1e308), 'car', .9)], {}, 42, ''):
         bad_frame = TrackedFrame([scripted_vehicle(1, 100., 60., 0., 0)], withheld=bad, epoch=0)
         assert _withheld_boxes(bad_frame, 0) is None
 
@@ -207,11 +208,18 @@ def test_malformed_withheld_entries_degrade_to_unavailable_evidence_without_cras
     assert unavailable >= 1
 
 
-def test_zero_width_emitted_box_makes_frame_evidence_unavailable(video_factory, tmp_path):
-    """Sol S6: an emitted track with a degenerate bbox must mark frame evidence unavailable
-    even when its source_bbox is valid."""
-    from src.ui.observation_session import _withheld_boxes
-    bad = TrackedVehicle(3, 2, 'car', [200., 100., 200., 140.], .9, 14/FPS, obs_count=6, epoch=0)
+@pytest.mark.parametrize('bad_bbox', [[200., 100., 200., 130.], [-1e308, -1e308, 1e308, 1e308]])
+def test_zero_width_emitted_box_makes_frame_evidence_unavailable(video_factory, tmp_path, bad_bbox):
+    """Sol S6/S7: an emitted track with a degenerate, mapping, or overflow-span bbox must mark frame
+    evidence unavailable even when its source_bbox is valid."""
+    from src.ui.observation_session import _finite_box, _withheld_boxes
+    assert _finite_box({}) is None
+    mapped = TrackedVehicle(3, 2, 'car', [200., 100., 210., 140.], .9, 14/FPS, obs_count=6, epoch=0)
+    mapped.bbox = {}
+    mapped.source_bbox = (186., 100., 214., 130.)
+    assert _withheld_boxes(TrackedFrame([mapped], withheld=(), epoch=0), 0) is None
+
+    bad = TrackedVehicle(3, 2, 'car', bad_bbox, .9, 14/FPS, obs_count=6, epoch=0)
     bad.source_bbox = (186., 100., 214., 130.)
     assert _withheld_boxes(TrackedFrame([bad], withheld=(), epoch=0), 0) is None
 
@@ -220,7 +228,7 @@ def test_zero_width_emitted_box_makes_frame_evidence_unavailable(video_factory, 
             index = round(timestamp*FPS)
             vehicles = [scripted_vehicle(track_id, x, y, timestamp, self.epoch) for track_id, y, x in script(index)]
             if index == 14:
-                other = TrackedVehicle(3, 2, 'car', [200., 100., 200., 130.], .9, timestamp, obs_count=6, epoch=self.epoch)
+                other = TrackedVehicle(3, 2, 'car', bad_bbox, .9, timestamp, obs_count=6, epoch=self.epoch)
                 other.source_bbox = (186., 100., 214., 130.)
                 vehicles.append(other)
             return [TrackedFrame(vehicles, withheld=(), epoch=self.epoch) for _ in frames]
