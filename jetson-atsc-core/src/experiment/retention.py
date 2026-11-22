@@ -230,6 +230,7 @@ class Retention:
         drop={c['cycle_id'] for c in token['cycles']}
         live_cycles={c['cycle_id'] for c in engine.phase.cycles if c['cycle_id'] not in drop}
         if engine.phase.green:live_cycles.add(engine.phase.green['cycle_id'])
+        retained_cycles=live_cycles|{engine.phase.cycle_id+1}
         for identity,change in token['vehicles'].items():
             row=engine.waits.records.get(identity)
             if row is None:continue
@@ -245,6 +246,7 @@ class Retention:
                 recent['history']=self.progress.pop(identity,{'archived_intervals':0,'archived_cycles':0})
                 self.recent.append(recent)
                 for cycle_id in final['cycles']:
+                    if cycle_id not in retained_cycles:continue
                     population=self.cycle_population.setdefault(cycle_id,{'count':0,'wait':0.,'partial':0,'crossings':[]})
                     population['count']+=1
                     population['wait']+=final['wait_by_cycle'].get(str(cycle_id),{}).get('red_wait_sec',0.)

@@ -1351,6 +1351,18 @@ def test_sustained_bottom_clip_requires_geometric_recovery_before_clearing_ancho
     assert not row_r4['completed'] and not row_r4['crossed_stop_line']
     assert waits_r4.active[(0, 1)].get('pending_crossing') is not None
 
+    # Sol S2 Round 5: equal-height newer stationary geometry (y1=216, h=60 x6 -> y1=220, h=60 x12
+    # -> y1=220, h=48 at stop_y=270) must refresh the saved baseline's rear to y2=280 rather than
+    # retaining the stale y2=276 rear (which puts bottom share at 8/12 < 0.70 and falsely crosses).
+    waits_r5 = book(side=lambda p: 270.-p[1])
+    seq_r5 = [[car(1, 276., x=150., height=60., speed=0.)] for _ in range(6)]
+    seq_r5 += [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(12)]
+    seq_r5 += [[car(1, 268., x=150., height=48., speed=0.)]]
+    play(waits_r5, seq_r5, phase='RED')
+    row_r5 = only_row(waits_r5)
+    assert not row_r5['completed'] and not row_r5['crossed_stop_line']
+    assert waits_r5.active[(0, 1)].get('pending_crossing') is not None
+
 
 def test_pending_crossing_confirms_across_consecutive_exit_pending_outside_frames():
     """Sol S3: an active crossing anchor is retained across consecutive outside frames
@@ -1615,9 +1627,11 @@ def test_exit_pending_crossing_during_first_green_counts_in_live_and_archived_n_
 
 
 def test_delayed_vehicle_eviction_does_not_leak_archived_crossing_cycle_population(tmp_path):
-    """Sol S8 Round 4: when an open A/B episode delays vehicle eviction until after its
-    crossing cycle has been archived, retention acknowledgment must not recreate a stale
-    cycle_population entry for that already-archived cycle."""
+    """Sol S8 Round 4 & 5: when an open A/B episode starts on the crossing frame (so the
+    final interval straddles the retention cutoff and keeps old cycle membership) and delays
+    vehicle eviction until a separate acknowledgment AFTER the crossing cycle has been
+    archived, retention acknowledgment must not recreate cycle_population for the archived
+    cycle, while still preserving upcoming RED-cycle membership."""
     from dataclasses import replace
     from types import SimpleNamespace
     from src.common.types import TrafficSnapshot
@@ -1643,34 +1657,57 @@ def test_delayed_vehicle_eviction_does_not_leak_archived_crossing_cycle_populati
     def analyze():
         return TrafficSnapshot(v_w_pcu=2, occupancy_pct=10, queue_meters=4), {'inference_calls': 1}
 
-    for seq in range(1, 4*250+1):
-        timestamp = (seq-1)/10
-        ep = int(timestamp // 25)
-        local = round(timestamp % 25, 6)
-        a = 'RED' if local < 1 or local >= 21.5 else 'GREEN' if local < 21 else 'YELLOW'
-        b = 'GREEN' if local < .2 or local >= 23 else 'YELLOW' if local < .4 else 'RED'
-        book.observe_system_frame(timestamp)
-        book.observe_a(frames_rgb[a], timestamp, seq, analyze, {'timestamp': timestamp, 'sequence': seq})
-        # One vehicle crosses during each B green while the A/B episode is open.
-        vid = 100+ep
-        if local < .15:
-            ev = (replace(detection(vid), point=(50., 40.), ground=(5., 4.)),)
-        elif local < .3:
-            ev = (replace(detection(vid), point=(50., 50.), ground=(5., 5.)),)
-        else:
-            ev = ()
-        book.observe_acquisition(frames_rgb[b], timestamp, seq, (), identity_evidence=ev)
-        if a == 'GREEN' and local == 1:
-            book.schedule.await_idle()
-        if seq % 9 == 0:
-            state, token = book.prepare_commit(); store.persist(state); book.acknowledge(token)
-            live_ids = {c['cycle_id'] for c in book.phase.cycles}
-            if book.phase.green:
-                live_ids.add(book.phase.green['cycle_id'])
-            live_ids.add(book.phase.cycle_id+1)
-            assert set(book.retention.cycle_population) <= live_ids
+    seq = 0
+    def step(t, a, b, ev=()):
+        nonlocal seq
+        seq += 1
+        book.observe_system_frame(t)
+        book.observe_a(frames_rgb[a], t, seq, analyze, {'timestamp': t, 'sequence': seq})
+        book.observe_acquisition(frames_rgb[b], t, seq, (), identity_evidence=ev)
+
+    # Cycle 1 GREEN starts at t=0.0; vehicle 101 builds confirmation at t=0.0..0.1 behind line
+    # and crosses at t=0.2 on the EXACT frame A turns GREEN (opening episode with protected_since=0.2).
+    v101_pre = replace(detection(101), point=(50., 40.), ground=(5., 4.))
+    v101_post = replace(detection(101), point=(50., 50.), ground=(5., 5.))
+    step(0.0, 'RED', 'GREEN', (v101_pre,))
+    step(0.1, 'RED', 'GREEN', (v101_pre,))
+    step(0.2, 'GREEN', 'GREEN', (v101_post,))
+    book.schedule.await_idle()
+    vid_101 = next(iter(book.waits.records))
+    row_101 = book.waits.records[vid_101]
+    assert row_101['crossed_stop_line'] and row_101['crossing_cycle'] == 1 and 1 in row_101['cycles']
+
+    # End B Cycle 1 and complete B Cycle 2 while A's episode stays open (protecting v101 from eviction).
+    step(0.3, 'GREEN', 'YELLOW')
+    step(0.4, 'GREEN', 'RED')
+    step(0.5, 'GREEN', 'GREEN')   # B Cycle 2 starts
+    step(0.6, 'GREEN', 'YELLOW')  # B Cycle 2 ends -> Cycle 1 is now outside budget=1
+    step(0.7, 'GREEN', 'RED')
+
+    # Commit 1: Cycle 1 is archived and dropped while v101 remains held in memory with cycle 1 still in row['cycles']!
+    state1, token1 = book.prepare_commit(); store.persist(state1); book.acknowledge(token1)
+    assert 1 not in {c['cycle_id'] for c in book.phase.cycles}
+    assert vid_101 in book.waits.records
+    assert 1 in book.waits.records[vid_101]['cycles']
+    assert 1 not in book.retention.cycle_population
+
+    # Close A's episode so v101 is evicted in a SEPARATE acknowledgment AFTER Cycle 1 archival.
+    book.invalidate_a('a_observation_gap', 0.8)
+    step(0.9, 'RED', 'RED')
+
+    # Commit 2 (separate acknowledgment AFTER Cycle 1 archival): v101 evicts, and Cycle 1 must NOT be recreated!
+    state2, token2 = book.prepare_commit(); store.persist(state2); book.acknowledge(token2)
+    assert vid_101 not in book.waits.records
+    assert 1 not in book.retention.cycle_population
+
+    # Also verify upcoming RED-cycle membership (cycle_id == phase.cycle_id + 1) IS preserved on eviction.
+    upcoming_cycle = book.phase.cycle_id+1
+    v202 = replace(detection(202), point=(150., 40.), ground=(15., 4.))
+    step(1.0, 'RED', 'RED', (v202,))
+    step(1.1, 'RED', 'RED', (v202,))
+    step(1.2, 'RED', 'RED', (v202,))
+    step(1.3, 'RED', 'RED', (replace(v202, in_region=False),))
+    state3, token3 = book.prepare_commit(); store.persist(state3); book.acknowledge(token3)
+    assert upcoming_cycle in book.retention.cycle_population
+    assert book.retention.cycle_population[upcoming_cycle]['count'] == 1
     book.close()
-    state, token = book.prepare_commit(); store.persist(state); book.acknowledge(token)
-    live_ids = {c['cycle_id'] for c in book.phase.cycles}
-    assert set(book.retention.cycle_population) <= live_ids
-    assert len(book.retention.cycle_population) <= 1

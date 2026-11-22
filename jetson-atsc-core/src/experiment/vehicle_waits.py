@@ -265,10 +265,10 @@ class VehicleWaits:
             while len(history) > HISTORY_SAMPLES and history[-1][0]-history[1][0] >= MIN_FIT_SPAN_SEC-1e-9:
                 history.popleft()
 
-    def _stationary_baseline(self, state, observation, timestamp, prev_obs, *, require_taller=False):
+    def _stationary_baseline(self, state, observation, timestamp, prev_obs, *, refresh_only=False):
         """Return stationary pre-occlusion baseline (x, y1, y2, h_base) supported by two
-        consecutive prior sightings (or a preserved stationary baseline) while the box's
-        top edge and horizontal center remain pinned, else None."""
+        consecutive prior sightings (or a preserved taller stationary baseline) while the
+        box's top edge and horizontal center remain pinned, else None."""
         history = state.get("history")
         if not history or len(history) < 2 or prev_obs is None or history[-1][0] != prev_obs["time"]:
             return None
@@ -278,19 +278,23 @@ class VehicleWaits:
         px, py, height = geom
         y1 = py-height
         earlier = list(history)
-        # Require two consecutive prior sightings supporting the taller baseline.
-        hist_base = max((a if a[3] <= b[3] else b for a, b in zip(earlier, earlier[1:])),
-                        key=lambda sample: sample[3])
+        # Require two consecutive prior sightings supporting the taller baseline,
+        # breaking equal-height ties in favor of the most recent stationary geometry.
+        hist_base = max((b if b[3] <= a[3] else a for a, b in zip(earlier, earlier[1:])),
+                        key=lambda sample: (sample[3], sample[0]))
         x_base, y2_base, h_base = hist_base[1], hist_base[2], hist_base[3]
         y1_base = y2_base-h_base
+        candidate = (x_base, y1_base, y2_base, h_base)
         saved = state.get("clip_baseline")
         if saved is not None:
             sx, sy1, sy2, sh = saved
-            if (sh >= h_base and abs(px-sx) <= OCCLUSION_TOP_DRIFT_HEIGHTS*sh
-                    and abs(y1-sy1) <= OCCLUSION_TOP_DRIFT_HEIGHTS*sh):
-                if require_taller:
+            if abs(px-sx) <= OCCLUSION_TOP_DRIFT_HEIGHTS*sh and abs(y1-sy1) <= OCCLUSION_TOP_DRIFT_HEIGHTS*sh:
+                if sh > h_base:
+                    if refresh_only:
+                        return None
+                    x_base, y1_base, y2_base, h_base = sx, sy1, sy2, sh
+                elif refresh_only and candidate == saved:
                     return None
-                x_base, y1_base, y2_base, h_base = sx, sy1, sy2, sh
         samples = earlier+[(timestamp, px, py, height)]
         y1_vals = [s[2]-s[3] for s in samples]
         x_vals = [s[1] for s in samples]
@@ -367,7 +371,7 @@ class VehicleWaits:
             clipped = self._bottom_clipped_crossing(state, observation, timestamp, prev_obs) if continuing else None
             if clipped is not None:
                 saved = state.get("clip_baseline")
-                if saved is None or clipped[3] > saved[3]:
+                if saved is None or clipped[3] >= saved[3]:
                     state["clip_baseline"] = clipped
                 if keep_pending:
                     state["pending_crossing"] = {"from": prev_obs, "h_base": clipped[3], "recovered": 0}
@@ -376,7 +380,7 @@ class VehicleWaits:
             state["clip_baseline"] = None
             return True
         if continuing:
-            baseline = self._stationary_baseline(state, observation, timestamp, prev_obs, require_taller=True)
+            baseline = self._stationary_baseline(state, observation, timestamp, prev_obs, refresh_only=True)
             if baseline is not None:
                 state["clip_baseline"] = baseline
         return False
