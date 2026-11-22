@@ -1846,21 +1846,51 @@ def test_sustained_stationary_jitter_per_frame_cost_stays_bounded():
     assert q19_median < 3.0, f'Round 19 enqueue tail median {q19_median:.2f} ms'
     assert all(len(waits_q19.active[(0, 1+k)]['clip_baselines']._dom_queue) == 0 for k in range(6))
 
+    # Sol Round 20:
+    # 1. Queue compaction with > 64 queued entries genuinely enters multi-step compaction,
+    #    caps work per step at budget=64, and preserves surviving queue order.
     cb_bigq = _ClipBaselines()
-    cb_bigq.add((150., 218.5, 278.5, 60., 278.5-OCCLUSION_BOTTOM_SHARE*60., _rear_err(278.5, 60.)),
-                compact=False, dom_budget=[0])
-    cb_bigq.add((150., 215., 276., 61., 276.-OCCLUSION_BOTTOM_SHARE*61., _rear_err(276., 61.)),
-                compact=False, dom_budget=[0])
+    for i in range(500):
+        bx = 150.+0.001*i
+        cb_bigq.add((bx, 216., 276., 60., 276.-OCCLUSION_BOTTOM_SHARE*60., _rear_err(276., 60.)),
+                    compact=False, dom_budget=[0])
     started = time.perf_counter()
-    for i in range(1500):
-        cb_bigq.add((150.+1e-4*i, 216., 277., 61., 277.-OCCLUSION_BOTTOM_SHARE*61., _rear_err(277., 61.)),
+    for j in range(200):
+        bx = 150.+0.0005*j
+        cb_bigq.add((bx, 216., 277., 61., 277.-OCCLUSION_BOTTOM_SHARE*61., _rear_err(277., 61.)),
                     compact=False, dom_budget=[0])
     assert (time.perf_counter()-started)*1000. < 50.0
-    # Prune most entries so compaction runs, and confirm every compaction step respects budget=64.
-    cb_bigq.prune(150.145, 216.)
+    assert len(cb_bigq._dom_queue) == 199
+    # Prune all 500 h=60 entries (y1_hi=225.0 < 225.1) while keeping all 200 h=61 entries (y1_hi=225.15).
+    cb_bigq.prune(150.0, 225.1)
+    assert cb_bigq.needs_compact() and len(cb_bigq) == 200
+    expected_q = [(cb_bigq._x[q], cb_bigq._y1[q], cb_bigq._y2[q], cb_bigq._h[q])
+                  for q in cb_bigq._dom_queue if cb_bigq._alive[q]]
+    assert len(expected_q) == 199
+    compact_steps = 0
     while cb_bigq.needs_compact():
-        assert cb_bigq.maybe_compact(64) <= 64
-    assert len(cb_bigq) == len(cb_bigq._x) > 0
+        step_work = cb_bigq.maybe_compact(64)
+        assert 0 < step_work <= 64
+        compact_steps += 1
+    assert compact_steps >= 6
+    actual_q = [(cb_bigq._x[q], cb_bigq._y1[q], cb_bigq._y2[q], cb_bigq._h[q]) for q in cb_bigq._dom_queue]
+    assert actual_q == expected_q
+    assert len(cb_bigq) == len(cb_bigq._x) == 200
+
+    # 2. Deferred eviction makes forward progress even with a 1-unit per-track sweep budget
+    #    (300 tracks > sweep_budget=256): after 30 jitter frames at h=60 and 90 frames at h=80,
+    #    every track finishes its sweep and converges to a single dominant baseline.
+    waits_300 = book(side=lambda p: 270.-p[1])
+    for f in range(30):
+        dx = 0.02*(f % 15)
+        waits_300.observe([car(1+k, 280., x=150.+80.*k+dx, height=60., speed=0.) for k in range(300)],
+                          'RED', f/FPS, f+1, 1, unassigned=())
+    for f in range(30, 120):
+        waits_300.observe([car(1+k, 300., x=150.+80.*k+0.15, height=80., speed=0.) for k in range(300)],
+                          'RED', f/FPS, f+1, 1, unassigned=())
+    for k in range(300):
+        cb_k = waits_300.active[(0, 1+k)]['clip_baselines']
+        assert len(cb_k) == 1 and not cb_k.has_dom_sweep()
 
 
 def test_missed_frame_clears_crossing_clip_evidence_but_preserves_fragment_history():

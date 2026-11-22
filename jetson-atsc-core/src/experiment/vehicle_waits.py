@@ -571,7 +571,7 @@ class _ClipBaselines:
             return copied
         if self._dom_sweep is not None:
             new_dom = mapping.get(self._dom_sweep[0])
-            self._dom_sweep = (new_dom, -1) if (new_dom is not None and shadow._alive[new_dom]) else None
+            self._dom_sweep = (new_dom, -2) if (new_dom is not None and shadow._alive[new_dom]) else None
         self._dom_queue = q_remapped
         self._x, self._y1, self._y2 = shadow._x, shadow._y1, shadow._y2
         self._h, self._rear, self._err = shadow._h, shadow._rear, shadow._err
@@ -624,7 +624,7 @@ class _ClipBaselines:
             if dominated:
                 return
         if self._dom_sweep is None:
-            self._dom_sweep = (slot, -1)
+            self._dom_sweep = (slot, -2)
         else:
             q_dq.append(slot)
 
@@ -638,7 +638,7 @@ class _ClipBaselines:
             while self._dom_sweep is None and self._dom_queue and checked < budget:
                 cand = self._dom_queue.popleft()
                 if cand < len(alive) and alive[cand]:
-                    self._dom_sweep = (cand, -1)
+                    self._dom_sweep = (cand, -2)
                 else:
                     checked += 1
             if self._dom_sweep is None:
@@ -651,13 +651,15 @@ class _ClipBaselines:
             if pos < 0:
                 ra = OCCLUSION_TOP_DRIFT_HEIGHTS*ah
                 ax_lo, ax_hi, ay_lo, ay_hi, arear_lo = ax-ra, ax+ra, ay1-ra, ay1+ra, arear-aerr
-                checked += 1
-                if not self._root_may_be_dominated(ax, ay1, ah, arear_lo, ax_lo, ax_hi, ay_lo, ay_hi):
-                    self._dom_sweep = None
-                    continue
+                if pos == -2:
+                    checked += 1
+                    if not self._root_may_be_dominated(ax, ay1, ah, arear_lo, ax_lo, ax_hi, ay_lo, ay_hi):
+                        self._dom_sweep = None
+                        continue
+                    self._dom_sweep = (dom_slot, -1)
+                    if checked >= budget:
+                        break
                 rem = budget-checked
-                if rem <= 0:
-                    break
                 if checked > 1 and rem < min(32, budget):
                     break
                 ev_b = [rem]
