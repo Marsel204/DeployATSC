@@ -8,6 +8,9 @@ from src.experiment.identity_contracts import ASSOCIATION_VERSION
 
 
 class PersistentVehicleWaits(VehicleWaits):
+    # The resolver owns identity; native fragment continuation never runs here.
+    fragment_continuation = False
+
     def __init__(self, run_id, policy, side, identity_policy):
         super().__init__(run_id, replace(policy, association_gap_sec=identity_policy.occlusion_retention_sec), side)
         self.identity_policy = identity_policy

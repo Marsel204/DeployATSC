@@ -151,7 +151,8 @@
     const result={movement_id:$('movementId').value.trim(),offset_sec:Number($('sourceOffset').value),
       stopped_speed_mps:Number($('stoppedSpeed').value),moving_speed_mps:Number($('movingSpeed').value),
       stop_persistence_sec:Number($('stopPersistence').value),max_gap_sec:Number($('gapLimit').value),
-      association_gap_sec:Number($('associationLimit').value),debounce_frames:Number($('phaseDebounce').value),phase_ratio:Number($('phaseRatio').value)};
+      association_gap_sec:Number($('associationLimit').value),debounce_frames:Number($('phaseDebounce').value),phase_ratio:Number($('phaseRatio').value),
+      fragment_continuation:$('fragmentContinuation').checked};
     if(Object.values(result).some(value=>typeof value==='number' && !Number.isFinite(value)))throw new Error('Measurement settings must be finite numbers.');
     return result;
   }
@@ -311,6 +312,7 @@
       $('sharedTest').checked=data.shared_source_test;
       const settings={movementId:'movement_id',sourceOffset:'offset_sec',stoppedSpeed:'stopped_speed_mps',movingSpeed:'moving_speed_mps',stopPersistence:'stop_persistence_sec',gapLimit:'max_gap_sec',associationLimit:'association_gap_sec',phaseDebounce:'debounce_frames',phaseRatio:'phase_ratio'};
       for(const[id,key]of Object.entries(settings))$(id).value=data.policy[key];
+      $('fragmentContinuation').checked=data.policy.fragment_continuation===true;
       $('vehicleIdentityMode').value=data.vehicle_identity?.mode || 'native';
       if(data.vehicle_identity){$('identityRetention').value=data.vehicle_identity.occlusion_retention_sec;$('estimateGap').value=data.vehicle_identity.max_estimated_gap_sec;}
       $('scheduleEnabled').checked=!!data.schedule_comparison?.enabled;

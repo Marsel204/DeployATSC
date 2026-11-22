@@ -3,10 +3,12 @@ from __future__ import annotations
 
 from collections import deque
 from src.common.json_data import clone as deepcopy
+from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import datetime, timezone
 from functools import lru_cache, partial
 import hashlib
+import math
 import importlib.metadata
 import json
 from pathlib import Path
@@ -58,6 +60,39 @@ def source_identity(value):
     value=resolve_source(value)
     if value.isdigit():value="/dev/video"+value
     return str(Path(value).resolve()) if "://" not in value else value
+
+
+def _finite_box(values):
+    if isinstance(values,(str,bytes,Mapping)):return None
+    try:box=tuple(float(value) for value in values[:4])
+    except (TypeError,IndexError,ValueError,OverflowError,KeyError):return None
+    if len(box)!=4 or not all(map(math.isfinite,box)):return None
+    w,h=box[2]-box[0],box[3]-box[1]
+    return box if w>0 and h>0 and all(map(math.isfinite,(w,h,(box[0]+box[2])/2,w*h))) else None
+
+
+def _box(track):
+    """The raw image box as finite floats, or None (continuation evidence only)."""
+    return _finite_box(getattr(track,"bbox",None))
+
+
+def _source_box(track):
+    """The detector's raw box behind a tracked box, or None."""
+    return _finite_box(getattr(track,"source_bbox",None))
+
+
+def _withheld_boxes(tracks,epoch):
+    """This frame's detections the native tracker withheld, as raw boxes, or None.
+
+    Only a DetectorTracker frame carries this; any other detector, a predict
+    fallback, a frame from another tracker epoch, or a frame with an emitted
+    box whose raw source detection is unattributed yields None (unavailable)."""
+    withheld=getattr(tracks,"withheld",None)
+    if withheld is None or isinstance(withheld,(str,bytes,Mapping)) or getattr(tracks,"epoch",None)!=epoch:return None
+    if any(_box(track) is None or _source_box(track) is None for track in tracks):return None
+    try:boxes=tuple(_finite_box(item[0]) for item in withheld)
+    except (TypeError,IndexError,KeyError):return None
+    return None if None in boxes else boxes
 
 
 class ObservationConflict(RuntimeConflict):
@@ -118,6 +153,8 @@ class ObservationSession:
         self.policy=RunPolicy(**payload.get("policy",{}))
         self.identity_policy=IdentityPolicy(**(payload.get('vehicle_identity') or {}))
         self.identity_features=IdentityFeatureExtractor() if self.identity_policy.mode=='persistent_v1' else None
+        # Native fragment continuation runs only in the legacy per-native-ID ledger.
+        self.fragment_continuation=self.policy.fragment_continuation and self.identity_features is None
         self.schedule_policy=SchedulePolicy(**(payload.get('schedule_comparison') or {}))
         self.persist_mode=payload.get("persist_mode","inline")
         self.persist_condition=threading.Condition();self.persist_thread=None;self.persist_pending=False;self.persist_inflight=False;self.persist_stopping=False
@@ -173,6 +210,11 @@ class ObservationSession:
                 self.detectors[role]=detector_factory(str(model),conf_threshold=.28,imgsz=640)
             for role in self.detectors:
                 self.detectors[role].max_gap_sec=self.policy.max_gap_sec
+            # Withheld-detection capture is opt-in: only native fragment continuation
+            # uses it (persistent identity never continues fragments), so no other run pays for it.
+            if self.fragment_continuation:
+                enable=getattr(self.detectors["acquisition"],"enable_withheld_evidence",None)
+                if enable is not None:enable()
             requested_profile=payload.get("tracking_profile","baseline")
             profile=apply_tracking_profile(self.detectors["acquisition"],requested_profile)
             self.tracking_profile={**profile,"requested":requested_profile,
@@ -268,12 +310,6 @@ class ObservationSession:
             predictor=getattr(getattr(detector,"model",None),"predictor",None)
             neural_device=str(getattr(predictor,"device","injected/unknown"))
             with self.lock:
-                observations=[VehicleObservation(v.track_id,v.class_name,
-                    v.velocity_mps if getattr(v,"velocity_valid",False) else None,
-                    v.bottom_center,stable_id=getattr(v,"stable_id",False),
-                    velocity_valid=getattr(v,"velocity_valid",False),
-                    in_region=calibration.homography.is_in_approach_corridor(*v.bottom_center),
-                    epoch=getattr(v,"epoch",detector.epoch)) for v in tracks]
                 if identity_evidence is not None:
                     resolution=self.engine.observe_acquisition(frame,packet.timestamp,packet.sequence,(),generation=generation,
                         identity_evidence=identity_evidence.detections,camera_stable=identity_evidence.camera_stable,
@@ -294,7 +330,21 @@ class ObservationSession:
                             labels.append((tuple(int(x) for x in item.bbox),label))
                     labels=tuple(labels)
                 else:
-                    self.engine.observe_acquisition(frame,packet.timestamp,packet.sequence,observations,generation=generation)
+                    continuing=getattr(self,"fragment_continuation",False)
+                    observations=[VehicleObservation(v.track_id,v.class_name,
+                        v.velocity_mps if getattr(v,"velocity_valid",False) else None,
+                        v.bottom_center,stable_id=getattr(v,"stable_id",False),
+                        velocity_valid=getattr(v,"velocity_valid",False),
+                        in_region=calibration.homography.is_in_approach_corridor(*v.bottom_center),
+                        epoch=getattr(v,"epoch",detector.epoch),
+                        bbox=_box(v) if continuing else None,
+                        source_bbox=_source_box(v) if continuing else None) for v in tracks]
+                    if continuing:
+                        self.engine.observe_acquisition(frame,packet.timestamp,packet.sequence,observations,generation=generation,
+                            unassigned_boxes=_withheld_boxes(tracks,detector.epoch))
+                    else:
+                        # Default-off: the historical call contract, no continuation evidence.
+                        self.engine.observe_acquisition(frame,packet.timestamp,packet.sequence,observations,generation=generation)
                     labels=None
                 data=self.runtime[packet.role]
                 data["frames"]+=1;data["preview_frames"]+=1;data["inference_total_ms"]+=elapsed;data["last_inference_ms"]=elapsed
@@ -511,7 +561,12 @@ class ObservationSession:
                 label=f"#{v.track_id} {v.class_name}" if getattr(v,"stable_id",False) else v.class_name+" (ID unknown)"
                 if role=="acquisition":
                     state=self.engine.waits.active.get((getattr(v,"epoch",0),v.track_id))
-                    if state and "red_wait_sec" in state["row"]:label+=f" | red wait {state['row']['red_wait_sec']:.1f}s"
+                    if state and "red_wait_sec" in state["row"]:
+                        row=state["row"]
+                        if getattr(v,"stable_id",False) and row.get("identity_links") and row["local_id"]!=v.track_id:
+                            # One physical vehicle: show its row's ID; keep the raw native ID visible.
+                            label=f"#{row['local_id']} {v.class_name} (native #{v.track_id})"
+                        label+=f" | red wait {row['red_wait_sec']:.1f}s"
                 labels.append((p,label))
         return tuple(labels)
 

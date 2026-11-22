@@ -86,7 +86,12 @@ class ObservationEngine:
             for active in self.waits.active.values():active['schedule_candidate']=cutoff
 
     def observe_acquisition(self, frame, timestamp, sequence, observations, *, generation=None,
-                            identity_evidence=None, camera_stable=True, gap_evidence_healthy=True):
+                            identity_evidence=None, camera_stable=True, gap_evidence_healthy=True,
+                            unassigned_boxes=None):
+        """``unassigned_boxes``: this frame's actual detections the native tracker
+        withheld (veto-only evidence for opt-in fragment continuation); None (the
+        default) declares that evidence unavailable, so no link is made. Runs
+        without continuation and persistent identity ignore it."""
         with self.lock:
             if self.closed or (generation is not None and generation != self.generation):return
             # Reject sequence retries before committing the clock or continuity gaps.
@@ -126,7 +131,7 @@ class ObservationEngine:
                     row = state['row']
                     if row['completed']:self.identities.retire(*identity,crossed=row['crossed_stop_line'])
                 return resolution
-            self.waits.observe(observations, measured, timestamp, sequence, cycle)
+            self.waits.observe(observations, measured, timestamp, sequence, cycle, unassigned=unassigned_boxes)
 
     def predict(self, request_id, timestamp=None, *, provenance=None, frame=None, analyze=None):
         with self.lock:

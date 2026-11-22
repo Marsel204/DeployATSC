@@ -28,6 +28,10 @@ class RunPolicy:
     debounce_frames: int = 3
     phase_ratio: float = 0.08
     los_method: str | None = None
+    # Native IDs only, opt-in: continue a just-lost vehicle row with a newborn
+    # native ID when the pair is mutually unique and no other observed box
+    # competes. The handoff interval is always unknown coverage.
+    fragment_continuation: bool = False
 
     def __post_init__(self):
         numeric=("offset_sec","stopped_speed_mps","moving_speed_mps","stop_persistence_sec",
@@ -37,6 +41,8 @@ class RunPolicy:
                 raise ValueError(f"{key} must be a number")
         if isinstance(self.debounce_frames,bool) or not isinstance(self.debounce_frames,int):
             raise ValueError("Signal debounce requires a whole number of frames")
+        if not isinstance(self.fragment_continuation,bool):
+            raise ValueError("fragment_continuation must be true or false")
         for key, value in vars(self).items():
             if isinstance(value, (int, float)) and not math.isfinite(value):
                 raise ValueError(f"{key} must be finite")
@@ -64,6 +70,13 @@ class VehicleObservation:
     velocity_valid: bool = False
     in_region: bool = True
     epoch: int = 0
+    # Bounding-box height in pixels: the image scale for motion gates.
+    height: float | None = None
+    # Raw image box (x1, y1, x2, y2): competing-box checks for continuation.
+    bbox: tuple[float, float, float, float] | None = None
+    # The detector's own post-NMS box behind ``bbox`` when ``bbox`` is a tracker
+    # (Kalman-smoothed) state. Continuation lets both veto another vehicle's link.
+    source_bbox: tuple[float, float, float, float] | None = None
 
 
 def vehicle_key(run_id: str, epoch: int, local_id: int) -> str:

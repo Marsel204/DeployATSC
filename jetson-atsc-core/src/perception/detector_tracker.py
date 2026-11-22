@@ -84,6 +84,9 @@ class TrackedVehicle:
         self.stable_id = stable_id
         self.epoch = epoch
         self.velocity_valid = False
+        # The post-NMS detection the tracker matched to this output (raw, not
+        # Kalman-smoothed), when withheld-evidence capture attributed it; else None.
+        self.source_bbox: Optional[Tuple[float, float, float, float]] = None
 
         # Contact point: center of bottom edge
         self.bottom_center = (
@@ -99,6 +102,167 @@ class TrackedVehicle:
     def is_stopped(self) -> bool:
         """Determines if vehicle is queued / stationary (speed <= 1.0 m/s and persistent >= 5 frames)."""
         return getattr(self, "obs_count", 5) >= 5 and self.velocity_mps <= 1.0
+
+
+class TrackedFrame(list):
+    """One frame's tracked vehicles (a plain list to every caller), plus the
+    frame's actual post-NMS detections the native tracker did not emit.
+
+    ``withheld`` holds (bbox, class_name, confidence) for vehicle-class boxes
+    ByteTrack discarded or kept unconfirmed in this very frame, identified by
+    the tracker's own detection index (never by box matching, which tracker
+    smoothing would make a guess). ``None`` means that evidence is unavailable
+    (predict fallback, injected model, incomplete capture): callers must then
+    not infer anything that needs it. Evidence only; never a vehicle.
+
+    Whenever ``withheld`` is not None, every vehicle of the frame also carries
+    ``source_bbox``: the raw detection the tracker emitted it from, by the same
+    index. A smoothed emitted box can sit outside a gate its raw detection is in.
+    """
+    __slots__ = ("withheld", "epoch")
+
+    def __init__(self, vehicles=(), withheld=None, epoch=None):
+        super().__init__(vehicles)
+        self.withheld = withheld
+        self.epoch = epoch
+
+
+class _TrackerProvenance:
+    """Record each native tracker update's image, input detections and output indices.
+
+    Installed as an ``on_predict_batch_start`` callback, which runs after the
+    installed Ultralytics ``on_predict_start`` created the trackers and before
+    its ``on_predict_postprocess_end`` calls ``tracker.update``; so the order
+    relative to the tracker callbacks is fixed by the predictor, not by
+    registration order. Records only while armed by DetectorTracker.track.
+
+    Each call is ``(image, evidence)``: ``image`` is the array the tracker was
+    given (the result's ``orig_img``), so a call is attributed to its own image
+    even when the installed Ultralytics skips the update for an image with no
+    detections (8.3.x); ``evidence`` is None when it could not be read.
+    """
+
+    def __init__(self) -> None:
+        self.armed = False
+        self.calls: List[Tuple[Any, Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]]] = []
+
+    def __call__(self, predictor) -> None:
+        if getattr(getattr(predictor, "args", None), "mode", None) != "track":
+            return
+        for tracker in getattr(predictor, "trackers", ()) or ():
+            update = getattr(tracker, "update", None)
+            if update is None or getattr(update, "_atsc_provenance", None) is self:
+                continue
+            tracker.update = self._wrap(update)
+
+    def _wrap(self, update):
+        def recorded(results, *args, **kwargs):
+            tracks = update(results, *args, **kwargs)
+            if self.armed:
+                image = args[0] if args else kwargs.get("img")
+                try:
+                    xyxy = np.array(results.xyxy, dtype=np.float64).reshape(-1, 4)
+                    cls = np.array(results.cls, dtype=np.float64).reshape(-1)
+                    conf = np.array(results.conf, dtype=np.float64).reshape(-1)
+                    out = np.asarray(tracks)
+                    idx = out[:, -1].astype(int).copy() if out.ndim == 2 and len(out) else np.zeros(0, dtype=int)
+                    if not (len(xyxy) == len(cls) == len(conf)):raise ValueError("ragged detections")
+                    self.calls.append((image, (xyxy, cls, conf, idx)))
+                except Exception:
+                    # Unreadable evidence: poison this frame rather than guess.
+                    self.calls.append((image, None))
+            return tracks
+        recorded._atsc_provenance = self
+        return recorded
+
+
+_TRACKER_EVENTS = ("on_predict_start", "on_predict_postprocess_end")
+
+
+def _native_tracker_callbacks():
+    try:
+        from ultralytics.trackers import track as installed
+    except Exception:
+        return set()
+    return {getattr(installed, "on_predict_start", None), getattr(installed, "on_predict_postprocess_end", None)} - {None}
+
+
+def _tracker_callback_lists(model) -> List[list]:
+    """Each distinct registration list of the tracker events, on the model and its predictor.
+
+    The predictor normally shares the model's callback dict; a copied dict (or
+    copied lists) is handled too, and a shared list only once."""
+    found: Dict[int, list] = {}
+    for owner in (model, getattr(model, "predictor", None)):
+        callbacks = getattr(owner, "callbacks", None)
+        if not isinstance(callbacks, dict):
+            continue
+        for event in _TRACKER_EVENTS:
+            registered = callbacks.get(event)
+            if isinstance(registered, list):
+                found.setdefault(id(registered), registered)
+    return list(found.values())
+
+
+def _has_initialized_trackers(model) -> bool:
+    return bool(getattr(getattr(model, "predictor", None), "trackers", None))
+
+
+def _clear_uninitialized_tracker_state(model) -> None:
+    """Undo a tracker initialization that did not complete (e.g. ``BYTETracker.__init__`` raised).
+
+    An empty ``trackers`` placeholder would make 8.3.x skip registration and
+    initialization while its update callback indexes ``trackers[0]``; leftover
+    callbacks would stack with the pair 8.3.x registers on the retry."""
+    predictor = getattr(model, "predictor", None)
+    if predictor is not None and hasattr(predictor, "trackers") and not predictor.trackers:
+        delattr(predictor, "trackers")
+    if not _has_initialized_trackers(model):
+        _drop_tracker_callbacks(model)
+
+
+class _WithoutTrackerCallbacks:
+    """Detach the installed tracker callbacks for one untracked ``predict``.
+
+    Ultralytics 8.3.x runs ``tracker.update`` from ``on_predict_postprocess_end``
+    in predict mode too, so a detection-only fallback after a tracker error
+    would otherwise return tracker IDs (one-shot failure) or raise again
+    (repeated failure). When trackers exist the registrations are restored in
+    place afterwards, so the next ``track`` continues the same trackers; when
+    initialization never completed they stay removed (the retry registers one
+    fresh pair), even if the fallback itself raises."""
+
+    def __init__(self, model) -> None:
+        self.model = model
+        self.saved = []
+        native = _native_tracker_callbacks()
+        for registered in _tracker_callback_lists(model):
+            self.saved.append((registered, list(registered)))
+            registered[:] = [cb for cb in registered if getattr(cb, "func", cb) not in native]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        if _has_initialized_trackers(self.model):
+            for registered, original in self.saved:
+                registered[:] = original
+        else:
+            _clear_uninitialized_tracker_state(self.model)
+
+
+def _drop_tracker_callbacks(model) -> None:
+    """Remove the installed Ultralytics tracker callbacks before the predictor is dropped.
+
+    Ultralytics 8.3.x ``Model.track`` registers them whenever the predictor has
+    no trackers and appends rather than replaces, so after a reset each frame
+    would run ``tracker.update`` once per stacked registration. The next
+    ``track`` call registers exactly one fresh pair (on every version)."""
+    native = _native_tracker_callbacks()
+    if not native:
+        return
+    for registered in _tracker_callback_lists(model):
+        registered[:] = [cb for cb in registered if getattr(cb, "func", cb) not in native]
 
 
 class DetectorTracker:
@@ -143,8 +307,103 @@ class DetectorTracker:
         self.min_stopped_observations = 5
         self.last_seen_timestamp: float = 0.0
         self.epoch = 0
+        # Whether a stable tracker ID was emitted since this epoch's trackers were built.
+        self._emitted_stable_in_epoch = False
 
         self._load_model()
+
+    def enable_withheld_evidence(self) -> bool:
+        """Opt in to capturing each frame's tracker-withheld detections.
+
+        Off by default: only a run that uses the evidence (opt-in native
+        fragment continuation) pays the per-update capture. Without it every
+        TrackedFrame reports ``withheld=None`` (unavailable). Returns whether
+        capture is installed."""
+        self._attach_provenance()
+        return getattr(self, "_provenance", None) is not None
+
+    def _attach_provenance(self) -> None:
+        """Register the frame-local detection provenance hook once per model."""
+        if getattr(self, "_provenance", None) is not None:
+            return
+        add = getattr(self.model, "add_callback", None)
+        if add is None:
+            return
+        self._provenance = _TrackerProvenance()
+        add("on_predict_batch_start", self._provenance)
+
+    def _frame_evidence(self, results, calls) -> List[Tuple[Optional[tuple], Optional[tuple]]]:
+        """Per-image (withheld detections, emitted source boxes) from the recorded updates.
+
+        Calls are attributed by image identity, never by position: Ultralytics
+        8.3.x skips ``tracker.update`` for an image without detections, so a
+        mixed batch has fewer calls than images. An image with no call has
+        evidence only if it has no detections at all; an image with several
+        calls (stacked tracker callbacks) or an unattributable call has none,
+        reported as (None, None). ``sources`` aligns with the result's rows."""
+        images = [getattr(result, "orig_img", None) for result in results]
+        per_image: List[List[Any]] = [[] for _ in results]
+        for image, evidence in calls:
+            matches = [j for j, candidate in enumerate(images) if image is not None and candidate is image]
+            if len(matches) != 1:
+                return [(None, None)]*len(results)
+            per_image[matches[0]].append(evidence)
+        frames: List[Tuple[Optional[tuple], Optional[tuple]]] = []
+        for result, found in zip(results, per_image):
+            if len(found) == 1:
+                frames.append(self._evidence(result, found[0]))
+            elif not found:
+                boxes = getattr(result, "boxes", None)
+                frames.append(((), ()) if boxes is not None and len(boxes) == 0 else (None, None))
+            else:
+                frames.append((None, None))
+        return frames
+
+    def _evidence(self, result, call) -> Tuple[Optional[tuple], Optional[tuple]]:
+        """(withheld vehicle boxes, raw source box per emitted row), or (None, None)."""
+        if call is None:
+            return None, None
+        xyxy, cls, conf, idx = call
+        boxes = getattr(result, "boxes", None)
+        emitted_count = 0 if boxes is None else len(boxes)
+        if boxes is not None and boxes.id is not None:
+            if emitted_count != len(idx) or (len(idx) and (idx.min() < 0 or idx.max() >= len(xyxy))):
+                return None, None
+            emitted = set(idx.tolist())
+            order = idx.tolist()
+        elif emitted_count == 0:
+            emitted = set()         # all hidden (e.g. new tracks awaiting confirmation)
+            order = []
+        elif emitted_count == len(xyxy) and len(idx) == 0:
+            # Untracked passthrough: every detection is an observation, in detection order.
+            emitted = set(range(len(xyxy)))
+            order = list(range(len(xyxy)))
+        else:
+            return None, None
+        sources = []
+        for j in order:
+            if not np.isfinite(cls[j]):
+                return None, None
+            box = tuple(float(v) for v in xyxy[j])
+            if self.map_class(int(cls[j])) is not None and not np.isfinite(box).all():
+                return None, None
+            sources.append(box)
+        withheld = []
+        for j in range(len(xyxy)):
+            if j in emitted:
+                continue
+            if not np.isfinite(cls[j]):
+                return None, None
+            name = self.map_class(int(cls[j]))
+            if name is None:
+                continue
+            box = tuple(float(v) for v in xyxy[j])
+            if not np.isfinite(box).all() or not np.isfinite(conf[j]):
+                return None, None
+            if box[2] <= box[0] or box[3] <= box[1]:
+                continue
+            withheld.append((box, name, float(conf[j])))
+        return tuple(withheld), tuple(sources)
 
     def set_tracking_profile(self, name: str) -> None:
         """Select before tracking starts; reset_tracking preserves this choice."""
@@ -156,10 +415,12 @@ class DetectorTracker:
     def reset_tracking(self) -> None:
         """Start a new identity epoch without reloading the model weights."""
         self.epoch += 1
+        self._emitted_stable_in_epoch = False
         self.track_trajectories.clear()
         self.track_obs_counts.clear()
         self.last_seen_timestamp = 0.0
         if self.model is not None and hasattr(self.model, "predictor"):
+            _drop_tracker_callbacks(self.model)
             self.model.predictor = None
 
     def _load_model(self) -> None:
@@ -207,7 +468,7 @@ class DetectorTracker:
         self,
         frames: List[np.ndarray],
         timestamp: Optional[float] = None,
-    ) -> List[List[TrackedVehicle]]:
+    ) -> List[TrackedFrame]:
         """
         Performs batched inference and multi-object tracking across 1 or 2 frames.
 
@@ -226,6 +487,21 @@ class DetectorTracker:
         if self.is_tensorrt and len(frames)!=1:
             raise ValueError("This TensorRT engine accepts exactly one frame per call")
 
+        # Opt-in (enable_withheld_evidence): without it no capture runs and evidence is unavailable.
+        provenance = getattr(self, "_provenance", None)
+        tracked = False
+        if provenance is not None:
+            provenance.calls = []
+            provenance.armed = True
+        # A failed first initialization leaves no trackers: retry it with one fresh registration.
+        _clear_uninitialized_tracker_state(self.model)
+        if not _has_initialized_trackers(self.model) and getattr(self, "_emitted_stable_in_epoch", False):
+            # Trackers are rebuilt after this epoch emitted IDs (8.3.0's BYTETracker.__init__
+            # restarts the ID counter): a new epoch, so (epoch, local_id) never repeats.
+            self.epoch += 1
+            self.track_trajectories.clear()
+            self.track_obs_counts.clear()
+            self._emitted_stable_in_epoch = False
         # Batched inference via Ultralytics track
         try:
             results = self.model.track(
@@ -238,23 +514,42 @@ class DetectorTracker:
                 tracker=self.tracking_profile.tracker_argument,
                 verbose=False,
             )
+            tracked = True
         except Exception as e:
             # Fallback if tracker config fails or tracking fails
             print(f"[Detector Tracker] Warning in track(): {e}. Running predict without tracker...")
-            results = self.model.predict(
-                source=frames,
-                conf=self.conf_threshold,
-                iou=self.iou_threshold,
-                imgsz=self.imgsz,
-                device=getattr(self,"inference_device",self.device),
-                verbose=False,
-            )
+            if provenance is not None:
+                provenance.armed = False
+            # Detection only: 8.3.x would otherwise run the tracker callbacks in predict mode too.
+            with _WithoutTrackerCallbacks(self.model):
+                results = self.model.predict(
+                    source=frames,
+                    conf=self.conf_threshold,
+                    iou=self.iou_threshold,
+                    imgsz=self.imgsz,
+                    device=getattr(self,"inference_device",self.device),
+                    verbose=False,
+                )
+        finally:
+            if provenance is not None:
+                provenance.armed = False
+        calls = provenance.calls if provenance is not None else []
+        if provenance is not None:
+            provenance.calls = []
+        results = list(results)
+        if tracked and provenance is not None:
+            evidence = self._frame_evidence(results, calls)
+        else:
+            evidence = [(None, None)]*len(results)
 
-        batch_outputs: List[List[TrackedVehicle]] = []
+        batch_outputs: List[TrackedFrame] = []
 
-        for res in results:
-            frame_vehicles: List[TrackedVehicle] = []
+        for index, res in enumerate(results):
+            withheld, sources = evidence[index]
             boxes = getattr(res, "boxes", None)
+            if sources is None or len(sources) != (0 if boxes is None else len(boxes)):
+                withheld = sources = None   # no attributed source for some emitted box: no evidence
+            frame_vehicles = TrackedFrame(withheld=withheld, epoch=self.epoch)
             if boxes is not None and len(boxes) > 0:
                 xyxy_arr = boxes.xyxy.cpu().numpy()
                 conf_arr = boxes.conf.cpu().numpy()
@@ -285,7 +580,11 @@ class DetectorTracker:
                         stable_id=boxes.id is not None,
                         epoch=self.epoch,
                     )
+                    if sources is not None:
+                        v.source_bbox = sources[i]
                     frame_vehicles.append(v)
+                    if boxes.id is not None:
+                        self._emitted_stable_in_epoch = True
 
             batch_outputs.append(frame_vehicles)
 

@@ -24,6 +24,10 @@ See the [operator guide](docs/TWO_CAMERA_OBSERVATION.md) and [dated validation r
 Optional per-run [tracking profiles](docs/TRACKING_PROFILES.md) document `low_score`,
 its fixed-night-camera evidence, payload selection, rollback and validation limits.
 The default remains `baseline`.
+
+Experimental [native fragment continuation](docs/NATIVE_FRAGMENT_CONTINUATION.md) (off by default)
+keeps one ledger row when a native tracker ID is briefly lost and replaced; it explains the
+dashboard checkbox, the API field and the accounting rules.
 ---
 
 ## 1. System Architecture

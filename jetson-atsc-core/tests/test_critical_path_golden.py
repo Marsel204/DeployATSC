@@ -12,11 +12,27 @@ def without_tracking_profile(value):
     return value
 
 
+# The baseline predates RunPolicy.fragment_continuation. Only its default
+# (off) value is dropped, from the policy object and from JSON embedded in
+# CSV cells; an enabled switch would still differ. The scripted clip's tracks
+# are compared in full, so the default must leave every row unchanged.
+def without_default_continuation(value):
+    if isinstance(value,dict):
+        return {k:without_default_continuation(v) for k,v in value.items() if not (k=='fragment_continuation' and v is False)}
+    if isinstance(value,list):return [without_default_continuation(v) for v in value]
+    if isinstance(value,str):return value.replace(', ""fragment_continuation"": false','').replace(', "fragment_continuation": false','')
+    return value
+
+
 def normalize(value):
+    return _normalize(without_default_continuation(value))
+
+
+def _normalize(value):
     # Additive profile metadata is checked in test_tracking_profile_sessions;
     # the historical tree predates it. All existing behavior remains compared.
-    if isinstance(value,dict):return {key:normalize(item) for key,item in value.items() if key not in ('run_id','commit_sequence','source_hashes','package_versions','persist_background_requests','persist_background_commits','persist_coalesced_requests','persist_worker_errors','tracking_profile') and not key.endswith('_utc')}
-    if isinstance(value,list):return [normalize(item) for item in value]
+    if isinstance(value,dict):return {key:_normalize(item) for key,item in value.items() if key not in ('run_id','commit_sequence','source_hashes','package_versions','persist_background_requests','persist_background_commits','persist_coalesced_requests','persist_worker_errors','tracking_profile') and not key.endswith('_utc')}
+    if isinstance(value,list):return [_normalize(item) for item in value]
     if isinstance(value,str) and '""tracking_profile""' in value:
         # CSV provenance embeds JSON; keep every other cell/value and the format.
         import csv
