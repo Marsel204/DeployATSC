@@ -21,6 +21,17 @@ MAX_HEIGHT_RATIO = 1.5
 # Without moving-motion evidence a newborn nearby is as likely a neighbour as
 # the same vehicle, so only a flicker-length gap may be bridged.
 STATIC_CONTINUATION_MAX_GAP_SEC = MIN_FIT_SPAN_SEC
+# Bottom-edge occlusion on a stationary vehicle clips y2 upward while the top
+# edge y1 stays pinned. That shrinkage must never fabricate upward velocity, and
+# when unambiguous it anchors reappearance on the unoccluded top-center.
+OCCLUSION_SHRINK_RATIO = .75
+OCCLUSION_BOTTOM_SHARE = .7
+OCCLUSION_TOP_DRIFT_HEIGHTS = .15
+OCCLUSION_STATIC_TOP_SPEED = .35
+OCCLUSION_MAX_GAP_SEC = .35
+OCCLUSION_TOP_GATE_HEIGHTS = .25
+OCCLUSION_BOTTOM_MARGIN_HEIGHTS = .15
+OCCLUSION_MAX_RECOVERY_RATIO = 1.2
 # Another observed box (any class, size or ID state) covering this much of the
 # smaller of it and the newborn, with footpoints this close (in smaller-box
 # heights), may be the same body or its neighbour: the link is ambiguous.
@@ -43,7 +54,7 @@ def _height(observation):
 
 
 def _fit(history):
-    """Least-squares image velocity over timed (t, x, y, height) samples."""
+    """Least-squares (vx, vy_bottom, vy_top) over timed (t, x, y, height) samples."""
     if len(history) < MIN_FIT_SAMPLES or history[-1][0]-history[0][0] < MIN_FIT_SPAN_SEC-1e-9:
         return None
     times = [h[0] for h in history]
@@ -51,11 +62,13 @@ def _fit(history):
     denominator = sum((t-mean)**2 for t in times)
     if denominator <= 0:
         return None
-    def slope(index):
-        values = [h[index] for h in history]
+    def slope(values):
         centre = sum(values)/len(values)
         return sum((t-mean)*(v-centre) for t, v in zip(times, values))/denominator
-    return slope(1), slope(2)
+    vx = slope([h[1] for h in history])
+    vy = slope([h[2] for h in history])
+    vy_top = slope([h[2]-h[3] for h in history])
+    return (vx, vy, vy_top) if all(map(math.isfinite, (vx, vy, vy_top))) else None
 
 
 def _raw_box(box):
@@ -82,7 +95,12 @@ def _competitors(observations, unassigned):
         if o.bbox is not None:
             box = _raw_box(o.bbox)
             if box is None:return None
-        found.append((o, o.point, _height(o), box))
+        try:px, py = float(o.point[0]), float(o.point[1])
+        except (TypeError, ValueError, IndexError, OverflowError):return None
+        if not (math.isfinite(px) and math.isfinite(py)):return None
+        h = _height(o)
+        if h is not None and not math.isfinite(py-h):return None
+        found.append((o, (px, py), h, box))
         raw_source = getattr(o, "source_bbox", None)
         if raw_source is not None:
             source = _raw_box(raw_source)
@@ -329,9 +347,11 @@ class VehicleWaits:
                 recent = (previous is not None and not previous.get("handoff") and
                           0 < timestamp-previous["time"] <= self.policy.max_gap_sec+1e-9)
                 height = _height(observation)
-                if not recent or height is None:history.clear()
-                if height is not None:
-                    history.append((timestamp, float(observation.point[0]), float(observation.point[1]), height))
+                px, py = float(observation.point[0]), float(observation.point[1])
+                valid_sample = height is not None and all(map(math.isfinite, (px, py, py-height)))
+                if not recent or not valid_sample:history.clear()
+                if valid_sample:
+                    history.append((timestamp, px, py, height))
             state["previous"] = {"time": timestamp, "sequence": sequence,
                 "phase": str(phase), "cycle": cycle_id, "valid_motion": valid_motion,
                 "point": observation.point}
@@ -393,30 +413,82 @@ class VehicleWaits:
         if not newborns:return
         present = {(o.epoch, o.local_id) for o in observations if o.local_id is not None and o.stable_id}
         lost = []
+        # Lost stationary or short-lived vehicles within OCCLUSION_MAX_GAP_SEC cannot
+        # link past STATIC_CONTINUATION_MAX_GAP_SEC (or with <3 sightings), but still
+        # veto extended occlusion-tail links when any occlusion candidate is present.
+        static_vetoes = []
+        occlusion_count = 0
         for identity, state in self.active.items():
             row, previous, history = state["row"], state["previous"], state.get("history")
             if identity in present or row["completed"] or previous is None or not history:continue
-            if row["vehicle_id"] not in self.records or len(row.get("identity_links", ())) >= MAX_LINKS_PER_ROW:continue
+            if row["vehicle_id"] not in self.records:continue
             dt = timestamp-previous["time"]
             if not 0 < dt <= self.policy.max_gap_sec+1e-9:continue
             last_time, x, y, height = history[-1]
+            if last_time != previous["time"]:continue
+            y1_last = y-height
             # A fragment seen in fewer than MIN_FIT_SAMPLES frames has no position or
-            # size consistency to continue (junction f475: a one-frame edge sliver).
-            if last_time != previous["time"] or len(history) < MIN_FIT_SAMPLES:continue
-            motion = _fit(history)
-            fitted = motion is not None and math.hypot(*motion) >= MIN_MOVING_HEIGHTS_PER_SEC*height
+            # size consistency to continue (junction f475: a one-frame edge sliver),
+            # but its last box still vetoes extended occlusion-tail links.
+            if len(history) < MIN_FIT_SAMPLES or len(row.get("identity_links", ())) >= MAX_LINKS_PER_ROW:
+                if dt <= OCCLUSION_MAX_GAP_SEC+1e-9:
+                    static_vetoes.append((identity, x, y, y1_last, height))
+                continue
+            fitted_motion = _fit(history)
+            # Require two consecutive earlier samples to support the taller baseline
+            # (isolated tall outlier frames must not turn a stationary track into an occlusion tail).
+            earlier = list(history)[:-1]
+            baseline = max((a if a[3] <= b[3] else b for a, b in zip(earlier, earlier[1:])),
+                           key=lambda sample: sample[3])
+            _, _, y2_base, h_base = baseline
+            occlusion_tail = False
+            pred_vx = pred_vy = 0.
+            fitted = False
+            if fitted_motion is not None:
+                vx, vy, vy_top = fitted_motion
+                top_speed = math.hypot(vx, vy_top)
+                dh_dt = vy-vy_top
+                y1_vals = [s[2]-s[3] for s in history]
+                x_vals = [s[1] for s in history]
+                occlusion_tail = (
+                    height <= OCCLUSION_SHRINK_RATIO*h_base
+                    and dh_dt < -OCCLUSION_STATIC_TOP_SPEED*h_base
+                    and (y2_base-y) >= OCCLUSION_BOTTOM_SHARE*(h_base-height)
+                    and max(y1_vals)-min(y1_vals) <= OCCLUSION_TOP_DRIFT_HEIGHTS*h_base
+                    and max(x_vals)-min(x_vals) <= OCCLUSION_TOP_DRIFT_HEIGHTS*h_base
+                    and top_speed < OCCLUSION_STATIC_TOP_SPEED*h_base
+                )
+                # Whenever the bottom retreats upward while shrinking, qualify motion from
+                # the top-edge fit against the taller baseline so shrinkage never promotes a
+                # slow/stationary car to moving; when shrinkage dominates (vy_top > dh_dt),
+                # predict vertical motion from the top edge too (preserving horizontal vx).
+                shrinking_up = vy < 0 and dh_dt < 0
+                bottom_clipped = shrinking_up and vy_top > dh_dt
+                pred_vx = vx
+                pred_vy = min(0., vy_top) if bottom_clipped else vy
+                qual_vy = min(0., vy_top) if shrinking_up else vy
+                speed_ref = max(s[3] for s in history) if shrinking_up else height
+                fitted = not occlusion_tail and math.hypot(pred_vx, qual_vy) >= MIN_MOVING_HEIGHTS_PER_SEC*speed_ref
             if fitted:
                 gate = CONTINUATION_BASE_HEIGHTS+CONTINUATION_HEIGHTS_PER_SEC*dt
+                lost.append((identity, state, dt, (x+pred_vx*dt, y+pred_vy*dt), height, gate, True, None))
+            elif occlusion_tail and dt <= OCCLUSION_MAX_GAP_SEC+1e-9:
+                occlusion = (x, y1_last, y, height, y2_base, h_base)
+                lost.append((identity, state, dt, (x, y1_last), h_base, OCCLUSION_TOP_GATE_HEIGHTS, False, occlusion))
+                occlusion_count += 1
             elif dt <= STATIC_CONTINUATION_MAX_GAP_SEC+1e-9:
-                motion = (0., 0.); gate = CONTINUATION_BASE_HEIGHTS
+                lost.append((identity, state, dt, (x, y), height, CONTINUATION_BASE_HEIGHTS, False, None))
+                static_vetoes.append((identity, x, y, y1_last, height))
+            elif dt <= OCCLUSION_MAX_GAP_SEC+1e-9:
+                static_vetoes.append((identity, x, y, y1_last, height))
             else:continue
-            lost.append((identity, state, dt, (x+motion[0]*dt, y+motion[1]*dt), height, gate, fitted))
         if not lost:return
         if unassigned is None:
             # Without the frame's withheld detections a competitor may be invisible: do not guess.
             self.continuation_unavailable_frames += 1
             return
-        if len(newborns)*len(lost) > MAX_PAIR_CHECKS:
+        pair_checks = len(newborns)*len(lost)+min(len(newborns), occlusion_count)*len(static_vetoes)
+        if pair_checks > MAX_PAIR_CHECKS:
             self.continuation_skipped_frames += 1
             return
         # Validate every supplied observation/source/unassigned box before matching:
@@ -427,57 +499,122 @@ class VehicleWaits:
             return
         # The raw detection a newborn was emitted from (``source_bbox``) is the same
         # vehicle seen before smoothing: it widens ambiguity, never acceptance.
-        source_points = []
+        source_anchors = []
         for _, o, _ in newborns:
             raw = getattr(o, "source_bbox", None)
             source = None if raw is None else _raw_box(raw)
-            source_points.append(None if source is None else ((source[0]+source[2])/2, source[3]))
+            if source is None:
+                source_anchors.append(None)
+            else:
+                sx = (source[0]+source[2])/2
+                source_anchors.append(((sx, source[3]), (sx, source[1])))
         # Degrees on position alone: class and size do not make a nearby box less of a competitor.
         new_degree = [0]*len(newborns); lost_degree = [0]*len(lost); edge = {}
-        for i, (new, o, _) in enumerate(newborns):
-            px, py = o.point
-            source_point = source_points[i]
-            for j, (old, _, _, predicted, height, gate, _) in enumerate(lost):
+        for i, (new, o, new_height) in enumerate(newborns):
+            px, py = float(o.point[0]), float(o.point[1])
+            top_point = (px, py-new_height)
+            anchors = source_anchors[i]
+            for j, (old, _, _, predicted, scale_h, gate, _, occlusion) in enumerate(lost):
                 if old[0] != new[0]:continue
-                error = math.hypot(predicted[0]-px, predicted[1]-py)/height
-                in_emitted = error <= gate
-                in_source = source_point is not None and math.hypot(
-                    predicted[0]-source_point[0], predicted[1]-source_point[1])/height <= gate
+                if occlusion is None:
+                    error = math.hypot(predicted[0]-px, predicted[1]-py)/scale_h
+                    in_emitted = error <= gate
+                    in_source = anchors is not None and math.hypot(
+                        predicted[0]-anchors[0][0], predicted[1]-anchors[0][1])/scale_h <= gate
+                else:
+                    error = math.hypot(predicted[0]-top_point[0], predicted[1]-top_point[1])/scale_h
+                    in_emitted = error <= gate
+                    in_source = anchors is not None and math.hypot(
+                        predicted[0]-anchors[1][0], predicted[1]-anchors[1][1])/scale_h <= gate
                 if in_emitted or in_source:
                     new_degree[i] += 1; lost_degree[j] += 1
                     if in_emitted:edge[i] = (j, error)
         for i, (j, error) in edge.items():
             if new_degree[i] != 1 or lost_degree[j] != 1:continue
             new, o, new_height = newborns[i]
-            old, state, dt, predicted, height, gate, fitted = lost[j]
+            old, state, dt, predicted, scale_h, gate, fitted, occlusion = lost[j]
             if state["row"]["class_name"] != o.class_name:continue
-            if max(height, new_height)/min(height, new_height) > MAX_HEIGHT_RATIO:continue
-            if self._competed(o, new_height, predicted, height, gate, competitors):continue
-            self._link(old, new, state, o, timestamp, dt, error, gate, predicted, fitted)
+            if occlusion is None:
+                if max(scale_h, new_height)/min(scale_h, new_height) > MAX_HEIGHT_RATIO:continue
+                if self._competed(o, new_height, predicted, scale_h, gate, competitors):continue
+                self._link(old, new, state, o, timestamp, dt, error, gate, predicted, fitted)
+            else:
+                ox, oy1, oy2_last, h_last, oy2_base, h_base = occlusion
+                if new_height < h_last/MAX_HEIGHT_RATIO or new_height > h_base*OCCLUSION_MAX_RECOVERY_RATIO:continue
+                if not (oy2_last-OCCLUSION_BOTTOM_MARGIN_HEIGHTS*h_base <= o.point[1] <= oy2_base+OCCLUSION_BOTTOM_MARGIN_HEIGHTS*h_base):continue
+                if self._vetoed_by_lost_static(new, o, new_height, source_anchors[i], static_vetoes):continue
+                if self._competed_occlusion(o, new_height, predicted, occlusion, gate, competitors):continue
+                observed = (float(o.point[0]), float(o.point[1])-new_height)
+                self._link(old, new, state, o, timestamp, dt, error, gate, predicted, fitted,
+                           observed=observed, rule="mutually_unique_uncontested_occlusion_tail_gate")
 
     @staticmethod
-    def _competed(newborn, new_height, predicted, height, gate, competitors):
-        # The newborn's emitted box and its raw source box each compete with every
-        # other box (and its raw source): a smoothed box can drift off a neighbour
-        # its detection overlaps.
-        newborn_boxes = []
+    def _vetoed_by_lost_static(new, newborn, new_height, source_anchors, static_vetoes):
+        """A nearby lost stationary vehicle within the extended occlusion window makes
+        an extended occlusion link ambiguous even after its own 0.10 s link cap elapsed."""
+        px, py = float(newborn.point[0]), float(newborn.point[1])
+        top = (px, py-new_height)
+        for other_id, sx, sy, sy1, sh in static_vetoes:
+            if other_id[0] != new[0]:continue
+            if math.hypot(sx-px, sy-py)/sh <= CONTINUATION_BASE_HEIGHTS:return True
+            if math.hypot(sx-top[0], sy1-top[1])/sh <= OCCLUSION_TOP_GATE_HEIGHTS:return True
+            if source_anchors is not None:
+                s_fp, s_tp = source_anchors
+                if math.hypot(sx-s_fp[0], sy-s_fp[1])/sh <= CONTINUATION_BASE_HEIGHTS:return True
+                if math.hypot(sx-s_tp[0], sy1-s_tp[1])/sh <= OCCLUSION_TOP_GATE_HEIGHTS:return True
+        return False
+
+    @staticmethod
+    def _newborn_boxes(newborn, new_height):
+        boxes = []
         box = None if newborn.bbox is None else _raw_box(newborn.bbox)
-        if box is not None:newborn_boxes.append((newborn.point, new_height, box))
+        if box is not None:
+            px, py = float(newborn.point[0]), float(newborn.point[1])
+            boxes.append(((px, py), (px, py-new_height), new_height, box))
         source = getattr(newborn, "source_bbox", None)
         source = None if source is None else _raw_box(source)
         if source is not None and source != box:
-            newborn_boxes.append((((source[0]+source[2])/2, source[3]), source[3]-source[1], source))
+            sx = (source[0]+source[2])/2
+            boxes.append(((sx, source[3]), (sx, source[1]), source[3]-source[1], source))
+        return boxes
+
+    @classmethod
+    def _competed(cls, newborn, new_height, predicted, height, gate, competitors):
+        # The newborn's emitted box and its raw source box each compete with every
+        # other box (and its raw source): a smoothed box can drift off a neighbour
+        # its detection overlaps.
+        newborn_boxes = cls._newborn_boxes(newborn, new_height)
         for other, point, other_height, bbox in competitors:
             if other is newborn:continue
             if math.dist(predicted, point)/height <= gate:return True
             if not newborn_boxes or bbox is None or other_height is None:continue
-            for own_point, own_height, own_box in newborn_boxes:
+            for own_point, _, own_height, own_box in newborn_boxes:
                 if (_overlap_of_smaller(own_box, bbox) >= COMPETITOR_OVERLAP and
                         math.dist(own_point, point)/min(own_height, other_height) <= COMPETITOR_FOOTPOINT_HEIGHTS):
                     return True
         return False
 
-    def _link(self, old, new, state, observation, timestamp, dt, error, gate, predicted, fitted):
+    @classmethod
+    def _competed_occlusion(cls, newborn, new_height, predicted, occlusion, gate, competitors):
+        ox, oy1, oy2_last, h_last, oy2_base, h_base = occlusion
+        newborn_boxes = cls._newborn_boxes(newborn, new_height)
+        for other, point, other_height, bbox in competitors:
+            if other is newborn:continue
+            other_top = (point[0], point[1]-other_height) if other_height is not None else point
+            if math.dist(predicted, other_top)/h_base <= gate:return True
+            if math.dist((ox, oy2_last), point)/h_last <= CONTINUATION_BASE_HEIGHTS:return True
+            if math.dist((ox, oy2_base), point)/h_base <= gate:return True
+            if not newborn_boxes or bbox is None or other_height is None:continue
+            for own_fp, own_tp, own_height, own_box in newborn_boxes:
+                if _overlap_of_smaller(own_box, bbox) >= COMPETITOR_OVERLAP:
+                    smaller = min(own_height, other_height)
+                    if (math.dist(own_fp, point)/smaller <= COMPETITOR_FOOTPOINT_HEIGHTS or
+                            math.dist(own_tp, other_top)/smaller <= COMPETITOR_FOOTPOINT_HEIGHTS):
+                        return True
+        return False
+
+    def _link(self, old, new, state, observation, timestamp, dt, error, gate, predicted, fitted, *,
+              observed=None, rule="mutually_unique_uncontested_motion_gate"):
         row = state["row"]
         own = (row["tracker_epoch"], row["local_id"])
         del self.active[old]
@@ -492,9 +629,9 @@ class VehicleWaits:
         row.setdefault("native_ids", [{"epoch": own[0], "local_id": own[1]}]).append(native)
         row.setdefault("identity_links", []).append({"from": {"epoch": old[0], "local_id": old[1]}, "to": native,
             "lost_at": state["previous"]["time"], "linked_at": timestamp, "gap_sec": dt,
-            "predicted_point": list(predicted), "observed_point": list(observation.point),
+            "predicted_point": list(predicted), "observed_point": list(observation.point if observed is None else observed),
             "error_heights": error, "gate_heights": gate, "moving_fit": fitted,
-            "rule": "mutually_unique_uncontested_motion_gate"})
+            "rule": rule})
         self._flag(row, "identity_continued")
 
     def invalidate(self, timestamp, reason):

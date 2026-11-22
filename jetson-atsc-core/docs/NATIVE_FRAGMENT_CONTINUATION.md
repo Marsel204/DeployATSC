@@ -33,20 +33,44 @@ continues a row whose last observation was at most `max_gap_sec` earlier, when:
 1. on position alone, the newborn and the lost row are each other's only
    candidate within the motion gate (0.35 box heights, plus 0.3 per second of
    gap when at least three samples show image motion; without motion only a
-   gap of up to 0.1 s is bridged). A newborn counts as a candidate of every
-   lost row whose gate holds either its emitted footpoint or its raw
-   detection's (`source_bbox`), but it links only through its emitted
-   footpoint: the raw box widens ambiguity, never acceptance. A supplied
-   `source_bbox` that is unreadable, non-finite or degenerate fails closed:
-   that newborn can still make others ambiguous but never links;
-2. the class matches and the box heights differ by at most 1.5x;
+   gap of up to 0.1 s is bridged). Whenever the bottom edge retreats upward
+   while the box shrinks (`vy < 0` and `dh_dt < 0`), motion qualification uses
+   the top-edge fit `(vx, min(0, vy_top))` against the maximum validated height
+   in recent history so box shrinkage never lowers the speed threshold or
+   promotes a slow/stationary vehicle to moving; when height loss dominates
+   (`vy_top > dh_dt`), vertical prediction also falls back to `min(0, vy_top)`,
+   preserving horizontal velocity without lifting the prediction upward. When a
+   stationary vehicle shows an unambiguous bottom-edge
+   occlusion tail (two consecutive earlier sightings supporting a taller baseline
+   `h_base`, height shrinking to at most `0.75 * h_base` with net negative
+   height slope `< -0.35 * h_base/s` from the bottom edge moving upward while
+   its top edge and horizontal center stay within `0.15 * h_base` and top speed
+   stays under `0.35 * h_base/s`), reappearance up to 0.35 s (capped by
+   `max_gap_sec`) is anchored on the unoccluded top-center within `0.25 * h_base`
+   (`rule: "mutually_unique_uncontested_occlusion_tail_gate"`), with the
+   newborn's bottom edge within `0.15 * h_base` of the lost vehicle's
+   clipped-to-baseline vertical band and height between `last_height / 1.5` and
+   `1.2 * h_base`. Plain stationary and short (< 3 sightings) lost tracks stay
+   ineligible to link past 0.1 s (blocking queue pull-up replacements), while
+   remaining ambiguity vetoes against extended occlusion-tail links throughout
+   the 0.35 s window. A newborn counts as a candidate of every lost row whose
+   gate holds either its emitted anchor or its raw detection's (`source_bbox`),
+   but it links only through its emitted anchor: the raw box widens ambiguity,
+   never acceptance.
+   A supplied `source_bbox` that is unreadable, non-finite or degenerate fails
+   closed: that newborn can still make others ambiguous but never links;
+2. the class matches and the box heights agree (at most 1.5x for normal links;
+   bounded to `[last_height / 1.5, 1.2 * peak_height]` for occlusion-tail links);
 3. no other box of the same frame, of any vehicle class, size or ID state,
-   has its footpoint in the gate, or covers at least half of the smaller box
-   with footpoints within half a box height of the newborn's (the f66 case in
-   the 0SgQn95Q07U replay). The overlap test runs for both the newborn's
-   emitted box and its raw detection, against each other box (review probe:
-   a newborn's Kalman box covered under half of a withheld detection its raw
-   box covered most of). "Other boxes" are:
+   has its anchor in the gate (for occlusion-tail links, also no competitor
+   footpoint within the static gate of the last footpoint or within 0.25 peak
+   heights of the pre-occlusion peak footpoint), or covers at least half of the
+   smaller box with footpoints (or top-centers for occlusion-tail links) within
+   half a box height of the newborn's (the f66 case in the 0SgQn95Q07U replay).
+   The overlap test runs for both the newborn's emitted box and its raw
+   detection, against each other box (review probe: a newborn's Kalman box
+   covered under half of a withheld detection its raw box covered most of).
+   "Other boxes" are:
    - every other observation's emitted (Kalman-smoothed) box, **and** its raw
      post-NMS detection (`source_bbox`) when the tracker emitted it from one.
      Smoothing can move an emitted box out of the gate while its detection is
@@ -135,17 +159,23 @@ post-NMS boxes (both 220-frame ROIs) the rule makes two links (#191 -> #213,
 #670 -> #692), which frame review supports. The third pairing the frames
 support, #368 -> #534 at f132, is declined: ByteTrack withheld a 0.343
 motorcycle box on the same motorcycle, and the rule cannot tell a duplicate
-box from a neighbour. On the 660-frame junction clip the one link
-(#626 -> #648) is unchanged. None of this validates physical identity in
-general.
+box from a neighbour. On the 660-frame junction clip (Ultralytics 8.4.189),
+three links are made: `#626 -> #648` (moving), plus `#291 -> #598` and
+`#746 -> #966` (stationary bottom-edge occlusion tails); on Ultralytics 8.3.0,
+two links are made (`#235 -> #241` moving and `#164 -> #221` occlusion tail).
+None of this validates physical identity in general.
 
 ## Known limits
 
 - An ROI that reaches the image border limits witnessed entries: vehicles
   entering there are first seen already inside the region.
-- Occlusion tails: a box clipped while the vehicle is hidden corrupts the
-  tail velocity and misses same-car splits (`746→966`, `407→733`,
-  `300→755`). Deferred to a dedicated follow-up with adversarial tests.
+- Occlusion tails across the stop line: on the 660-frame junction preset,
+  bottom-edge occlusion clipped `#407` (at f135) and `#300` (at f142) upward
+  across the preset stop line before track loss, completing those rows as
+  `SERVED` (`crossed_stop_line=True`). Because fragment continuation never
+  reopens completed/served rows, `407→733` and `300→755` remain unlinked
+  (stopping occlusion-induced premature crossing belongs to stop-line logic,
+  not fragment continuation).
 - Single-ID wobble across the ROI boundary and ByteTrack's internal body
   switches (one native ID moving to another vehicle) are separate
   follow-ups; continuation neither causes nor repairs them.
