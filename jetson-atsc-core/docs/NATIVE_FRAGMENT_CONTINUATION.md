@@ -152,38 +152,44 @@ matching, so they never block a newborn on the frame they lapse.
 - **Bottom-edge occlusion crossing resilience** (active when
   `fragment_continuation=True`): when a stationary vehicle's box shrinks upward
   from the bottom edge (`height <= 0.85 * h_base` against two consecutive
-  earlier sightings, bottom-edge share `>= 0.70`, pinned top edge and horizontal
-  center within `0.15 * h_base`, top speed `< 0.35 * h_base/s`, with history
-  spanning at least 0.1 s up to 32 samples at high frame rates) and restoring
-  `h_base` places its unclipped rear back behind the stop line
-  (`side((x, y1 + h_base)) < 0`), the premature `SERVED` crossing is held as a
-  pending crossing rather than completing the row. Behind-line sightings keep
-  the anchor until two consecutive behind-line observations geometrically
-  recover (`height >= 0.95 * h_base`), preventing partial-recovery bounces from
-  clearing the anchor while real wait continues; if the vehicle genuinely drives
-  forward so its unclipped rear `side((x, y1 + h_base)) >= 0` also clears the
-  line on continuous frames (including consecutive `EXIT_PENDING` outside
-  frames), the crossing confirms immediately. Gaps, handoffs, confirmed exits,
-  and invalidations clear any pending crossing.
+  earlier sightings or a preserved stationary pre-clip baseline, bottom-edge
+  share `>= 0.70`, pinned top edge and horizontal center within `0.15 * h_base`,
+  top speed `< 0.35 * h_base/s`, with history spanning at least 0.1 s up to 32
+  samples at high frame rates) and restoring `h_base` places its unclipped rear
+  back behind the stop line (`side((x, y1 + h_base)) < 0`), the premature
+  `SERVED` crossing is held as a pending crossing rather than completing the
+  row. Behind-line sightings keep the pending anchor until two consecutive
+  behind-line observations geometrically recover (`height >= 0.95 * h_base`),
+  and preserve the pre-clip baseline while the box top and center stay within
+  `0.15 * h_base` so partial or 95% recoveries followed by another clip cannot
+  degrade the baseline; genuine departures (including full-height departures
+  after recovery, or clipped departures whose unclipped rear
+  `side((x, y1 + h_base)) >= 0` clears the line) confirm immediately across
+  consecutive in-ROI, `EXIT_PENDING` outside, and same-ID re-entry frames.
+  Frame gaps, handoffs, confirmed exits, and invalidations clear any pending
+  crossing and stationary clip baseline.
 - **Opt-in ROI exit hysteresis (`RunPolicy.exit_persistence_sec`, default `0.0`,
   bounds `[0, 5]`)**: when non-zero, an active native vehicle stepping outside
   the ROI without a stop-line crossing enters `EXIT_PENDING` rather than
-  immediately completing as `EXITED`. Genuine stop-line crossings on exit still
-  complete immediately as `SERVED`. While `EXIT_PENDING`, no outside intervals or
-  wait are fabricated, `state["exit_candidate"]` protects revisable prefix
-  retention, and tracked outside sightings refresh association-gap expiry while
-  preserving `row["last_seen"]` as the last in-ROI timestamp. If the vehicle
-  returns inside the ROI before `exit_persistence_sec` of consecutive outside
-  observations elapses, the row stays continuous (no `:segment-*` split) and the
-  outside dip is recorded honestly as `unknown_sec` (`observation_gap`). Once
-  consecutive outside sightings span at least `exit_persistence_sec`, the row
-  completes as `EXITED` at the first outside timestamp
-  (`completed_at = exit_candidate`). If the track disappears before confirmation,
-  normal `tracking_lost` / `right_censored` handling applies. Native exit timer
-  reads and resets are strictly gated on `RunPolicy.exit_persistence_sec > 0` so
-  they never collide with `PersistentVehicleWaits`'s own `exit_candidate`.
-  Tracks in `EXIT_PENDING` cannot continue onto newborns inside the ROI, but
-  still veto nearby extended occlusion-tail links.
+  immediately completing as `EXITED`. Genuine stop-line crossings on exit or on
+  consecutive `EXIT_PENDING` outside frames still complete immediately as
+  `SERVED` (using the same `max_gap_sec` continuity check as exit timing). While
+  `EXIT_PENDING`, no outside intervals or wait are fabricated,
+  `state["exit_candidate"]` protects revisable prefix retention, and tracked
+  outside sightings refresh association-gap expiry while preserving
+  `row["last_seen"]` as the last in-ROI timestamp. If the vehicle returns inside
+  the ROI before `exit_persistence_sec` of consecutive outside observations
+  elapses, the row stays continuous (no `:segment-*` split), crossing continuity
+  is preserved across consecutive same-ID transitions, and the outside dip is
+  recorded honestly as `unknown_sec` (`observation_gap`). Once consecutive
+  outside sightings span at least `exit_persistence_sec`, the row completes as
+  `EXITED` at the first outside timestamp (`completed_at = exit_candidate`). If
+  the track disappears before confirmation, normal `tracking_lost` /
+  `right_censored` handling applies. Native exit timer reads and resets are
+  strictly gated on `RunPolicy.exit_persistence_sec > 0` so they never collide
+  with `PersistentVehicleWaits`'s own `exit_candidate`. Tracks in `EXIT_PENDING`
+  cannot continue onto newborns inside the ROI, and use their latest outside
+  timestamp and box to veto nearby extended occlusion-tail links.
 - No departure is inferred from a vanishing vehicle.
 - Rows carry `native_ids`, `identity_links` and the `identity_continued` flag.
   If a handed-off ID is seen again while the row is unfinished, the row gets
@@ -200,7 +206,7 @@ support, #368 -> #534 at f132, is declined: ByteTrack withheld a 0.343
 motorcycle box on the same motorcycle, and the rule cannot tell a duplicate
 box from a neighbour. On the 660-frame junction clip (Ultralytics 8.4.189),
 bottom-edge crossing resilience prevents premature `SERVED` completions on
-`#232` (f134, later crosses cleanly at f366), `#407` (f135), and `#300` (f142),
+`#232` (f134, later crosses cleanly at f373), `#407` (f135), and `#300` (f142),
 unlocking five verified links: `#626 -> #648` (moving), plus `#291 -> #598`,
 `#746 -> #966`, `#407 -> #733`, and `#300 -> #755` (stationary bottom-edge
 occlusion tails); on Ultralytics 8.3.0, two links are made (`#235 -> #241`
