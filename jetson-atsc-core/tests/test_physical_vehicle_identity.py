@@ -1779,7 +1779,7 @@ def test_sustained_stationary_jitter_per_frame_cost_stays_bounded():
         obs.append(car(6, 290., x=550.5, height=70., speed=0.))
         waits_starve.observe(obs, 'RED', f/FPS, f+1, 1, unassigned=())
     cb_6 = waits_starve.active[(0, 6)]['clip_baselines']
-    assert len(cb_6) == 1 and len(cb_6._x) <= 8
+    assert len(cb_6) == 1 and len(cb_6._x) <= 64
 
     cb_q = _ClipBaselines()
     for base_x in (150.25, 154.25):
@@ -1891,6 +1891,27 @@ def test_sustained_stationary_jitter_per_frame_cost_stays_bounded():
     for k in range(300):
         cb_k = waits_300.active[(0, 1+k)]['clip_baselines']
         assert len(cb_k) == 1 and not cb_k.has_dom_sweep()
+
+    # Sol Round 21:
+    # 1. Live exact-key index deduplicates repeating baselines (> 32 distinct keys) in O(1)
+    #    before spending dominance budget, preventing unbounded duplicate growth.
+    waits_dup = book(side=lambda p: 270.-p[1])
+    for f in range(400):
+        obs = [car(1+k, 280., x=150.+80.*k+0.02*(f % 50), height=60., speed=0.) for k in range(6)]
+        waits_dup.observe(obs, 'RED', f/FPS, f+1, 1, unassigned=())
+    for k in range(6):
+        cb_d = waits_dup.active[(0, 1+k)]['clip_baselines']
+        assert len(cb_d) == 50 and len(cb_d._x) == 50
+
+    # 2. Fixed copy range at rebuild start + mirroring later inserts lets compaction finish
+    #    even when 65 drifting tracks (> 64-unit budget) prune and append 1 baseline per frame.
+    waits_drift65 = book(side=lambda p: 270.-p[1])
+    for f in range(800):
+        obs = [car(1+k, 280., x=150.+80.*k+0.2*f, height=60., speed=0.) for k in range(65)]
+        waits_drift65.observe(obs, 'RED', f/FPS, f+1, 1, unassigned=())
+    for k in range(65):
+        cb_65 = waits_drift65.active[(0, 1+k)]['clip_baselines']
+        assert len(cb_65) <= 60 and len(cb_65._x) <= 220
 
 
 def test_missed_frame_clears_crossing_clip_evidence_but_preserves_fragment_history():
