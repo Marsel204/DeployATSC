@@ -76,6 +76,13 @@ def _box(track):
     return _finite_box(getattr(track,"bbox",None))
 
 
+def _observed_box(track):
+    """Parsed finite box, None when absent, or empty-tuple sentinel when a supplied box is malformed."""
+    parsed=_box(track)
+    if parsed is not None:return parsed
+    return () if getattr(track,"bbox",None) is not None else None
+
+
 def _source_box(track):
     """The detector's raw box behind a tracked box, or None."""
     return _finite_box(getattr(track,"source_bbox",None))
@@ -337,7 +344,7 @@ class ObservationSession:
                         velocity_valid=getattr(v,"velocity_valid",False),
                         in_region=calibration.homography.is_in_approach_corridor(*v.bottom_center),
                         epoch=getattr(v,"epoch",detector.epoch),
-                        bbox=_box(v) if continuing else None,
+                        bbox=_observed_box(v) if continuing else None,
                         source_bbox=_source_box(v) if continuing else None) for v in tracks]
                     if continuing:
                         self.engine.observe_acquisition(frame,packet.timestamp,packet.sequence,observations,generation=generation,

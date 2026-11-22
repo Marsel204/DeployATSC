@@ -1518,23 +1518,26 @@ def test_sustained_stationary_jitter_per_frame_cost_stays_bounded():
     assert side_calls[0] <= 120, f'genuine departure scanned baselines ({side_calls[0]} side calls)'
     assert all(r['tracking_state'] == 'SERVED' and r['crossed_stop_line'] for r in waits_dep.records.values())
 
-    # Sol S12 (Round 13): equal-height baselines across many blocks must binary-search the full
-    # (h, y2) key so partial pruning stays fast (no linear walk across same-height blocks).
-    waits_eq = book(side=lambda p: 275.-p[1])
-    for f in range(1800):
-        step = f//2
-        dx = -0.5 if step < 250 else 0.0
-        y2 = 276.+0.002*step  # 900 distinct y2 values sharing the EXACT SAME height=60
-        obs = [car(1+k, y2, x=100.+80.*k+dx, height=60., speed=0.) for k in range(6)]
-        waits_eq.observe(obs, 'RED', f/FPS, f+1, 1, unassigned=())
-    assert len(waits_eq.active[(0, 1)]['clip_baselines']._blocks) >= 8
-    started = time.perf_counter()
-    # x=+8.6 prunes the 250 step<250 equal-height baselines per track on the departure frame.
-    waits_eq.observe([car(1+k, 262., x=100.+80.*k+8.6, height=48., speed=1.) for k in range(6)],
-                     'GREEN', 1800/FPS, 1801, 1, unassigned=())
-    eq_depart_ms = (time.perf_counter()-started)*1000.
-    assert eq_depart_ms < 15.0, f'equal-height partial-prune departure took {eq_depart_ms:.2f} ms'
-    assert all(r['tracking_state'] == 'SERVED' and r['crossed_stop_line'] for r in waits_eq.records.values())
+    # Sol S12 (Round 13/14): scattered equal-height partial pruning across mixed leaves must
+    # stay fast on BOTH genuine departure AND clipped crossing without refreshing KD leaves.
+    for mode, stop_y, dep_py, dep_spd, expect_served in (
+        ('depart', 275., 262., 1., True),
+        ('clipped', 270., 264., 0., False),
+    ):
+        waits_eq = book(side=lambda p, sy=stop_y: sy-p[1])
+        for f in range(1800):
+            step = f//2
+            dx = -0.5 if (step % 4 == 0 and step < 800) else 0.0  # 200 scattered across all leaves
+            y2 = 276.+0.002*step  # 900 distinct y2 values sharing the EXACT SAME height=60
+            obs = [car(1+k, y2, x=100.+80.*k+dx, height=60., speed=0.) for k in range(6)]
+            waits_eq.observe(obs, 'RED', f/FPS, f+1, 1, unassigned=())
+        assert len(waits_eq.active[(0, 1)]['clip_baselines']._blocks) >= 4
+        started = time.perf_counter()
+        waits_eq.observe([car(1+k, dep_py, x=100.+80.*k+8.6, height=48., speed=dep_spd) for k in range(6)],
+                         'GREEN', 1800/FPS, 1801, 1, unassigned=())
+        eq_ms = (time.perf_counter()-started)*1000.
+        assert eq_ms < 15.0, f'scattered equal-height partial-prune {mode} took {eq_ms:.2f} ms'
+        assert all(r['crossed_stop_line'] is expect_served for r in waits_eq.records.values())
 
     # Sol S13: growing height with fixed top/center evicts dominated live baselines (retaining 1/track).
     waits_grow = book(side=lambda p: 270.-p[1])
@@ -1556,15 +1559,41 @@ def test_sustained_stationary_jitter_per_frame_cost_stays_bounded():
     assert len(saved_spread) == 1 and saved_spread._blocks[0].h[0] == 70.
     assert saved_spread._h[saved_spread._root.idxs[0]] == 70.
 
-    # Slow unidirectional drift: column arrays stay compacted relative to live count.
+    # Slow unidirectional drift AND mass pruning followed by covered frames compact dead slots.
     waits_creep = book(side=lambda p: 270.-p[1])
     for f in range(1850):
         waits_creep.observe([car(1, 280., x=100.+0.02*f, height=60., speed=0.)],
                             'RED', f/FPS, f+1, 1, unassigned=())
     saved_creep = waits_creep.active[(0, 1)].get('clip_baselines')
     assert saved_creep is not None and len(saved_creep) > 0
-    assert saved_creep._root.count == len(saved_creep)
+    assert sum(saved_creep._alive) == len(saved_creep)
     assert len(saved_creep._x) <= 4*max(len(saved_creep), 64)
+
+    # Sol Round 14: pruning 901 baselines down to 1 live + 300 stable covered frames compacts slots;
+    # dense pruning (901 -> ~200 live) also compacts incrementally without leaving dead slots resident.
+    waits_prune1 = book(side=lambda p: 270.-p[1])
+    for f in range(1802):
+        step = f//2
+        x = 150. if step < 900 else 155.
+        waits_prune1.observe([car(1, 276.+0.001*step, x=x, height=60., speed=0.)],
+                             'RED', f/FPS, f+1, 1, unassigned=())
+    for f in range(1802, 2102):
+        waits_prune1.observe([car(1, 277., x=160., height=60., speed=0.)],
+                             'RED', f/FPS, f+1, 1, unassigned=())
+    saved_p1 = waits_prune1.active[(0, 1)]['clip_baselines']
+    assert len(saved_p1) == len(saved_p1._x) <= 8
+
+    waits_prune_dense = book(side=lambda p: 270.-p[1])
+    for f in range(1800):
+        step = f//2
+        x = 150. if step < 700 else 155.
+        waits_prune_dense.observe([car(1, 276.+0.001*step, x=x, height=60., speed=0.)],
+                                  'RED', f/FPS, f+1, 1, unassigned=())
+    for f in range(1800, 1850):
+        waits_prune_dense.observe([car(1, 277., x=160., height=60., speed=0.)],
+                                  'RED', f/FPS, f+1, 1, unassigned=())
+    saved_pd = waits_prune_dense.active[(0, 1)]['clip_baselines']
+    assert 150 <= len(saved_pd) == len(saved_pd._x) <= 250
 
 
 def test_missed_frame_clears_crossing_clip_evidence_but_preserves_fragment_history():
@@ -1642,6 +1671,43 @@ def test_missed_frame_clears_crossing_clip_evidence_but_preserves_fragment_histo
     waits_stale.observe([car(1, 264., x=150., height=60., speed=2., in_region=True)], 'GREEN', 1.0+1/FPS, 3, 2, unassigned=())
     row_stale = only_row(waits_stale)
     assert row_stale['tracking_state'] == 'SERVED' and row_stale['crossed_stop_line'] and row_stale['crossing_cycle'] == 2
+
+    # Sol Round 14 (outside-track veto after invalidation): a fresh outside EXIT_PENDING track
+    # with previous=None must still veto an ambiguous occlusion-tail 1 -> 2 handoff, matching
+    # the non-invalidated veto while the control without track 3 still links 1 -> 2.
+    def run_post_invalidation_veto(include_track3, invalidate_track3):
+        w = book(exit_persistence_sec=0.3, side=lambda p: -1.)
+        if include_track3:
+            w.observe([car(3, 280., x=150., height=60., speed=0., in_region=True)], 'RED', 0., 1, 1, unassigned=())
+            if invalidate_track3:
+                w.invalidate(0.1, 'acquisition_stale')
+                assert w.active[(0, 3)]['previous'] is None
+        t0 = 0.2
+        seq_v = [
+            [car(1, 280., x=150., height=60., speed=0.)],
+            [car(1, 280., x=150., height=60., speed=0.)],
+            [car(1, 280., x=150., height=60., speed=0.)],
+            [car(1, 280., x=150., height=60., speed=0.)],
+            [car(1, 265., x=150., height=45., speed=0.)],
+            [car(1, 260., x=150., height=40., speed=0.)] + (
+                [car(3, 280., x=150., height=60., speed=0., in_region=False)] if include_track3 else []
+            ),
+        ]
+        for i, obs in enumerate(seq_v):
+            w.observe(obs, 'RED', t0+i/FPS, 2+i, 1, unassigned=())
+        if include_track3:
+            assert w.active[(0, 3)]['exit_candidate'] is not None
+            if invalidate_track3:
+                assert w.active[(0, 3)]['previous'] is None
+        for i in range(6):
+            w.observe([], 'RED', t0+(len(seq_v)+i)/FPS, 2+len(seq_v)+i, 1, unassigned=())
+        w.observe([car(2, 280., x=150., height=60., speed=0.)],
+                  'RED', t0+(len(seq_v)+6)/FPS, 2+len(seq_v)+6, 1, unassigned=())
+        return [l for r in w.records.values() for l in r.get('identity_links', ())]
+
+    assert run_post_invalidation_veto(include_track3=False, invalidate_track3=False)  # control links 1 -> 2
+    assert run_post_invalidation_veto(include_track3=True, invalidate_track3=False) == []
+    assert run_post_invalidation_veto(include_track3=True, invalidate_track3=True) == []
 
 
 def test_bottom_clip_rear_share_cutoff_uses_original_float_comparison():

@@ -320,3 +320,50 @@ def test_session_exit_persistence_bridges_border_dip_and_leaves_persistent_mode_
 
     # persistent_v1 rows must be identical regardless of RunPolicy.exit_persistence_sec.
     assert run_with('persistent_v1', 0.0) == run_with('persistent_v1', 0.3)
+
+
+def test_session_malformed_box_behind_stop_line_never_starts_false_crossing(video_factory, tmp_path):
+    """Sol S14 (Round 14): ObservationSession with fragment_continuation=True preserves
+    malformed-box information instead of degrading a zero-width box to bbox=None, so a
+    zero-width box behind stop_y=210 followed by a valid box across the line does not
+    falsely complete SERVED (while a valid transition across the line still serves)."""
+    def make_detector(zero_width_first, y_first, y_second):
+        class CrossingDetector(ScriptedDetector):
+            def track(self, frames, timestamp=None):
+                index = round(timestamp*FPS)
+                if index == 0:
+                    bbox = [100., y_first-30., 100., y_first] if zero_width_first else [86., y_first-30., 114., y_first]
+                    v = TrackedVehicle(1, 2, 'car', bbox, .9, timestamp, obs_count=6, epoch=self.epoch)
+                    v.source_bbox = tuple(bbox)
+                    vehicles = [v]
+                elif index == 1:
+                    vehicles = [scripted_vehicle(1, 100., y_second, timestamp, self.epoch)]
+                else:
+                    vehicles = []
+                return [TrackedFrame(vehicles, withheld=(), epoch=self.epoch) for _ in frames]
+        return CrossingDetector
+
+    def run_crossing(tag, zero_width_first, y_first, y_second, flip_stop_line=False):
+        settings = run_payload(video_factory)
+        if flip_stop_line:
+            p0, p1 = settings['acquisition']['stop_line']
+            settings['acquisition']['stop_line'] = [p1, p0]
+        settings['policy'] = {'debounce_frames': 1, 'stop_persistence_sec': .1, 'fragment_continuation': True}
+        class Manual(ObservationSession):
+            def _worker(self):self.ready.set()
+        session = Manual(settings, tmp_path/f'{tag}-{zero_width_first}',
+                         detector_factory=make_detector(zero_width_first, y_first, y_second), anfis_factory=FakeANFIS)
+        try:
+            assert session.calibrations['acquisition'].side((100., y_first)) < 0 <= session.calibrations['acquisition'].side((100., y_second))
+            for _ in range(3):session._process_batch()
+            rows = {k.split(':', 1)[1]: r for k, r in session.engine.waits.records.items()}
+            return rows['acquisition:0:1']
+        finally:
+            session.state = session.applied_state = 'stopped';session._cleanup()
+
+    # Exact Round 14 repro (upward crossing y=212 -> y=206 across stop_y=210) AND default downward (206 -> 212).
+    for tag, y0, y1, flip in (('up', 212., 206., True), ('down', 206., 212., False)):
+        bad_row = run_crossing(tag, True, y0, y1, flip_stop_line=flip)
+        assert not bad_row['crossed_stop_line'] and bad_row['tracking_state'] != 'SERVED'
+        good_row = run_crossing(tag, False, y0, y1, flip_stop_line=flip)
+        assert good_row['crossed_stop_line'] and good_row['tracking_state'] == 'SERVED'

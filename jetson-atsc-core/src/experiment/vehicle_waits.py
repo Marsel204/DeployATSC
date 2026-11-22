@@ -151,7 +151,7 @@ def _dominates_coords(ax, ay1, ay2, ah, arear, aerr, bx, by1, by2, bh, brear, be
             ay1-ra <= by1-rb and ay1+ra >= by1+rb)
 
 
-_KD_LEAF_MAX = 32
+_KD_LEAF_MAX = 128
 
 
 class _KDNode:
@@ -295,20 +295,82 @@ def _collect_idxs(node, out):
     _collect_idxs(node.right, out)
 
 
-_HBLOCK_MAX = 128
-_HBLOCK_MERGE_TRIGGER = 32
-_HBLOCK_MERGE_MAX = 96
+_BBLOCK_MAX = 512
+_HBLOCK_MAX = 256
+
+
+class _BoundBlocks:
+    """2-level sorted C-array blocks of ``(bound, slot)`` for O(1) stationary checks,
+    O(log B) inserts, and O(k) bulk-prefix drift pruning without touching surviving entries."""
+    __slots__ = ("blocks", "max_vals")
+
+    def __init__(self):
+        self.blocks = []
+        self.max_vals = array("d")
+
+    def clear(self):
+        self.blocks.clear()
+        self.max_vals = array("d")
+
+    def push(self, val, slot):
+        blocks = self.blocks; max_vals = self.max_vals
+        if not blocks:
+            blocks.append((array("d", (val,)), array("I", (slot,))))
+            max_vals.append(val)
+            return
+        b_idx = bisect.bisect_left(max_vals, val)
+        if b_idx == len(blocks):
+            b_idx -= 1
+        vals, slots = blocks[b_idx]
+        i = bisect.bisect_left(vals, val)
+        vals.insert(i, val); slots.insert(i, slot)
+        if i == len(vals)-1:
+            max_vals[b_idx] = val
+        if len(vals) > _BBLOCK_MAX:
+            mid = len(vals)//2
+            right = (vals[mid:], slots[mid:])
+            del vals[mid:]; del slots[mid:]
+            max_vals[b_idx] = vals[-1]
+            blocks.insert(b_idx+1, right)
+            max_vals.insert(b_idx+1, right[0][-1])
+
+    def pop_below(self, threshold, alive):
+        blocks = self.blocks; max_vals = self.max_vals
+        if not blocks or blocks[0][0][0] >= threshold:
+            return 0
+        killed = 0
+        cut_b = bisect.bisect_left(max_vals, threshold)
+        if cut_b:
+            for b_i in range(cut_b):
+                for s in blocks[b_i][1]:
+                    if alive[s]:
+                        alive[s] = 0
+                        killed += 1
+            del blocks[:cut_b]; del max_vals[:cut_b]
+        if blocks and blocks[0][0][0] < threshold:
+            vals, slots = blocks[0]
+            cut = bisect.bisect_left(vals, threshold)
+            for j in range(cut):
+                s = slots[j]
+                if alive[s]:
+                    alive[s] = 0
+                    killed += 1
+            if cut == len(vals):
+                del blocks[0]; del max_vals[0]
+            else:
+                del vals[:cut]; del slots[:cut]
+        return killed
 
 
 class _HBlock:
-    __slots__ = ("h", "y2", "rear", "err", "cnt", "max_rear_hi")
+    __slots__ = ("h", "y2", "rear", "err", "slots", "max_rear_hi")
 
-    def __init__(self, h=None, y2=None, rear=None, err=None, cnt=None, max_rear_hi=-math.inf):
+    def __init__(self, h=None, y2=None, rear=None, err=None, slots=None, max_rear_hi=-math.inf):
         self.h = array("d") if h is None else h
         self.y2 = array("d") if y2 is None else y2
         self.rear = array("d") if rear is None else rear
         self.err = array("d") if err is None else err
-        self.cnt = array("I") if cnt is None else cnt
+        self.slots = array("I") if slots is None else slots
         self.max_rear_hi = max_rear_hi
 
     def refresh_max_rear_hi(self):
@@ -323,20 +385,20 @@ class _HBlock:
 class _ClipBaselines:
     """Lossless compact-array indexed stationary clip baselines for one active track.
 
-    - Baselines are stored in contiguous ``array('d')`` columns (no per-entry
-      boxed Python tuples or floats), giving minimal memory and O(1) teardown.
-    - A scapegoat-balanced 2D (x, y1) KD-tree carrying height, rear, and
-      drift-gate envelopes answers drift pruning (O(1) on stationary frames and
-      O(1) on whole-track departure), dominance/duplicate checks, and live
-      eviction of provably dominated entries.
-    - A 2-level blocked sorted ``(h, y2)`` index (``_HBlock`` chunks of <= 128
-      unique refcounted groups) supports O(log B) incremental inserts and
-      deletes with zero rebuilds on partial drift pruning, plus O(1) straight-
-      line crossing shortcuts.
+    - Baselines live in contiguous ``array('d')`` columns plus a 1-byte ``_alive``
+      bitmap (minimal memory and O(1) teardown).
+    - Four ``_BoundBlocks`` boundary indexes perform O(1) stationary drift checks,
+      O(1) whole-track eviction, and O(k) bulk-prefix partial pruning without
+      visiting surviving entries or refreshing KD-tree leaves.
+    - A scapegoat-balanced 2D (x, y1) KD-tree carrying height, rear, and drift
+      envelopes answers dominance/duplicate checks and live dominance eviction.
+    - A 2-level blocked sorted ``(h, y2)`` index (``_HBlock``) answers crossing
+      queries in descending ``(h, y2)`` order with O(1) straight-line shortcuts.
     """
-    __slots__ = ("_x", "_y1", "_y2", "_h", "_rear", "_err", "_free", "_pending_del", "count",
+    __slots__ = ("_x", "_y1", "_y2", "_h", "_rear", "_err", "_alive", "count",
                  "_root", "_recent_q", "_recent_s",
-                 "_blocks", "_blk_max")
+                 "_x_hi", "_x_lo", "_y_hi", "_y_lo",
+                 "_blocks", "_blk_max", "_rebuild")
 
     def __init__(self):
         self._x = array("d")
@@ -345,14 +407,18 @@ class _ClipBaselines:
         self._h = array("d")
         self._rear = array("d")
         self._err = array("d")
-        self._free = array("I")
-        self._pending_del = array("I")
+        self._alive = bytearray()
         self.count = 0
         self._root = None
         self._recent_q = deque()
         self._recent_s = set()
+        self._x_hi = _BoundBlocks()
+        self._x_lo = _BoundBlocks()
+        self._y_hi = _BoundBlocks()
+        self._y_lo = _BoundBlocks()
         self._blocks = []
         self._blk_max = []
+        self._rebuild = None
 
     def __bool__(self):
         return self.count > 0
@@ -363,11 +429,13 @@ class _ClipBaselines:
     def clear(self):
         self._x = array("d"); self._y1 = array("d"); self._y2 = array("d")
         self._h = array("d"); self._rear = array("d"); self._err = array("d")
-        self._free = array("I"); self._pending_del = array("I")
+        self._alive = bytearray()
         self.count = 0
         self._root = None
         self._recent_q.clear(); self._recent_s.clear()
+        self._x_hi.clear(); self._x_lo.clear(); self._y_hi.clear(); self._y_lo.clear()
         self._blocks.clear(); self._blk_max.clear()
+        self._rebuild = None
 
     @staticmethod
     def _find_in_block(blk, h, y2):
@@ -378,13 +446,13 @@ class _ClipBaselines:
             return bisect.bisect_left(blk.y2, y2, lo, hi)
         return lo
 
-    def _blocks_add(self, h, y2, rear, err):
+    def _blocks_add(self, h, y2, rear, err, slot):
         blocks = self._blocks
         blk_max = self._blk_max
         r_hi = rear+err
         if not blocks:
             blk = _HBlock(array("d", (h,)), array("d", (y2,)), array("d", (rear,)),
-                          array("d", (err,)), array("I", (1,)), r_hi)
+                          array("d", (err,)), array("I", (slot,)), r_hi)
             blocks.append(blk); blk_max.append((h, y2))
             return
         b_idx = bisect.bisect_left(blk_max, (h, y2))
@@ -393,174 +461,132 @@ class _ClipBaselines:
         blk = blocks[b_idx]
         bh = blk.h; by2 = blk.y2
         i = self._find_in_block(blk, h, y2)
-        if i < len(bh) and bh[i] == h and by2[i] == y2:
-            blk.cnt[i] += 1
-            return
         bh.insert(i, h); by2.insert(i, y2)
-        blk.rear.insert(i, rear); blk.err.insert(i, err); blk.cnt.insert(i, 1)
+        blk.rear.insert(i, rear); blk.err.insert(i, err); blk.slots.insert(i, slot)
         if r_hi > blk.max_rear_hi:
             blk.max_rear_hi = r_hi
         if i == len(bh)-1:
             blk_max[b_idx] = (h, y2)
         if len(bh) > _HBLOCK_MAX:
             mid = len(bh)//2
-            right = _HBlock(bh[mid:], by2[mid:], blk.rear[mid:], blk.err[mid:], blk.cnt[mid:])
+            right = _HBlock(bh[mid:], by2[mid:], blk.rear[mid:], blk.err[mid:], blk.slots[mid:])
             right.refresh_max_rear_hi()
-            del bh[mid:]; del by2[mid:]; del blk.rear[mid:]; del blk.err[mid:]; del blk.cnt[mid:]
+            del bh[mid:]; del by2[mid:]; del blk.rear[mid:]; del blk.err[mid:]; del blk.slots[mid:]
             blk.refresh_max_rear_hi()
             blk_max[b_idx] = (bh[-1], by2[-1])
             blocks.insert(b_idx+1, right)
             blk_max.insert(b_idx+1, (right.h[-1], right.y2[-1]))
 
-    def _blocks_remove(self, h, y2):
-        blocks = self._blocks
-        if not blocks:
+    def _kill_slot(self, i):
+        alive = self._alive
+        if not alive[i]:
             return
-        blk_max = self._blk_max
-        b_idx = bisect.bisect_left(blk_max, (h, y2))
-        if b_idx >= len(blocks):
-            return
-        blk = blocks[b_idx]
-        bh = blk.h; by2 = blk.y2
-        i = self._find_in_block(blk, h, y2)
-        if i >= len(bh) or bh[i] != h or by2[i] != y2:
-            return
-        c = blk.cnt[i]-1
-        if c > 0:
-            blk.cnt[i] = c
-            return
-        removed_hi = blk.rear[i]+blk.err[i]
-        del bh[i]; del by2[i]; del blk.rear[i]; del blk.err[i]; del blk.cnt[i]
-        if not bh:
-            del blocks[b_idx]; del blk_max[b_idx]
-            return
-        if removed_hi >= blk.max_rear_hi:
-            blk.refresh_max_rear_hi()
-        blk_max[b_idx] = (bh[-1], by2[-1])
-        if len(bh) < _HBLOCK_MERGE_TRIGGER and len(blocks) > 1:
-            if b_idx+1 < len(blocks) and len(bh)+len(blocks[b_idx+1].h) <= _HBLOCK_MERGE_MAX:
-                nxt = blocks[b_idx+1]
-                bh.extend(nxt.h); by2.extend(nxt.y2)
-                blk.rear.extend(nxt.rear); blk.err.extend(nxt.err); blk.cnt.extend(nxt.cnt)
-                if nxt.max_rear_hi > blk.max_rear_hi: blk.max_rear_hi = nxt.max_rear_hi
-                blk_max[b_idx] = (bh[-1], by2[-1])
-                del blocks[b_idx+1]; del blk_max[b_idx+1]
-            elif b_idx > 0 and len(blocks[b_idx-1].h)+len(bh) <= _HBLOCK_MERGE_MAX:
-                prv = blocks[b_idx-1]
-                prv.h.extend(bh); prv.y2.extend(by2)
-                prv.rear.extend(blk.rear); prv.err.extend(blk.err); prv.cnt.extend(blk.cnt)
-                if blk.max_rear_hi > prv.max_rear_hi: prv.max_rear_hi = blk.max_rear_hi
-                blk_max[b_idx-1] = (prv.h[-1], prv.y2[-1])
-                del blocks[b_idx]; del blk_max[b_idx]
-
-    def _flush_blocks(self):
-        pending = self._pending_del
-        if not pending:
-            return
-        hs = self._h; y2s = self._y2
-        remove = self._blocks_remove
-        for i in pending:
-            remove(hs[i], y2s[i])
-        self._free.extend(pending)
-        self._pending_del = array("I")
-
-    def _alloc_slot(self, bx, by1, by2, bh, brear, berr):
-        if self._free:
-            i = self._free.pop()
-            self._x[i] = bx; self._y1[i] = by1; self._y2[i] = by2
-            self._h[i] = bh; self._rear[i] = brear; self._err[i] = berr
-        else:
-            i = len(self._x)
-            self._x.append(bx); self._y1.append(by1); self._y2.append(by2)
-            self._h.append(bh); self._rear.append(brear); self._err.append(berr)
-        self.count += 1
-        return i
-
-    def _free_slot(self, i, defer_blocks=False):
+        alive[i] = 0
+        self.count -= 1
         if self._recent_s:
             self._recent_s.discard((self._x[i], self._y1[i], self._y2[i], self._h[i]))
-        if defer_blocks:
-            self._pending_del.append(i)
+        if self._rebuild is not None:
+            shadow, _, mapping = self._rebuild
+            new_i = mapping.pop(i, None)
+            if new_i is not None and shadow._alive[new_i]:
+                shadow._alive[new_i] = 0
+                shadow.count -= 1
+                if shadow.count == 0:
+                    shadow.clear()
+                    mapping.clear()
+
+    def _insert_raw(self, bx, by1, by2, bh, brear, berr):
+        slot = len(self._x)
+        self._x.append(bx); self._y1.append(by1); self._y2.append(by2)
+        self._h.append(bh); self._rear.append(brear); self._err.append(berr)
+        self._alive.append(1)
+        self.count += 1
+        rb = OCCLUSION_TOP_DRIFT_HEIGHTS*bh
+        self._x_hi.push(bx+rb, slot); self._x_lo.push(-(bx-rb), slot)
+        self._y_hi.push(by1+rb, slot); self._y_lo.push(-(by1-rb), slot)
+        self._blocks_add(bh, by2, brear, berr, slot)
+        self._kd_insert(slot, bx, by1, bh, brear, berr)
+        return slot
+
+    def _step_compact(self, budget):
+        shadow, pos, mapping = self._rebuild
+        alive = self._alive
+        xs, y1s, y2s, hs, rears, errs = self._x, self._y1, self._y2, self._h, self._rear, self._err
+        copied = 0
+        i = alive.find(1, pos)
+        while i != -1 and copied < budget:
+            mapping[i] = shadow._insert_raw(xs[i], y1s[i], y2s[i], hs[i], rears[i], errs[i])
+            copied += 1
+            pos = i+1
+            i = alive.find(1, pos)
+        if i == -1:
+            self._x, self._y1, self._y2 = shadow._x, shadow._y1, shadow._y2
+            self._h, self._rear, self._err = shadow._h, shadow._rear, shadow._err
+            self._alive, self.count, self._root = shadow._alive, shadow.count, shadow._root
+            self._x_hi, self._x_lo = shadow._x_hi, shadow._x_lo
+            self._y_hi, self._y_lo = shadow._y_hi, shadow._y_lo
+            self._blocks, self._blk_max = shadow._blocks, shadow._blk_max
+            self._rebuild = None
         else:
-            self._blocks_remove(self._h[i], self._y2[i])
-            self._free.append(i)
-        self.count -= 1
+            self._rebuild = (shadow, i, mapping)
+        return copied
 
-    def _compact_slots(self):
+    def maybe_compact(self, budget=64):
+        if budget <= 0:
+            return 0
         if self.count == 0:
-            self.clear()
-            return
-        self._flush_blocks()
-        idxs = []
-        _collect_idxs(self._root, idxs)
-        nx = array("d"); ny1 = array("d"); ny2 = array("d")
-        nh = array("d"); nrear = array("d"); nerr = array("d")
-        ox, oy1, oy2, oh, orear, oerr = self._x, self._y1, self._y2, self._h, self._rear, self._err
-        for i in idxs:
-            nx.append(ox[i]); ny1.append(oy1[i]); ny2.append(oy2[i])
-            nh.append(oh[i]); nrear.append(orear[i]); nerr.append(oerr[i])
-        self._x, self._y1, self._y2, self._h, self._rear, self._err = nx, ny1, ny2, nh, nrear, nerr
-        self._free = array("I")
-        self.count = len(nx)
-        self._root = _build_kd(range(self.count), nx, ny1, nh, nrear, nerr)
+            if len(self._x):
+                self.clear()
+            return 0
+        if self._rebuild is None:
+            if len(self._x) <= 2*max(self.count, 64):
+                return 0
+            self._rebuild = (_ClipBaselines(), 0, {})
+        return self._step_compact(budget)
 
-    def _free_subtree(self, node):
-        if node.idxs is not None:
-            for i in node.idxs:
-                self._free_slot(i, defer_blocks=True)
-            return
-        self._free_subtree(node.left)
-        self._free_subtree(node.right)
-
-    def _prune_node(self, node, px, y1):
-        if node.min_x_hi >= px and node.max_x_lo <= px and node.min_y_hi >= y1 and node.max_y_lo <= y1:
-            return node, False
-        if node.max_x_hi < px or node.min_x_lo > px or node.max_y_hi < y1 or node.min_y_lo > y1:
-            self._free_subtree(node)
-            return None, True
-        if node.idxs is not None:
-            xs, y1s, hs = self._x, self._y1, self._h
-            kept = array("I")
-            removed = False
-            for i in node.idxs:
-                bx = xs[i]; by1 = y1s[i]; r = OCCLUSION_TOP_DRIFT_HEIGHTS*hs[i]
-                if bx-r <= px <= bx+r and by1-r <= y1 <= by1+r:
-                    kept.append(i)
-                else:
-                    self._free_slot(i, defer_blocks=True)
-                    removed = True
-            if not removed:
-                return node, False
-            if not kept:
-                return None, True
-            node.idxs = kept
-            node.refresh_leaf(xs, y1s, hs, self._rear, self._err)
-            return node, True
-        new_left, cl = self._prune_node(node.left, px, y1)
-        new_right, cr = self._prune_node(node.right, px, y1)
-        if not (cl or cr):
-            return node, False
-        if new_left is None:
-            return new_right, True
-        if new_right is None:
-            return new_left, True
-        node.left, node.right = new_left, new_right
-        node.refresh_internal()
-        return node, True
-
-    def prune(self, px, y1):
-        root = self._root
-        if root is None:
+    def prune(self, px, y1, *, compact=True):
+        if self.count == 0:
             return False
-        if root.min_x_hi >= px and root.max_x_lo <= px and root.min_y_hi >= y1 and root.max_y_lo <= y1:
-            return True
-        if root.max_x_hi < px or root.min_x_lo > px or root.max_y_hi < y1 or root.min_y_lo > y1:
+        neg_px, neg_y1 = -px, -y1
+        x_hi, x_lo, y_hi, y_lo = self._x_hi, self._x_lo, self._y_hi, self._y_lo
+        if (x_hi.max_vals[-1] < px or x_lo.max_vals[-1] < neg_px or
+                y_hi.max_vals[-1] < y1 or y_lo.max_vals[-1] < neg_y1):
             self.clear()
             return False
-        self._root, _ = self._prune_node(root, px, y1)
-        if self._root is None:
-            self.clear()
-            return False
+        alive = self._alive
+        killed = x_hi.pop_below(px, alive)
+        if killed:
+            self.count -= killed
+            if self.count == 0:
+                self.clear()
+                return False
+        k2 = x_lo.pop_below(neg_px, alive)
+        if k2:
+            killed += k2; self.count -= k2
+            if self.count == 0:
+                self.clear()
+                return False
+        k3 = y_hi.pop_below(y1, alive)
+        if k3:
+            killed += k3; self.count -= k3
+            if self.count == 0:
+                self.clear()
+                return False
+        k4 = y_lo.pop_below(neg_y1, alive)
+        if k4:
+            killed += k4; self.count -= k4
+            if self.count == 0:
+                self.clear()
+                return False
+        if killed and self._recent_s:
+            self._recent_q.clear(); self._recent_s.clear()
+        if self._rebuild is not None:
+            shadow, _, mapping = self._rebuild
+            if not shadow.prune(px, y1, compact=False):
+                mapping.clear()
+        if compact and self.count <= 16 and len(self._x) > 128:
+            self._rebuild = (_ClipBaselines(), 0, {})
+            self._step_compact(16)
         return True
 
     def _is_covered(self, node, bx, by1, by2, bh, brear, berr, rb, bx_lo, bx_hi, by_lo, by_hi, brear_hi):
@@ -578,16 +604,17 @@ class _ClipBaselines:
             if bx < node.min_x or bx > node.max_x or by1 < node.min_y or by1 > node.max_y or bh < node.min_h:
                 return False
         if node.idxs is not None:
+            alive = self._alive
             xs, y1s, y2s, hs = self._x, self._y1, self._y2, self._h
             if not can_dominate:
                 for i in node.idxs:
-                    if xs[i] == bx and y1s[i] == by1 and y2s[i] == by2 and hs[i] == bh:
+                    if alive[i] and xs[i] == bx and y1s[i] == by1 and y2s[i] == by2 and hs[i] == bh:
                         return True
                 return False
             rears, errs = self._rear, self._err
             for i in node.idxs:
-                if _dominates_coords(xs[i], y1s[i], y2s[i], hs[i], rears[i], errs[i],
-                                     bx, by1, by2, bh, brear, berr):
+                if alive[i] and _dominates_coords(xs[i], y1s[i], y2s[i], hs[i], rears[i], errs[i],
+                                                  bx, by1, by2, bh, brear, berr):
                     return True
             return False
         return (self._is_covered(node.left, bx, by1, by2, bh, brear, berr, rb, bx_lo, bx_hi, by_lo, by_hi, brear_hi) or
@@ -611,13 +638,17 @@ class _ClipBaselines:
         if ax+reach < node.min_x or ax-reach > node.max_x or ay1+reach < node.min_y or ay1-reach > node.max_y:
             return node, False
         if node.idxs is not None:
+            alive = self._alive
             xs, y1s, y2s, hs, rears, errs = self._x, self._y1, self._y2, self._h, self._rear, self._err
             kept = array("I")
             removed = False
             for i in node.idxs:
+                if not alive[i]:
+                    removed = True
+                    continue
                 if _dominates_coords(ax, ay1, ay2, ah, arear, aerr,
                                      xs[i], y1s[i], y2s[i], hs[i], rears[i], errs[i]):
-                    self._free_slot(i)
+                    self._kill_slot(i)
                     removed = True
                 else:
                     kept.append(i)
@@ -657,73 +688,85 @@ class _ClipBaselines:
         node.include_point(bx, by1, bh, brear, berr)
         if len(node.idxs) <= _KD_LEAF_MAX:
             return
+        alive = self._alive
         xs, y1s, hs, rears, errs = self._x, self._y1, self._h, self._rear, self._err
-        split_node = _build_kd(node.idxs, xs, y1s, hs, rears, errs)
+        live_leaf = [i for i in node.idxs if alive[i]]
+        if len(live_leaf) <= _KD_LEAF_MAX:
+            node.idxs = array("I", live_leaf)
+            node.refresh_leaf(xs, y1s, hs, rears, errs)
+            for parent, _ in reversed(path):
+                parent.refresh_internal()
+            return
+        split_node = _build_kd(live_leaf, xs, y1s, hs, rears, errs)
         if not path:
             self._root = split_node
             return
         parent, was_left = path[-1]
         if was_left: parent.left = split_node
         else: parent.right = split_node
+        if len(live_leaf) < len(node.idxs):
+            for anc, _ in reversed(path):
+                anc.refresh_internal()
         for depth_i, (anc, _) in enumerate(path):
             if anc.count >= 64 and 4*max(anc.left.count, anc.right.count) > 3*anc.count:
                 sub = []
                 _collect_idxs(anc, sub)
-                rebuilt = _build_kd(sub, xs, y1s, hs, rears, errs)
+                live_sub = [i for i in sub if alive[i]]
+                rebuilt = _build_kd(live_sub, xs, y1s, hs, rears, errs)
                 if depth_i == 0:
                     self._root = rebuilt
                 else:
                     gp, gp_left = path[depth_i-1]
                     if gp_left: gp.left = rebuilt
                     else: gp.right = rebuilt
+                    for k in range(depth_i-1, -1, -1):
+                        path[k][0].refresh_internal()
                 return
 
-    def add(self, b):
+    def add(self, b, *, compact=True):
         bx, by1, by2, bh, brear, berr = b
         key = (bx, by1, by2, bh)
         if key in self._recent_s:
+            if compact:
+                self.maybe_compact()
             return
         rb = OCCLUSION_TOP_DRIFT_HEIGHTS*bh
         bx_lo, bx_hi, by_lo, by_hi = bx-rb, bx+rb, by1-rb, by1+rb
         if self._is_covered(self._root, bx, by1, by2, bh, brear, berr,
                             rb, bx_lo, bx_hi, by_lo, by_hi, brear+berr):
+            if compact:
+                self.maybe_compact()
             return
         if self._root is not None:
             self._root, _ = self._evict_dominated(self._root, bx, by1, by2, bh, brear, berr,
                                                   bx_lo, bx_hi, by_lo, by_hi, brear-berr)
-        slot = self._alloc_slot(bx, by1, by2, bh, brear, berr)
+            if self.count == 0:
+                self.clear()
+        slot = len(self._x)
+        self._x.append(bx); self._y1.append(by1); self._y2.append(by2)
+        self._h.append(bh); self._rear.append(brear); self._err.append(berr)
+        self._alive.append(1)
+        self.count += 1
         self._recent_s.add(key)
         self._recent_q.append(key)
         if len(self._recent_q) > MAX_HISTORY_SAMPLES:
             self._recent_s.discard(self._recent_q.popleft())
-        self._blocks_add(bh, by2, brear, berr)
+        self._x_hi.push(bx_hi, slot); self._x_lo.push(-bx_lo, slot)
+        self._y_hi.push(by_hi, slot); self._y_lo.push(-by_lo, slot)
+        self._blocks_add(bh, by2, brear, berr, slot)
         self._kd_insert(slot, bx, by1, bh, brear, berr)
-        if len(self._pending_del) > max(self.count, 64):
-            self._flush_blocks()
-        if len(self._x) > 4*max(self.count, 64):
-            self._compact_slots()
+        if compact:
+            self.maybe_compact()
 
     def best_for_crossing(self, h_min, rear_floor, height, y1, px, eligible, side, best_key):
-        """Return highest qualifying ``(h_base, y2_base)`` beating ``best_key`` (or ``best_key``
-        unchanged) without rebuilding on partial drift pruning or scanning shorter heights
-        after the tallest eligible baseline clears a straight stop line."""
-        root = self._root
-        if root is None:
-            return best_key
-        h_floor = h_min-1e-9
-        # O(1) surviving-root shortcuts run BEFORE flushing deferred partial-prune removals.
-        if root.max_h < h_floor:
-            return best_key
-        if best_key is not None and root.max_h < best_key[0]:
-            return best_key
-        root_top_y2 = y1+root.max_h
-        if root.max_h >= height and math.isfinite(root_top_y2) and side((px, root_top_y2)) >= 0:
-            return best_key
-        if self._pending_del:
-            self._flush_blocks()
+        """Return highest qualifying live ``(h_base, y2_base)`` beating ``best_key`` (or ``best_key``
+        unchanged) without scanning shorter heights after the tallest eligible baseline clears
+        a straight stop line."""
         blocks = self._blocks
-        if not blocks:
+        if not blocks or self.count == 0:
             return best_key
+        alive = self._alive
+        h_floor = h_min-1e-9
         for b_idx in range(len(blocks)-1, -1, -1):
             blk = blocks[b_idx]
             top_h = blk.h[-1]
@@ -737,9 +780,11 @@ class _ClipBaselines:
             top_behind = side((px, top_y2)) < 0 if (top_h >= height and math.isfinite(top_y2)) else None
             if top_behind is False:
                 return best_key
-            bh = blk.h; by2 = blk.y2; brear = blk.rear; berr = blk.err
+            bh = blk.h; by2 = blk.y2; brear = blk.rear; berr = blk.err; bslots = blk.slots
             last_i = len(bh)-1
             for i in range(last_i, -1, -1):
+                if not alive[bslots[i]]:
+                    continue
                 h_base = bh[i]
                 if h_base < h_floor:
                     return best_key
@@ -930,7 +975,7 @@ class VehicleWaits:
         if saved is not None and not saved.prune(px, y1):
             state["clip_baselines"] = None
 
-    def _refresh_clip_baselines(self, state, observation, timestamp, prev_obs):
+    def _refresh_clip_baselines(self, state, observation, timestamp, prev_obs, compact_budget):
         """Record corroborated stationary baselines into the indexed set without
         scanning accumulated anchors on stationary frames."""
         history = state.get("clip_history")
@@ -944,8 +989,11 @@ class VehicleWaits:
         earlier = list(history)
         pairs = list(dict.fromkeys(self._corroborated_pairs(earlier)))
         saved = state.get("clip_baselines")
-        if saved is not None and all(saved.covered(p) for p in pairs):
-            return
+        if saved is not None:
+            if compact_budget[0] > 0:
+                compact_budget[0] -= saved.maybe_compact(compact_budget[0])
+            if all(saved.covered(p) for p in pairs):
+                return
         samples = earlier+[(timestamp, px, py, height)]
         motion = _fit(samples)
         if motion is None:
@@ -967,7 +1015,9 @@ class VehicleWaits:
                 saved = _ClipBaselines()
                 state["clip_baselines"] = saved
             for b in valid:
-                saved.add(b)
+                saved.add(b, compact=False)
+            if compact_budget[0] > 0:
+                compact_budget[0] -= saved.maybe_compact(compact_budget[0])
 
     def _bottom_clipped_crossing(self, state, observation, timestamp, prev_obs):
         """Return ``(h_base, pair_to_save_or_None)`` when a stop-line crossing is
@@ -1042,14 +1092,17 @@ class VehicleWaits:
     def _invalid_crossing_geometry(observation):
         if observation.bbox is not None and _raw_box(observation.bbox) is None:
             return True
-        if observation.height is not None and _height(observation) is None:
+        h = _height(observation)
+        if observation.height is not None and h is None:
             return True
         try:px, py = float(observation.point[0]), float(observation.point[1])
         except (TypeError, ValueError, IndexError, OverflowError, KeyError):return True
-        return not (math.isfinite(px) and math.isfinite(py))
+        if not (math.isfinite(px) and math.isfinite(py)):
+            return True
+        return h is not None and not math.isfinite(py-h)
 
     def _evaluate_crossing(self, state, prev_obs, observation, phase, timestamp, sequence, cycle_id,
-                           valid_motion, continuing, keep_pending):
+                           valid_motion, continuing, keep_pending, compact_budget):
         row = state["row"]
         geom = self._valid_box_geometry(observation)
         pending = state.get("pending_crossing")
@@ -1090,7 +1143,7 @@ class VehicleWaits:
                     if saved is None:
                         saved = _ClipBaselines()
                         state["clip_baselines"] = saved
-                    saved.add(pair)
+                    saved.add(pair, compact=False)
                 if keep_pending:
                     state["pending_crossing"] = {"from": prev_obs, "h_base": h_base, "recovered": 0}
                 return False
@@ -1098,7 +1151,7 @@ class VehicleWaits:
             self._clear_clip_state(state)
             return True
         if continuing:
-            self._refresh_clip_baselines(state, observation, timestamp, prev_obs)
+            self._refresh_clip_baselines(state, observation, timestamp, prev_obs, compact_budget)
         return False
 
     def _cross(self, row, previous, observation, phase, timestamp, cycle_id):
@@ -1141,6 +1194,7 @@ class VehicleWaits:
                         self._contest(self.handed_off[identity]["row_id"], identity, timestamp)
             self._continue_fragments(observations, timestamp, unassigned)
         present = set()
+        compact_budget = [64]
         for observation in observations:
             if observation.local_id is None or not observation.stable_id: continue
             identity = (observation.epoch, observation.local_id)
@@ -1178,7 +1232,7 @@ class VehicleWaits:
                     if step_continuous:
                         crossed_now = self._evaluate_crossing(
                             state, prev_obs, observation, phase, timestamp, sequence, cycle_id,
-                            False, continuing, keep_pending=native_exit)
+                            False, continuing, keep_pending=native_exit, compact_budget=compact_budget)
                     else:
                         self._clear_clip_state(state)
                     if crossed_now:
@@ -1236,7 +1290,7 @@ class VehicleWaits:
             if crossing_continuous:
                 self._evaluate_crossing(
                     state, prev_obs, observation, phase, timestamp, sequence, cycle_id,
-                    valid_motion, continuing, keep_pending=True)
+                    valid_motion, continuing, keep_pending=True, compact_budget=compact_budget)
             elif prev_obs is not None or crossing_broken:
                 self._clear_clip_state(state)
             if valid_motion:
@@ -1343,15 +1397,14 @@ class VehicleWaits:
         veto_window = min(self.policy.max_gap_sec, OCCLUSION_MAX_GAP_SEC)+1e-9
         for identity, state in self.active.items():
             row, previous, history = state["row"], state["previous"], state.get("history")
-            if identity in present or row["completed"] or previous is None:continue
-            if row["vehicle_id"] not in self.records:continue
+            if identity in present or row["completed"] or row["vehicle_id"] not in self.records:continue
             if native_exit and state.get("exit_candidate") is not None:
                 last_box = state.get("last_valid_box")
                 if last_box is not None and 0 < timestamp-last_box[0] <= veto_window:
                     _, bx, by, bh = last_box
                     static_vetoes.append((identity, bx, by, by-bh, bh))
                 continue
-            if not history:continue
+            if previous is None or not history:continue
             dt = timestamp-previous["time"]
             if not 0 < dt <= self.policy.max_gap_sec+1e-9:continue
             last_time, x, y, height = history[-1]
