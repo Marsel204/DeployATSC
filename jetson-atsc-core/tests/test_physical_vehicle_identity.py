@@ -1595,6 +1595,40 @@ def test_sustained_stationary_jitter_per_frame_cost_stays_bounded():
     saved_pd = waits_prune_dense.active[(0, 1)]['clip_baselines']
     assert 150 <= len(saved_pd) == len(saved_pd._x) <= 250
 
+    # Sol Round 15 (S18): holding a pending crossing across the stop line must ALSO advance
+    # compaction instead of stalling 201 live anchors in 901 slots.
+    waits_pending_compact = book(side=lambda p: 270.-p[1])
+    for f in range(1800):
+        step = f//2
+        x = 150. if step < 700 else 155.
+        waits_pending_compact.observe([car(1, 276.+0.001*step, x=x, height=60., speed=0.)],
+                                      'RED', f/FPS, f+1, 1, unassigned=())
+    for f in range(1800, 2101):
+        waits_pending_compact.observe([car(1, 264., x=160., height=48., speed=0.)],
+                                      'RED', f/FPS, f+1, 1, unassigned=())
+    assert not only_row(waits_pending_compact)['crossed_stop_line']
+    assert waits_pending_compact.active[(0, 1)].get('pending_crossing') is not None
+    saved_pc = waits_pending_compact.active[(0, 1)]['clip_baselines']
+    assert 150 <= len(saved_pc) == len(saved_pc._x) <= 250
+
+    # Sol Round 15 (S12): monotonic multi-thousand-entry compaction must stay within per-frame
+    # budget without whole-subtree KD/R-tree rebuild spikes.
+    waits_mono = book(side=lambda p: 270.-p[1])
+    for f in range(4000):
+        x = 150. if f < 2100 else 155.
+        waits_mono.observe([car(1, 276.+0.0005*f, x=x, height=60., speed=0.)],
+                           'RED', f/FPS, f+1, 1, unassigned=())
+    mono_times = []
+    for k in range(50):
+        f = 4000+k
+        started = time.perf_counter()
+        waits_mono.observe([car(1, 278.0, x=160., height=60., speed=0.)],
+                           'RED', f/FPS, f+1, 1, unassigned=())
+        mono_times.append((time.perf_counter()-started)*1000.)
+    saved_mono = waits_mono.active[(0, 1)]['clip_baselines']
+    assert max(mono_times) < 15.0, f'monotonic compaction spike {max(mono_times):.2f} ms'
+    assert 1500 <= len(saved_mono) == len(saved_mono._x) <= 2000
+
 
 def test_missed_frame_clears_crossing_clip_evidence_but_preserves_fragment_history():
     """Sol S14: a missed frame clears saved clip baselines AND crossing clip history so
@@ -1992,6 +2026,41 @@ def test_exit_pending_crossing_during_first_green_counts_in_live_and_archived_n_
     state, token = e.prepare_commit(); store.persist(state); e.acknowledge(token)
     archived = store.read()
     assert archived['comparisons'][0]['n_served'] == 1
+
+    # Sol Round 15 (default-off n_served invariance): with both options off (exit_persistence_sec=0)
+    # and 1-frame debounce, GREEN(empty) -> YELLOW(car inside y=90) -> GREEN(car outside y=110)
+    # keeps cycle 2 n_served == 0 across live, retention eviction, export, and reopened pre-upgrade
+    # archives (where exit_persistence_sec is absent); native exit_persistence_sec=0.3 counts 1.
+    import json
+    YELLOW = np.full((8, 8, 3), (0, 255, 255), np.uint8)
+    for exit_sec, expect_served in ((0.0, 0), (0.3, 1)):
+        eng = ObservationEngine(f'run-r15-{int(exit_sec*10)}',
+                                RunPolicy(debounce_frames=1, stop_persistence_sec=0, exit_persistence_sec=exit_sec),
+                                {'xmin': 0, 'ymin': 0, 'xmax': 8, 'ymax': 8}, lambda p: p[1]-100., lambda *_: None)
+        eng.enable_retention(1, tmp_path)
+        st = ExperimentStore(tmp_path, eng.run_id, {})
+        eng.observe_acquisition(GREEN, 0.0, 1, [])
+        eng.observe_acquisition(YELLOW, 1/FPS, 2, [car(1, 90., speed=2., in_region=True)])
+        eng.observe_acquisition(GREEN, 2/FPS, 3, [car(1, 110., speed=2., in_region=False)])
+        eng.observe_acquisition(GREEN, 3/FPS, 4, [])
+        c2_live = next(c for c in eng.snapshot()['comparisons'] if c['cycle_id'] == 2)
+        assert c2_live['n_served'] == expect_served
+        s1, tok1 = eng.prepare_commit(); st.persist(s1); eng.acknowledge(tok1)
+        c2_evicted = next(c for c in eng.snapshot()['comparisons'] if c['cycle_id'] == 2)
+        assert c2_evicted['n_served'] == expect_served
+        eng.close()
+        s2, tok2 = eng.prepare_commit(); st.persist(s2); eng.acknowledge(tok2)
+        c2_arch = next(c for c in st.read()['comparisons'] if c['cycle_id'] == 2)
+        assert c2_arch['n_served'] == expect_served
+        if exit_sec == 0.0:
+            # Simulate reopening a pre-upgrade archive where exit_persistence_sec was absent from policy.
+            ev_path = st.directory/'evidence.json'
+            ev_data = json.loads(ev_path.read_text())
+            ev_data['state']['policy'].pop('exit_persistence_sec', None)
+            ev_path.write_text(json.dumps(ev_data))
+            reopened = ExperimentStore.open(st.directory)
+            c2_legacy = next(c for c in reopened.read()['comparisons'] if c['cycle_id'] == 2)
+            assert c2_legacy['n_served'] == 0
 
 
 def test_delayed_vehicle_eviction_does_not_leak_archived_crossing_cycle_population(tmp_path):

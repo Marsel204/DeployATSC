@@ -564,7 +564,9 @@ class ObservationSession:
         labels=[]
         with self.engine.lock:
             for v in tracks:
-                p=tuple(int(x) for x in v.bbox)
+                box=_finite_box(getattr(v,"bbox",None))
+                if box is None or not all(abs(x)<1_000_000_000 for x in box):continue
+                p=tuple(int(x) for x in box)
                 label=f"#{v.track_id} {v.class_name}" if getattr(v,"stable_id",False) else v.class_name+" (ID unknown)"
                 if role=="acquisition":
                     state=self.engine.waits.active.get((getattr(v,"epoch",0),v.track_id))

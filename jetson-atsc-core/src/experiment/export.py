@@ -204,10 +204,15 @@ class ExperimentStore:
         # Cycle partial/served populations depend on eventual vehicle outcomes,
         # including tracks which outlive many cycles. Rebuild on explicit reads.
         if state['comparisons'] and all('green_start' in c for c in state['comparisons']):
+            policy=state.get('policy') or self.manifest.get('policy') or {}
+            identity=state.get('vehicle_identity') or self.manifest.get('vehicle_identity') or {}
+            native_exit=float(policy.get('exit_persistence_sec') or 0)>0 and identity.get('mode')!='persistent_v1'
             by_cycle={};crossings_by_cycle={}
             for row in state['vehicles']:
-                for cycle_id in row.get('cycles',[]):by_cycle.setdefault(cycle_id,[]).append(row)
-                if row.get('crossed_stop_line') and row.get('crossing_cycle') is not None:
+                row_cycles=row.get('cycles',[])
+                for cycle_id in row_cycles:by_cycle.setdefault(cycle_id,[]).append(row)
+                if (row.get('crossed_stop_line') and row.get('crossing_cycle') is not None and
+                        (native_exit or row['crossing_cycle'] in row_cycles)):
                     crossings_by_cycle.setdefault(row['crossing_cycle'],[]).append(row)
             for cycle in state['comparisons']:
                 rows=by_cycle.get(cycle['cycle_id'],[])

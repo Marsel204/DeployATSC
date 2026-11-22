@@ -175,6 +175,7 @@ class ObservationEngine:
             cycles.append(cycle)
         results = []
         self.comparison_visits = 0
+        native_exit = self.waits.policy.exit_persistence_sec > 0
         for cycle in cycles:
             prediction = records.get(cycle["cycle_id"])
             actual = cycle.get("actual_green_sec")
@@ -185,10 +186,12 @@ class ObservationEngine:
             end = cycle.get("green_end", self.time)
             for row in self.waits.records.values():
                 self.comparison_visits += 1
-                if (row["crossed_stop_line"] and row["crossing_cycle"]==cycle["cycle_id"] and
+                in_cycle = cycle["cycle_id"] in row["cycles"]
+                if ((in_cycle or native_exit) and
+                        row["crossed_stop_line"] and row["crossing_cycle"]==cycle["cycle_id"] and
                         cycle["green_start"]<=row["completed_at"]<end):
                     served += 1
-                if cycle["cycle_id"] not in row["cycles"]: continue
+                if not in_cycle: continue
                 values.append(row["wait_by_cycle"].get(str(cycle["cycle_id"]), {}).get("red_wait_sec", 0.))
                 partial += bool(row["left_censored"] or row["right_censored"] or row["quality_flags"])
             if self.retention:

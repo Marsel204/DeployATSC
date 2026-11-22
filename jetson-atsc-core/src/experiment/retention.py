@@ -231,6 +231,7 @@ class Retention:
         live_cycles={c['cycle_id'] for c in engine.phase.cycles if c['cycle_id'] not in drop}
         if engine.phase.green:live_cycles.add(engine.phase.green['cycle_id'])
         retained_cycles=live_cycles|{engine.phase.cycle_id+1}
+        native_exit=engine.waits.policy.exit_persistence_sec>0
         for identity,change in token['vehicles'].items():
             row=engine.waits.records.get(identity)
             if row is None:continue
@@ -251,7 +252,8 @@ class Retention:
                     population['count']+=1
                     population['wait']+=final['wait_by_cycle'].get(str(cycle_id),{}).get('red_wait_sec',0.)
                     population['partial']+=bool(final['left_censored'] or final['right_censored'] or final['quality_flags'])
-                if final['crossed_stop_line'] and final['crossing_cycle'] in live_cycles:
+                if (final['crossed_stop_line'] and final['crossing_cycle'] in live_cycles and
+                        (native_exit or final['crossing_cycle'] in final['cycles'])):
                     population=self.cycle_population.setdefault(final['crossing_cycle'],{'count':0,'wait':0.,'partial':0,'crossings':[]})
                     population['crossings'].append(final['completed_at'])
                 engine.waits.work-=len(row['intervals'])+int(row['completed'])

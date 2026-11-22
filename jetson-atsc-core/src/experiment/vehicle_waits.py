@@ -151,19 +151,22 @@ def _dominates_coords(ax, ay1, ay2, ah, arear, aerr, bx, by1, by2, bh, brear, be
             ay1-ra <= by1-rb and ay1+ra >= by1+rb)
 
 
-_KD_LEAF_MAX = 128
+_R_LEAF_MAX = 64
+_R_NODE_MAX = 16
 
 
-class _KDNode:
-    __slots__ = ("axis", "split", "left", "right", "idxs", "count",
+class _RNode:
+    """Self-balancing 2D R-tree node with height/rear/drift envelopes and strict
+    O(log N) split-only insertion (zero whole-subtree rebuilds)."""
+    __slots__ = ("children", "idxs", "count",
                  "min_x", "max_x", "min_y", "max_y", "min_h", "max_h",
                  "max_rear_lo", "min_rear_hi",
                  "min_x_hi", "max_x_hi", "min_x_lo", "max_x_lo",
                  "min_y_hi", "max_y_hi", "min_y_lo", "max_y_lo")
 
-    def __init__(self, *, idxs=None, axis=0, split=0.0, left=None, right=None):
-        self.axis = axis; self.split = split; self.left = left; self.right = right
+    def __init__(self, *, idxs=None, children=None):
         self.idxs = idxs
+        self.children = children
         self.count = 0
         self.min_x = self.min_y = self.min_h = math.inf
         self.max_x = self.max_y = self.max_h = -math.inf
@@ -240,59 +243,44 @@ class _KDNode:
         self.count = len(idxs)
 
     def refresh_internal(self):
-        l, r = self.left, self.right
-        self.min_x = l.min_x if l.min_x < r.min_x else r.min_x
-        self.max_x = l.max_x if l.max_x > r.max_x else r.max_x
-        self.min_y = l.min_y if l.min_y < r.min_y else r.min_y
-        self.max_y = l.max_y if l.max_y > r.max_y else r.max_y
-        self.min_h = l.min_h if l.min_h < r.min_h else r.min_h
-        self.max_h = l.max_h if l.max_h > r.max_h else r.max_h
-        self.max_rear_lo = l.max_rear_lo if l.max_rear_lo > r.max_rear_lo else r.max_rear_lo
-        self.min_rear_hi = l.min_rear_hi if l.min_rear_hi < r.min_rear_hi else r.min_rear_hi
-        self.min_x_hi = l.min_x_hi if l.min_x_hi < r.min_x_hi else r.min_x_hi
-        self.max_x_hi = l.max_x_hi if l.max_x_hi > r.max_x_hi else r.max_x_hi
-        self.min_x_lo = l.min_x_lo if l.min_x_lo < r.min_x_lo else r.min_x_lo
-        self.max_x_lo = l.max_x_lo if l.max_x_lo > r.max_x_lo else r.max_x_lo
-        self.min_y_hi = l.min_y_hi if l.min_y_hi < r.min_y_hi else r.min_y_hi
-        self.max_y_hi = l.max_y_hi if l.max_y_hi > r.max_y_hi else r.max_y_hi
-        self.min_y_lo = l.min_y_lo if l.min_y_lo < r.min_y_lo else r.min_y_lo
-        self.max_y_lo = l.max_y_lo if l.max_y_lo > r.max_y_lo else r.max_y_lo
-        self.count = l.count+r.count
-
-
-def _build_kd(idxs, xs, y1s, hs, rears, errs):
-    if len(idxs) <= _KD_LEAF_MAX:
-        node = _KDNode(idxs=array("I", idxs))
-        node.refresh_leaf(xs, y1s, hs, rears, errs)
-        return node
-    min_x = min_y = math.inf
-    max_x = max_y = -math.inf
-    for i in idxs:
-        bx = xs[i]; by1 = y1s[i]
-        if bx < min_x: min_x = bx
-        if bx > max_x: max_x = bx
-        if by1 < min_y: min_y = by1
-        if by1 > max_y: max_y = by1
-    axis = 0 if (max_x-min_x) >= (max_y-min_y) else 1
-    coords = xs if axis == 0 else y1s
-    ordered = sorted(idxs, key=coords.__getitem__)
-    mid = len(ordered)//2
-    split = coords[ordered[mid]]
-    left = _build_kd(ordered[:mid], xs, y1s, hs, rears, errs)
-    right = _build_kd(ordered[mid:], xs, y1s, hs, rears, errs)
-    node = _KDNode(axis=axis, split=split, left=left, right=right)
-    node.refresh_internal()
-    return node
-
-
-def _collect_idxs(node, out):
-    if node is None:
-        return
-    if node.idxs is not None:
-        out.extend(node.idxs)
-        return
-    _collect_idxs(node.left, out)
-    _collect_idxs(node.right, out)
+        ch = self.children
+        c0 = ch[0]
+        min_x = c0.min_x; max_x = c0.max_x
+        min_y = c0.min_y; max_y = c0.max_y
+        min_h = c0.min_h; max_h = c0.max_h
+        max_rear_lo = c0.max_rear_lo; min_rear_hi = c0.min_rear_hi
+        min_x_hi = c0.min_x_hi; max_x_hi = c0.max_x_hi
+        min_x_lo = c0.min_x_lo; max_x_lo = c0.max_x_lo
+        min_y_hi = c0.min_y_hi; max_y_hi = c0.max_y_hi
+        min_y_lo = c0.min_y_lo; max_y_lo = c0.max_y_lo
+        count = c0.count
+        for c in ch[1:]:
+            if c.min_x < min_x: min_x = c.min_x
+            if c.max_x > max_x: max_x = c.max_x
+            if c.min_y < min_y: min_y = c.min_y
+            if c.max_y > max_y: max_y = c.max_y
+            if c.min_h < min_h: min_h = c.min_h
+            if c.max_h > max_h: max_h = c.max_h
+            if c.max_rear_lo > max_rear_lo: max_rear_lo = c.max_rear_lo
+            if c.min_rear_hi < min_rear_hi: min_rear_hi = c.min_rear_hi
+            if c.min_x_hi < min_x_hi: min_x_hi = c.min_x_hi
+            if c.max_x_hi > max_x_hi: max_x_hi = c.max_x_hi
+            if c.min_x_lo < min_x_lo: min_x_lo = c.min_x_lo
+            if c.max_x_lo > max_x_lo: max_x_lo = c.max_x_lo
+            if c.min_y_hi < min_y_hi: min_y_hi = c.min_y_hi
+            if c.max_y_hi > max_y_hi: max_y_hi = c.max_y_hi
+            if c.min_y_lo < min_y_lo: min_y_lo = c.min_y_lo
+            if c.max_y_lo > max_y_lo: max_y_lo = c.max_y_lo
+            count += c.count
+        self.min_x = min_x; self.max_x = max_x
+        self.min_y = min_y; self.max_y = max_y
+        self.min_h = min_h; self.max_h = max_h
+        self.max_rear_lo = max_rear_lo; self.min_rear_hi = min_rear_hi
+        self.min_x_hi = min_x_hi; self.max_x_hi = max_x_hi
+        self.min_x_lo = min_x_lo; self.max_x_lo = max_x_lo
+        self.min_y_hi = min_y_hi; self.max_y_hi = max_y_hi
+        self.min_y_lo = min_y_lo; self.max_y_lo = max_y_lo
+        self.count = count
 
 
 _BBLOCK_MAX = 512
@@ -390,8 +378,9 @@ class _ClipBaselines:
     - Four ``_BoundBlocks`` boundary indexes perform O(1) stationary drift checks,
       O(1) whole-track eviction, and O(k) bulk-prefix partial pruning without
       visiting surviving entries or refreshing KD-tree leaves.
-    - A scapegoat-balanced 2D (x, y1) KD-tree carrying height, rear, and drift
-      envelopes answers dominance/duplicate checks and live dominance eviction.
+    - A self-balancing 2D (x, y1) R-tree (``_RNode``) carrying height, rear, and
+      drift envelopes answers dominance/duplicate checks and live dominance
+      eviction with strict O(log N) split-only inserts (zero subtree rebuilds).
     - A 2-level blocked sorted ``(h, y2)`` index (``_HBlock``) answers crossing
       queries in descending ``(h, y2)`` order with O(1) straight-line shortcuts.
     """
@@ -505,7 +494,7 @@ class _ClipBaselines:
         self._x_hi.push(bx+rb, slot); self._x_lo.push(-(bx-rb), slot)
         self._y_hi.push(by1+rb, slot); self._y_lo.push(-(by1-rb), slot)
         self._blocks_add(bh, by2, brear, berr, slot)
-        self._kd_insert(slot, bx, by1, bh, brear, berr)
+        self._rtree_insert(slot, bx, by1, bh, brear, berr)
         return slot
 
     def _step_compact(self, budget):
@@ -617,8 +606,10 @@ class _ClipBaselines:
                                                   bx, by1, by2, bh, brear, berr):
                     return True
             return False
-        return (self._is_covered(node.left, bx, by1, by2, bh, brear, berr, rb, bx_lo, bx_hi, by_lo, by_hi, brear_hi) or
-                self._is_covered(node.right, bx, by1, by2, bh, brear, berr, rb, bx_lo, bx_hi, by_lo, by_hi, brear_hi))
+        for child in node.children:
+            if self._is_covered(child, bx, by1, by2, bh, brear, berr, rb, bx_lo, bx_hi, by_lo, by_hi, brear_hi):
+                return True
+        return False
 
     def covered(self, b):
         bx, by1, by2, bh, brear, berr = b
@@ -659,21 +650,27 @@ class _ClipBaselines:
             node.idxs = kept
             node.refresh_leaf(xs, y1s, hs, rears, errs)
             return node, True
-        new_left, cl = self._evict_dominated(node.left, ax, ay1, ay2, ah, arear, aerr, ax_lo, ax_hi, ay_lo, ay_hi, arear_lo)
-        new_right, cr = self._evict_dominated(node.right, ax, ay1, ay2, ah, arear, aerr, ax_lo, ax_hi, ay_lo, ay_hi, arear_lo)
-        if not (cl or cr):
+        kept_children = []
+        changed = False
+        for c in node.children:
+            nc, chg = self._evict_dominated(c, ax, ay1, ay2, ah, arear, aerr, ax_lo, ax_hi, ay_lo, ay_hi, arear_lo)
+            if chg:
+                changed = True
+            if nc is not None:
+                kept_children.append(nc)
+        if not changed:
             return node, False
-        if new_left is None:
-            return new_right, True
-        if new_right is None:
-            return new_left, True
-        node.left, node.right = new_left, new_right
+        if not kept_children:
+            return None, True
+        if len(kept_children) == 1:
+            return kept_children[0], True
+        node.children = kept_children
         node.refresh_internal()
         return node, True
 
-    def _kd_insert(self, idx, bx, by1, bh, brear, berr):
+    def _rtree_insert(self, idx, bx, by1, bh, brear, berr):
         if self._root is None:
-            node = _KDNode(idxs=array("I", (idx,)))
+            node = _RNode(idxs=array("I", (idx,)))
             node.include_point(bx, by1, bh, brear, berr)
             self._root = node
             return
@@ -681,47 +678,62 @@ class _ClipBaselines:
         node = self._root
         while node.idxs is None:
             node.include_point(bx, by1, bh, brear, berr)
-            go_left = (bx if node.axis == 0 else by1) < node.split
-            path.append((node, go_left))
-            node = node.left if go_left else node.right
+            best_c = None
+            best_enl = math.inf
+            best_perim = math.inf
+            best_cnt = 0
+            for c in node.children:
+                perim = (c.max_x-c.min_x)+(c.max_y-c.min_y)
+                nx0 = bx if bx < c.min_x else c.min_x
+                nx1 = bx if bx > c.max_x else c.max_x
+                ny0 = by1 if by1 < c.min_y else c.min_y
+                ny1 = by1 if by1 > c.max_y else c.max_y
+                enl = (nx1-nx0)+(ny1-ny0)-perim
+                if (enl < best_enl or
+                        (enl == best_enl and (perim < best_perim or (perim == best_perim and c.count < best_cnt)))):
+                    best_c = c; best_enl = enl; best_perim = perim; best_cnt = c.count
+            path.append(node)
+            node = best_c
         node.idxs.append(idx)
         node.include_point(bx, by1, bh, brear, berr)
-        if len(node.idxs) <= _KD_LEAF_MAX:
+        if len(node.idxs) <= _R_LEAF_MAX:
             return
         alive = self._alive
         xs, y1s, hs, rears, errs = self._x, self._y1, self._h, self._rear, self._err
         live_leaf = [i for i in node.idxs if alive[i]]
-        if len(live_leaf) <= _KD_LEAF_MAX:
+        if len(live_leaf) <= _R_LEAF_MAX:
             node.idxs = array("I", live_leaf)
             node.refresh_leaf(xs, y1s, hs, rears, errs)
-            for parent, _ in reversed(path):
-                parent.refresh_internal()
-            return
-        split_node = _build_kd(live_leaf, xs, y1s, hs, rears, errs)
-        if not path:
-            self._root = split_node
-            return
-        parent, was_left = path[-1]
-        if was_left: parent.left = split_node
-        else: parent.right = split_node
-        if len(live_leaf) < len(node.idxs):
-            for anc, _ in reversed(path):
+            for anc in reversed(path):
                 anc.refresh_internal()
-        for depth_i, (anc, _) in enumerate(path):
-            if anc.count >= 64 and 4*max(anc.left.count, anc.right.count) > 3*anc.count:
-                sub = []
-                _collect_idxs(anc, sub)
-                live_sub = [i for i in sub if alive[i]]
-                rebuilt = _build_kd(live_sub, xs, y1s, hs, rears, errs)
-                if depth_i == 0:
-                    self._root = rebuilt
-                else:
-                    gp, gp_left = path[depth_i-1]
-                    if gp_left: gp.left = rebuilt
-                    else: gp.right = rebuilt
-                    for k in range(depth_i-1, -1, -1):
-                        path[k][0].refresh_internal()
+            return
+        if (node.max_x-node.min_x) >= (node.max_y-node.min_y):
+            live_leaf.sort(key=lambda i: (xs[i], y1s[i]))
+        else:
+            live_leaf.sort(key=lambda i: (y1s[i], xs[i]))
+        mid = len(live_leaf)//2
+        node.idxs = array("I", live_leaf[:mid])
+        node.refresh_leaf(xs, y1s, hs, rears, errs)
+        sibling = _RNode(idxs=array("I", live_leaf[mid:]))
+        sibling.refresh_leaf(xs, y1s, hs, rears, errs)
+        while path:
+            parent = path.pop()
+            parent.children.append(sibling)
+            if len(parent.children) <= _R_NODE_MAX:
                 return
+            ch = parent.children
+            if (parent.max_x-parent.min_x) >= (parent.max_y-parent.min_y):
+                ch.sort(key=lambda c: (c.min_x+c.max_x, c.min_y+c.max_y))
+            else:
+                ch.sort(key=lambda c: (c.min_y+c.max_y, c.min_x+c.max_x))
+            cmid = len(ch)//2
+            parent.children = ch[:cmid]
+            parent.refresh_internal()
+            sibling = _RNode(children=ch[cmid:])
+            sibling.refresh_internal()
+        new_root = _RNode(children=[self._root, sibling])
+        new_root.refresh_internal()
+        self._root = new_root
 
     def add(self, b, *, compact=True):
         bx, by1, by2, bh, brear, berr = b
@@ -754,7 +766,7 @@ class _ClipBaselines:
         self._x_hi.push(bx_hi, slot); self._x_lo.push(-bx_lo, slot)
         self._y_hi.push(by_hi, slot); self._y_lo.push(-by_lo, slot)
         self._blocks_add(bh, by2, brear, berr, slot)
-        self._kd_insert(slot, bx, by1, bh, brear, berr)
+        self._rtree_insert(slot, bx, by1, bh, brear, berr)
         if compact:
             self.maybe_compact()
 
@@ -975,7 +987,15 @@ class VehicleWaits:
         if saved is not None and not saved.prune(px, y1):
             state["clip_baselines"] = None
 
-    def _refresh_clip_baselines(self, state, observation, timestamp, prev_obs, compact_budget):
+    @staticmethod
+    def _advance_clip_compaction(state, compact_budget):
+        if compact_budget[0] <= 0 or state["row"]["completed"]:
+            return
+        saved = state.get("clip_baselines")
+        if saved is not None:
+            compact_budget[0] -= saved.maybe_compact(compact_budget[0])
+
+    def _refresh_clip_baselines(self, state, observation, timestamp, prev_obs):
         """Record corroborated stationary baselines into the indexed set without
         scanning accumulated anchors on stationary frames."""
         history = state.get("clip_history")
@@ -989,11 +1009,8 @@ class VehicleWaits:
         earlier = list(history)
         pairs = list(dict.fromkeys(self._corroborated_pairs(earlier)))
         saved = state.get("clip_baselines")
-        if saved is not None:
-            if compact_budget[0] > 0:
-                compact_budget[0] -= saved.maybe_compact(compact_budget[0])
-            if all(saved.covered(p) for p in pairs):
-                return
+        if saved is not None and all(saved.covered(p) for p in pairs):
+            return
         samples = earlier+[(timestamp, px, py, height)]
         motion = _fit(samples)
         if motion is None:
@@ -1016,8 +1033,6 @@ class VehicleWaits:
                 state["clip_baselines"] = saved
             for b in valid:
                 saved.add(b, compact=False)
-            if compact_budget[0] > 0:
-                compact_budget[0] -= saved.maybe_compact(compact_budget[0])
 
     def _bottom_clipped_crossing(self, state, observation, timestamp, prev_obs):
         """Return ``(h_base, pair_to_save_or_None)`` when a stop-line crossing is
@@ -1102,7 +1117,7 @@ class VehicleWaits:
         return h is not None and not math.isfinite(py-h)
 
     def _evaluate_crossing(self, state, prev_obs, observation, phase, timestamp, sequence, cycle_id,
-                           valid_motion, continuing, keep_pending, compact_budget):
+                           valid_motion, continuing, keep_pending):
         row = state["row"]
         geom = self._valid_box_geometry(observation)
         pending = state.get("pending_crossing")
@@ -1151,7 +1166,7 @@ class VehicleWaits:
             self._clear_clip_state(state)
             return True
         if continuing:
-            self._refresh_clip_baselines(state, observation, timestamp, prev_obs, compact_budget)
+            self._refresh_clip_baselines(state, observation, timestamp, prev_obs)
         return False
 
     def _cross(self, row, previous, observation, phase, timestamp, cycle_id):
@@ -1232,7 +1247,7 @@ class VehicleWaits:
                     if step_continuous:
                         crossed_now = self._evaluate_crossing(
                             state, prev_obs, observation, phase, timestamp, sequence, cycle_id,
-                            False, continuing, keep_pending=native_exit, compact_budget=compact_budget)
+                            False, continuing, keep_pending=native_exit)
                     else:
                         self._clear_clip_state(state)
                     if crossed_now:
@@ -1257,6 +1272,8 @@ class VehicleWaits:
                             self._clear_native_exit(state)
                         else:
                             row["tracking_state"] = "EXIT_PENDING"
+                            if continuing:
+                                self._advance_clip_compaction(state, compact_budget)
                 continue
             if state is None:
                 state = self._new(observation, timestamp, sequence, segment)
@@ -1290,7 +1307,9 @@ class VehicleWaits:
             if crossing_continuous:
                 self._evaluate_crossing(
                     state, prev_obs, observation, phase, timestamp, sequence, cycle_id,
-                    valid_motion, continuing, keep_pending=True, compact_budget=compact_budget)
+                    valid_motion, continuing, keep_pending=True)
+                if continuing:
+                    self._advance_clip_compaction(state, compact_budget)
             elif prev_obs is not None or crossing_broken:
                 self._clear_clip_state(state)
             if valid_motion:
