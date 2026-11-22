@@ -2019,7 +2019,7 @@ def test_sustained_stationary_jitter_per_frame_cost_stays_bounded():
     cb_p1.prune(165.4, 216.)  # kills first 160 slots, leaving 4 live slots (160..163)
     assert len(cb_p1) == 4 and cb_p1.needs_compact()
     # Keep a dummy active sweep on slot 162 so covered() appends slot 161 to _dom_queue during Phase 1.
-    cb_p1._dom_sweep = (162, -2, len(cb_p1._alive))
+    cb_p1._dom_sweep = (162, -2, len(cb_p1._alive), 0.0, 0.0, 0.0)
     cb_p1._dom_pending[162] = 1
     cb_p1.maybe_compact(1)  # copies slot 160 only; slot 161 is not mapped yet!
     assert cb_p1._rebuild is not None and 161 not in cb_p1._rebuild[3]
@@ -2142,6 +2142,81 @@ def test_sustained_stationary_jitter_per_frame_cost_stays_bounded():
                        'RED', 5/FPS, 6, 1, unassigned=())
     nonzero = [sh for _, sh in seen_shares if sh > 0]
     assert len(nonzero) == 24 and max(nonzero) == 16 and min(nonzero) == 16
+
+    # Sol Round 25:
+    # 1. Indexed resumable cover search + batch eviction keeps 64 tracks cycling 32 nearby
+    #    anchors under sustained short-baseline jitter from growing unboundedly.
+    waits_64 = book(side=lambda p: 270.-p[1])
+    seq_64 = 0
+    for a in range(32):
+        for _ in range(2):
+            obs = [car(1+k, 281., x=150.+80.*k+0.24*a, height=61., speed=0.) for k in range(64)]
+            waits_64.observe(obs, 'RED', seq_64/FPS, seq_64+1, 1, unassigned=()); seq_64 += 1
+    for f in range(1000):
+        a = f % 32
+        obs = [car(1+k, 280., x=150.+80.*k+0.24*a+1e-5*(f+1), height=60., speed=0.) for k in range(64)]
+        waits_64.observe(obs, 'RED', seq_64/FPS, seq_64+1, 1, unassigned=()); seq_64 += 1
+    live_64 = sorted(len(waits_64.active[(0, 1+k)]['clip_baselines']) for k in range(64))
+    assert live_64[32] <= 64, f'64-track cycling median live {live_64[32]} grew unbounded'
+
+    # 2. Bulk drift pruning immediately clears both _dom_pending and _cover_pending and
+    #    decrements _cover_count in both live and shadow indexes (zero dead flags survive swap).
+    cb_pr = _ClipBaselines()
+    for i in range(700):
+        bx = 150.+0.001*i
+        cb_pr.add((bx, 220., 281., 61., 281.-OCCLUSION_BOTTOM_SHARE*61., _rear_err(281., 61.)),
+                  compact=False, dom_budget=[0])
+    cb_pr._dom_cache.clear()
+    for i in range(700):
+        bx = 150.+0.001*i+1e-5
+        cb_pr.add((bx, 220., 280., 60., 280.-OCCLUSION_BOTTOM_SHARE*60., _rear_err(280., 60.)),
+                  compact=False, dom_budget=[0])
+    # Surviving tall/short pair at x=165.0
+    cb_pr.add((165.0, 220., 281., 61., 281.-OCCLUSION_BOTTOM_SHARE*61., _rear_err(281., 61.)),
+              compact=False, dom_budget=[0])
+    cb_pr._dom_cache.clear()
+    cb_pr.add((165.01, 220., 280., 60., 280.-OCCLUSION_BOTTOM_SHARE*60., _rear_err(280., 60.)),
+              compact=False, dom_budget=[0])
+    assert cb_pr._cover_count >= 700
+    cb_pr.prune(165.0, 220.)
+    assert len(cb_pr) == 2 and cb_pr._cover_count == 1
+    assert sum(cb_pr._cover_pending) == 1 and sum(cb_pr._dom_pending) <= 1
+    while cb_pr.needs_compact():
+        cb_pr.maybe_compact(64)
+    assert sum(cb_pr._cover_pending) == cb_pr._cover_count == 1
+    while cb_pr.has_dom_sweep():
+        cb_pr.step_dom_sweep(16)
+    assert len(cb_pr) == 1 and cb_pr._cover_count == 0 and not cb_pr.has_dom_sweep()
+
+    # 3. Cross-block (h, y2) runs (>256 entries) resume cleanly across block boundaries under
+    #    1-unit budgets for both indexed cover probes and indexed batch eviction.
+    cb_xb = _ClipBaselines()
+    for i in range(400):
+        bx = 100.+0.25*i
+        cb_xb.add((bx, 220., 281., 61., 281.-OCCLUSION_BOTTOM_SHARE*61., _rear_err(281., 61.)),
+                  compact=False, dom_budget=[0])
+    assert len(cb_xb._blocks) >= 2
+    cb_xb._dom_cache.clear()
+    for bx in (100.01, 100.26, 150.01, 199.74):
+        cb_xb.add((bx, 220., 280., 60., 280.-OCCLUSION_BOTTOM_SHARE*60., _rear_err(280., 60.)),
+                  compact=False, dom_budget=[0])
+    for _ in range(2000):
+        if not cb_xb.has_dom_sweep():
+            break
+        cb_xb.step_dom_sweep(1)
+    assert len(cb_xb) == 400 and not cb_xb.has_dom_sweep()
+
+    # 4. 2-level _SlotFIFO avoids directory resize copies across page boundaries (65,536/page).
+    fifo_2l = _SlotFIFO()
+    for i in range(262144):
+        fifo_2l.append(i)
+    started = time.perf_counter()
+    fifo_2l.append(262144)
+    assert (time.perf_counter()-started)*1000. < 1.0
+    assert len(fifo_2l._pages) == 5 and fifo_2l[262144] == 262144
+    for i in range(1, 300):
+        fifo_2l.appendleft(-i)
+    assert fifo_2l[0] == -299 and fifo_2l.popleft() == -299 and fifo_2l.pop() == 262144
 
 
 def test_missed_frame_clears_crossing_clip_evidence_but_preserves_fragment_history():
