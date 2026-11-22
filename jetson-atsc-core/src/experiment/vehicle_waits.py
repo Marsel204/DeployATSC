@@ -265,9 +265,9 @@ class VehicleWaits:
             while len(history) > HISTORY_SAMPLES and history[-1][0]-history[1][0] >= MIN_FIT_SPAN_SEC-1e-9:
                 history.popleft()
 
-    def _bottom_clipped_crossing(self, state, observation, timestamp, prev_obs):
-        """Return pre-occlusion baseline (x, y1, y2, h_base) when a stop-line crossing is
-        explained purely by bottom-edge occlusion on a stationary vehicle, else None."""
+    def _stationary_bottom_clip(self, state, observation, timestamp, prev_obs):
+        """Return pre-occlusion baseline (x, y1, y2, h_base) when the box shows a
+        qualifying stationary bottom-edge clip (behind or past the line), else None."""
         history = state.get("history")
         if not history or len(history) < 2 or prev_obs is None or history[-1][0] != prev_obs["time"]:
             return None
@@ -290,13 +290,6 @@ class VehicleWaits:
                 x_base, y1_base, y2_base, h_base = sx, sy1, sy2, sh
         if height > CROSSING_CLIP_SHRINK_RATIO*h_base+1e-9:
             return None
-        unclipped_y2 = y1+h_base
-        if not math.isfinite(unclipped_y2):
-            return None
-        # Orientation-agnostic counterfactual: only suppress when restoring the
-        # pre-occlusion height places the vehicle's rear back behind the line.
-        if not (self.side((px, unclipped_y2)) < 0):
-            return None
         if (y2_base-py) < OCCLUSION_BOTTOM_SHARE*(h_base-height)-1e-9:
             return None
         samples = earlier+[(timestamp, px, py, height)]
@@ -309,6 +302,23 @@ class VehicleWaits:
         if motion is None or math.hypot(motion[0], motion[2]) >= OCCLUSION_STATIC_TOP_SPEED*h_base:
             return None
         return (x_base, y1_base, y2_base, h_base)
+
+    def _bottom_clipped_crossing(self, state, observation, timestamp, prev_obs):
+        """Return pre-occlusion baseline (x, y1, y2, h_base) when a stop-line crossing is
+        explained purely by bottom-edge occlusion on a stationary vehicle, else None."""
+        clipped = self._stationary_bottom_clip(state, observation, timestamp, prev_obs)
+        if clipped is None:
+            return None
+        geom = self._valid_box_geometry(observation)
+        if geom is None:
+            return None
+        px, py, height = geom
+        unclipped_y2 = py-height+clipped[3]
+        if not math.isfinite(unclipped_y2):
+            return None
+        # Orientation-agnostic counterfactual: only suppress when restoring the
+        # pre-occlusion height places the vehicle's rear back behind the line.
+        return clipped if self.side((px, unclipped_y2)) < 0 else None
 
     def _pending_crossing_confirmed(self, pending, observation):
         """True once a clipped track's unclipped rear also clears the stop line."""
@@ -352,13 +362,21 @@ class VehicleWaits:
         if self.side(prev_obs["point"]) < 0 <= self.side(observation.point):
             clipped = self._bottom_clipped_crossing(state, observation, timestamp, prev_obs) if continuing else None
             if clipped is not None:
-                state["clip_baseline"] = clipped
+                saved = state.get("clip_baseline")
+                if saved is None or clipped[3] > saved[3]:
+                    state["clip_baseline"] = clipped
                 if keep_pending:
                     state["pending_crossing"] = {"from": prev_obs, "h_base": clipped[3], "recovered": 0}
                 return False
             self._cross(row, prev_obs, observation, phase, timestamp, cycle_id)
             state["clip_baseline"] = None
             return True
+        if continuing:
+            clipped = self._stationary_bottom_clip(state, observation, timestamp, prev_obs)
+            if clipped is not None:
+                saved = state.get("clip_baseline")
+                if saved is None or clipped[3] > saved[3]:
+                    state["clip_baseline"] = clipped
         return False
 
     def _cross(self, row, previous, observation, phase, timestamp, cycle_id):
@@ -428,7 +446,9 @@ class VehicleWaits:
                     row=state["row"];previous=state["previous"]
                     in_native_exit = native_exit and state.get("exit_candidate") is not None
                     prev_obs = state.get("exit_last") if in_native_exit else previous
-                    step_continuous = self._step_continuous(prev_obs, timestamp, sequence)
+                    step_continuous = (self._step_continuous(prev_obs, timestamp, sequence) if native_exit else
+                        bool(previous is not None and not previous.get("handoff") and
+                             previous["sequence"] == sequence-1 and 0 < timestamp-previous["time"] <= self.policy.max_gap_sec))
                     crossed_now = False
                     if step_continuous:
                         crossed_now = self._evaluate_crossing(
@@ -444,11 +464,13 @@ class VehicleWaits:
                     else:
                         if not (in_native_exit and step_continuous):
                             state["exit_candidate"] = timestamp
-                        geom = self._valid_box_geometry(observation)
                         state["exit_last"] = {"time": timestamp, "sequence": sequence,
                             "phase": str(phase), "cycle": cycle_id, "valid_motion": False,
-                            "point": observation.point, "height": None if geom is None else geom[2]}
+                            "point": observation.point}
                         if continuing:
+                            geom = self._valid_box_geometry(observation)
+                            if geom is not None:
+                                state["last_valid_box"] = (timestamp, geom[0], geom[1], geom[2])
                             self._record_history(state, prev_obs, observation, timestamp)
                         state["stop_candidate"] = state["move_candidate"] = None
                         if timestamp-state["exit_candidate"] >= self.policy.exit_persistence_sec-1e-8:
@@ -471,7 +493,7 @@ class VehicleWaits:
             # Wait accounting is continuous only across consecutive in-ROI frames (never across handoffs or outside dips).
             continuous = (not was_exit_pending and previous is not None and not previous.get("handoff") and
                           previous["sequence"] == sequence-1 and 0 < timestamp-previous["time"] <= self.policy.max_gap_sec)
-            crossing_continuous = self._step_continuous(prev_obs, timestamp, sequence)
+            crossing_continuous = self._step_continuous(prev_obs, timestamp, sequence) if was_exit_pending else continuous
             if previous is not None:
                 interval = {"start": previous["time"], "end": timestamp,
                             "phase": previous["phase"] if continuous else "UNKNOWN",
@@ -517,6 +539,9 @@ class VehicleWaits:
             if cycle_id is not None and cycle_id not in row["cycles"]: row["cycles"].append(cycle_id)
             row["last_seen"] = timestamp
             if continuing:
+                geom = self._valid_box_geometry(observation)
+                if geom is not None:
+                    state["last_valid_box"] = (timestamp, geom[0], geom[1], geom[2])
                 self._record_history(state, prev_obs, observation, timestamp)
             state["previous"] = {"time": timestamp, "sequence": sequence,
                 "phase": str(phase), "cycle": cycle_id, "valid_motion": valid_motion,
@@ -595,17 +620,10 @@ class VehicleWaits:
             if identity in present or row["completed"] or previous is None:continue
             if row["vehicle_id"] not in self.records:continue
             if native_exit and state.get("exit_candidate") is not None:
-                exit_last = state.get("exit_last")
-                if exit_last is not None and 0 < timestamp-exit_last["time"] <= veto_window:
-                    ex_h = exit_last.get("height")
-                    if ex_h is not None:
-                        try:ex_x, ex_y = float(exit_last["point"][0]), float(exit_last["point"][1])
-                        except (TypeError, ValueError, IndexError, OverflowError, KeyError):ex_x = ex_y = float("nan")
-                        if all(map(math.isfinite, (ex_x, ex_y, ex_y-ex_h))):
-                            static_vetoes.append((identity, ex_x, ex_y, ex_y-ex_h, ex_h))
-                    elif history and 0 < timestamp-history[-1][0] <= veto_window:
-                        _, hx, hy, hh = history[-1]
-                        static_vetoes.append((identity, hx, hy, hy-hh, hh))
+                last_box = state.get("last_valid_box")
+                if last_box is not None and 0 < timestamp-last_box[0] <= veto_window:
+                    _, bx, by, bh = last_box
+                    static_vetoes.append((identity, bx, by, by-bh, bh))
                 continue
             if not history:continue
             dt = timestamp-previous["time"]
@@ -809,7 +827,7 @@ class VehicleWaits:
         state["previous"] = dict(state["previous"], handoff=True)
         state["history"].clear()
         state["stopped"] = False; state["stop_candidate"] = state["move_candidate"] = None
-        state["pending_crossing"] = state["clip_baseline"] = None
+        state["pending_crossing"] = state["clip_baseline"] = state["last_valid_box"] = None
         self._clear_native_exit(state)
         native = {"epoch": new[0], "local_id": new[1]}
         # Added on the first link only, so rows of unchanged runs keep their schema.
@@ -828,7 +846,7 @@ class VehicleWaits:
                 self._flag(row, reason)
                 state["previous"] = None
                 state["stop_candidate"] = state["move_candidate"] = None
-                state["pending_crossing"] = state["clip_baseline"] = None
+                state["pending_crossing"] = state["clip_baseline"] = state["last_valid_box"] = None
                 self._clear_native_exit(state)
                 if "history" in state:state["history"].clear()
                 row["tracking_state"] = "UNKNOWN"

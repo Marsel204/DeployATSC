@@ -1328,6 +1328,17 @@ def test_sustained_bottom_clip_requires_geometric_recovery_before_clearing_ancho
     play(waits_dep, seq_dep, phase='GREEN')
     assert only_row(waits_dep)['crossed_stop_line'] and only_row(waits_dep)['tracking_state'] == 'SERVED'
 
+    # Sol S2 Round 3: stationary clip starting behind the line (60 -> 51 x10 -> 45 at y1=220,
+    # stop_y=270) must save the 60 px baseline at 51 px before 60 px ages out of history.
+    waits_r3 = book(side=lambda p: 270.-p[1])
+    seq_r3 = [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(5)]
+    seq_r3 += [[car(1, 271., x=150., height=51., speed=0.)] for _ in range(10)]
+    seq_r3 += [[car(1, 265., x=150., height=45., speed=0.)]]
+    play(waits_r3, seq_r3, phase='RED')
+    row_r3 = only_row(waits_r3)
+    assert not row_r3['completed'] and not row_r3['crossed_stop_line']
+    assert waits_r3.active[(0, 1)].get('pending_crossing') is not None
+
 
 def test_pending_crossing_confirms_across_consecutive_exit_pending_outside_frames():
     """Sol S3: an active crossing anchor is retained across consecutive outside frames
@@ -1523,3 +1534,69 @@ def test_exit_pending_track_vetoes_occlusion_link_using_latest_outside_box():
     # newborn #2 appears 2 px from #5's latest outside box and inside #1's occlusion top-gate.
     waits.observe([car(2, 160., x=150., height=60., speed=0., in_region=True)], 'RED', 15/FPS, 16, 1, unassigned=())
     assert _links(waits) == []
+
+    # Sol S10 Round 3: a final heightless outside observation clears history, yet the track's
+    # last valid box (within veto_window of its own timestamp) must still veto; once that valid
+    # box ages past 0.35 s, the veto expires cleanly even if heightless outside frames continue.
+    for extra_heightless, expect_links in ((1, []), (11, [(1, 2)])):
+        waits_h = book(exit_persistence_sec=1.0, side=lambda p: -1.)
+        valid_end = 14
+        tail_start = valid_end+extra_heightless-12
+        for i in range(valid_end+extra_heightless):
+            obs = []
+            if i < 3:
+                obs.append(car(5, 160., x=250., height=60., speed=0., in_region=True))
+            elif i < valid_end:
+                obs.append(car(5, 160., x=152., height=60., speed=0., in_region=False))
+            else:
+                obs.append(car(5, 160., x=152., height=None, speed=0., in_region=False, bbox=False))
+            if tail_start <= i < tail_start+8:
+                frac = (i-tail_start)/7.
+                h = 100.-45.*frac
+                obs.append(car(1, 100.+h, x=150., height=h, speed=0., in_region=True))
+            waits_h.observe(obs, 'RED', i/FPS, i+1, 1, unassigned=())
+        idx = valid_end+extra_heightless
+        waits_h.observe([car(2, 160., x=150., height=60., speed=0., in_region=True)], 'RED', idx/FPS, idx+1, 1, unassigned=())
+        assert _links(waits_h) == expect_links, extra_heightless
+
+
+def test_legacy_crossing_gate_unchanged_when_both_options_off():
+    """Sol S3 Round 3: with both fragment_continuation and exit_persistence_sec off and
+    max_gap_sec=0.1, an in-ROI sign change from 0.3 to 0.4 s (observation_gap) must not cross."""
+    waits = VehicleWaits('run', RunPolicy(stop_persistence_sec=0, max_gap_sec=0.1), side=lambda p: p[1]-100.)
+    waits.observe([car(1, 90., speed=2.)], 'GREEN', 0.3, 1, 1)
+    waits.observe([car(1, 110., speed=2.)], 'GREEN', 0.4, 2, 1)
+    row = only_row(waits)
+    assert 'observation_gap' in row['quality_flags']
+    assert not row['crossed_stop_line'] and not row['completed']
+
+
+def test_exit_pending_crossing_during_first_green_counts_in_live_and_archived_n_served(tmp_path):
+    """Sol S8 Round 3: a vehicle observed in-ROI only while phase is UNKNOWN (cycles=[])
+    that crosses on a consecutive EXIT_PENDING outside frame after GREEN confirms cycle 1
+    must count in n_served across live, retained-evicted, and archived store reads."""
+    DARK = np.zeros((8, 8, 3), np.uint8)
+    e = ObservationEngine('run-s8', RunPolicy(debounce_frames=1, stop_persistence_sec=0, exit_persistence_sec=0.3),
+                          {'xmin': 0, 'ymin': 0, 'xmax': 8, 'ymax': 8}, lambda p: p[1]-100., lambda *_: None)
+    e.enable_retention(1, tmp_path)
+    store = ExperimentStore(tmp_path, e.run_id, {})
+    # f=0,1: inside ROI while signal is dark (UNKNOWN -> cycles=[]).
+    e.observe_acquisition(DARK, 0.0, 1, [car(1, 90., speed=2., in_region=True)])
+    e.observe_acquisition(DARK, 1/FPS, 2, [car(1, 92., speed=2., in_region=True)])
+    # f=2: steps outside ROI behind stop line while GREEN starts cycle 1 (EXIT_PENDING).
+    e.observe_acquisition(GREEN, 2/FPS, 3, [car(1, 95., speed=2., in_region=False)])
+    # f=3: crosses stop line on consecutive outside frame while GREEN cycle 1 is active.
+    e.observe_acquisition(GREEN, 3/FPS, 4, [car(1, 105., speed=2., in_region=False)])
+    # f=4: advance clock past crossing_at so green_start <= completed_at < end.
+    e.observe_acquisition(GREEN, 4/FPS, 5, [])
+    row = e.waits.records['run-s8:acquisition:0:1']
+    assert row['crossed_stop_line'] and row['crossing_cycle'] == 1 and row['cycles'] == []
+    assert e.snapshot()['comparisons'][0]['n_served'] == 1
+    # Evict completed vehicle via retention commit + acknowledge, then check live and archived reads.
+    state, token = e.prepare_commit(); store.persist(state); e.acknowledge(token)
+    assert 'run-s8:acquisition:0:1' not in e.waits.records
+    assert e.snapshot()['comparisons'][0]['n_served'] == 1
+    e.close()
+    state, token = e.prepare_commit(); store.persist(state); e.acknowledge(token)
+    archived = store.read()
+    assert archived['comparisons'][0]['n_served'] == 1

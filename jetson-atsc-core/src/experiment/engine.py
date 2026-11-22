@@ -182,13 +182,14 @@ class ObservationEngine:
             values = []
             served = 0
             partial = 0
+            end = cycle.get("green_end", self.time)
             for row in self.waits.records.values():
                 self.comparison_visits += 1
+                if (row["crossed_stop_line"] and row["crossing_cycle"]==cycle["cycle_id"] and
+                        cycle["green_start"]<=row["completed_at"]<end):
+                    served += 1
                 if cycle["cycle_id"] not in row["cycles"]: continue
                 values.append(row["wait_by_cycle"].get(str(cycle["cycle_id"]), {}).get("red_wait_sec", 0.))
-                end=cycle.get("green_end",self.time)
-                served += bool(row["crossed_stop_line"] and row["crossing_cycle"]==cycle["cycle_id"] and
-                               cycle["green_start"]<=row["completed_at"]<end)
                 partial += bool(row["left_censored"] or row["right_censored"] or row["quality_flags"])
             if self.retention:
                 population=self.retention.cycle_population.get(cycle["cycle_id"],{})
