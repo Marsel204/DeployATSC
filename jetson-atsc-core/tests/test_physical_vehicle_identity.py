@@ -1996,6 +1996,63 @@ def test_sustained_stationary_jitter_per_frame_cost_stays_bounded():
         cb_s = waits_s300.active[(0, 1+k)]['clip_baselines']
         assert len(cb_s) == 2 and not cb_s.has_dom_sweep()
 
+    # Sol Round 23:
+    # 1. Queueing a live dominator via covered() during compaction Phase 1 (before its slot
+    #    is copied into shadow) must not record -1 or drop the sweep across the swap.
+    cb_p1 = _ClipBaselines()
+    for i in range(160):
+        cb_p1.add((150.+0.01*i, 216., 276., 60., 276.-OCCLUSION_BOTTOM_SHARE*60., _rear_err(276., 60.)),
+                  compact=False, dom_budget=[0])
+    # Add 4 late slots surviving at x=165..165.4: one h=60 dominated by one h=61, plus two others.
+    cb_p1.add((165.0, 216., 276., 60., 276.-OCCLUSION_BOTTOM_SHARE*60., _rear_err(276., 60.)),
+              compact=False, dom_budget=[0])
+    cb_p1.add((165.0, 216., 277., 61., 277.-OCCLUSION_BOTTOM_SHARE*61., _rear_err(277., 61.)),
+              compact=False, dom_budget=[0])
+    cb_p1.add((165.4, 216., 277., 61., 277.-OCCLUSION_BOTTOM_SHARE*61., _rear_err(277., 61.)),
+              compact=False, dom_budget=[0])
+    cb_p1.add((165.8, 216., 277., 61., 277.-OCCLUSION_BOTTOM_SHARE*61., _rear_err(277., 61.)),
+              compact=False, dom_budget=[0])
+    cb_p1._dom_sweep = None; cb_p1._dom_queue.clear(); cb_p1._dom_cache.clear()
+    cb_p1.prune(165.4, 216.)  # kills first 160 slots, leaving 4 live slots (160..163)
+    assert len(cb_p1) == 4 and cb_p1.needs_compact()
+    # Keep a dummy active sweep on slot 162 so covered() appends slot 161 to _dom_queue during Phase 1.
+    cb_p1._dom_sweep = (162, -2, len(cb_p1._alive))
+    cb_p1.maybe_compact(1)  # copies slot 160 only; slot 161 is not mapped yet!
+    assert cb_p1._rebuild is not None and 161 not in cb_p1._rebuild[3]
+    assert cb_p1.covered((165.01, 216., 276., 60., 276.-OCCLUSION_BOTTOM_SHARE*60., _rear_err(276., 60.)),
+                         dom_budget=[64])
+    assert 161 in list(cb_p1._dom_queue)
+    while cb_p1.needs_compact():
+        cb_p1.maybe_compact(64)
+    while cb_p1.has_dom_sweep():
+        cb_p1.step_dom_sweep(64)
+    assert len(cb_p1) == 3
+
+    # 2. Resumable cover-probe + fair unused-budget distribution finds a dominator at the tail
+    #    of 32+ anchors even across 25 busy tracks (never accumulating 1,000 dominated sightings).
+    waits_25 = book(side=lambda p: 270.-p[1])
+    seq_25 = 0
+    for a in range(32):
+        for _ in range(2):
+            obs = [car(1+k, 281., x=150.+80.*k+0.25*a, height=61., speed=0.) for k in range(25)]
+            waits_25.observe(obs, 'RED', seq_25/FPS, seq_25+1, 1, unassigned=()); seq_25 += 1
+    for f in range(400):
+        obs = [car(1+k, 280., x=150.+80.*k+0.25*31+0.0001*(f+1), height=60., speed=0.) for k in range(25)]
+        waits_25.observe(obs, 'RED', seq_25/FPS, seq_25+1, 1, unassigned=()); seq_25 += 1
+    for k in range(25):
+        cb_25 = waits_25.active[(0, 1+k)]['clip_baselines']
+        assert len(cb_25) == 32 and not cb_25.has_dom_sweep()
+
+    # 3. _SlotFIFO indexed reads stay O(1) at 131,072 entries (no quadratic deque middle-indexing).
+    from src.experiment.vehicle_waits import _SlotFIFO
+    fifo = _SlotFIFO()
+    for i in range(131072):
+        fifo.append(i)
+    started = time.perf_counter()
+    mid_vals = [fifo[65536+j] for j in range(64)]
+    assert (time.perf_counter()-started)*1000. < 1.0
+    assert mid_vals == [65536+j for j in range(64)]
+
 
 def test_missed_frame_clears_crossing_clip_evidence_but_preserves_fragment_history():
     """Sol S14: a missed frame clears saved clip baselines AND crossing clip history so
