@@ -1723,7 +1723,77 @@ def test_sustained_stationary_jitter_per_frame_cost_stays_bounded():
                             'RED', f/FPS, f+1, 1, unassigned=())
     for k in range(6):
         cb_k = waits_wave6.active[(0, 1+k)]['clip_baselines']
-        assert len(cb_k) == 1 and len(cb_k._x) == 1
+        assert len(cb_k) == 1 and len(cb_k._x) <= 8
+
+    # Sol Round 18 (S12):
+    # 1. Equal-height block rear rejection jumps past all blocks in O(log B); dead blocks are skipped via live_count.
+    from src.experiment.vehicle_waits import _rear_err, OCCLUSION_BOTTOM_SHARE
+    cb_eq = _ClipBaselines()
+    for i in range(4096):
+        b = (150.+1e-5*i, 216., 276., 60., 276.-OCCLUSION_BOTTOM_SHARE*60., _rear_err(276., 60.))
+        cb_eq._insert_raw(*b)
+    side_calls_eq = [0]
+    def counted_eq_side(p):
+        side_calls_eq[0] += 1
+        return 270.-p[1]
+    started = time.perf_counter()
+    res_eq = cb_eq.best_for_crossing(
+        lambda hb: True, lambda y2b, hb: (y2b-269.) >= OCCLUSION_BOTTOM_SHARE*(hb-48.)-1e-9,
+        269.-OCCLUSION_BOTTOM_SHARE*48.-1e-9-_rear_err(269., 48.), 48., 221., 150., counted_eq_side, None,
+    )
+    assert res_eq is None and side_calls_eq[0] == 0 and (time.perf_counter()-started)*1000. < 2.0
+
+    # Dead h=60 blocks above live h=55 blocks must be skipped without scanning dead slots
+    # on both genuine crossing (h=48 > 0.85*55) and clipped crossing (h=46 <= 0.85*55).
+    for cross_h, expect_crossed in ((48., True), (46., False)):
+        waits_dead = book(side=lambda p: 270.-p[1])
+        for f in range(1800):
+            j = 0.9*(f//2)/900.
+            waits_dead.observe([car(1+k, 276., x=150.+80.*k+j, height=60., speed=0.) for k in range(6)],
+                               'RED', f/FPS, f+1, 1, unassigned=())
+        for f in range(1800, 3600):
+            j = 0.9*((f-1800)//2)/900.
+            waits_dead.observe([car(1+k, 271., x=155.+80.*k+j, height=55., speed=0.) for k in range(6)],
+                               'RED', f/FPS, f+1, 1, unassigned=())
+        for j in range(16):
+            f = 3600+j
+            waits_dead.observe([car(1+k, 271., x=160.+80.*k, height=55., speed=0.) for k in range(6)],
+                               'RED', f/FPS, f+1, 1, unassigned=())
+        started = time.perf_counter()
+        waits_dead.observe([car(1+k, 216.+cross_h, x=160.+80.*k, height=cross_h, speed=0.) for k in range(6)],
+                           'RED', 3616/FPS, 3617, 1, unassigned=())
+        assert (time.perf_counter()-started)*1000. < 10.0
+        assert all(r['crossed_stop_line'] is expect_crossed for r in waits_dead.records.values())
+
+    # 2. Reserved sweep budget prevents busy jittering tracks from starving a queued eviction,
+    # and independent queued dominators (h=70 @ x=150.25 and h=71 @ x=154.25) do not overwrite each other.
+    import random
+    rng_s = random.Random(23)
+    waits_starve = book(side=lambda p: 270.-p[1])
+    for f in range(1800):
+        obs = [car(1+k, 280., x=150.+80.*k+0.02*rng_s.random(), height=60., speed=0.) for k in range(5)]
+        obs.append(car(6, 280., x=550.+(f//2)/900., height=60., speed=0.))
+        waits_starve.observe(obs, 'RED', f/FPS, f+1, 1, unassigned=())
+    for f in range(1800, 2200):
+        obs = [car(1+k, 280., x=150.+80.*k+0.02*rng_s.random(), height=60., speed=0.) for k in range(5)]
+        obs.append(car(6, 290., x=550.5, height=70., speed=0.))
+        waits_starve.observe(obs, 'RED', f/FPS, f+1, 1, unassigned=())
+    cb_6 = waits_starve.active[(0, 6)]['clip_baselines']
+    assert len(cb_6) == 1 and len(cb_6._x) <= 8
+
+    cb_q = _ClipBaselines()
+    for base_x in (150.25, 154.25):
+        for i in range(128):
+            bx = base_x-0.2+0.4*i/127.
+            cb_q.add((bx, 220., 280., 60., 280.-OCCLUSION_BOTTOM_SHARE*60., _rear_err(280., 60.)),
+                     compact=False, dom_budget=[0])
+    cb_q.add((150.25, 220., 290., 70., 290.-OCCLUSION_BOTTOM_SHARE*70., _rear_err(290., 70.)),
+             compact=False, dom_budget=[0])
+    cb_q.add((154.25, 220., 291., 71., 291.-OCCLUSION_BOTTOM_SHARE*71., _rear_err(291., 71.)),
+             compact=False, dom_budget=[0])
+    while cb_q.has_dom_sweep():
+        cb_q.step_dom_sweep(64)
+    assert len(cb_q) == 2
 
 
 def test_missed_frame_clears_crossing_clip_evidence_but_preserves_fragment_history():

@@ -665,7 +665,7 @@ class DetectorTracker:
                 bx, by = float(v.bottom_center[0]), float(v.bottom_center[1])
             except (TypeError, ValueError, IndexError, OverflowError):
                 continue
-            if not (math.isfinite(bx) and math.isfinite(by)):
+            if not (math.isfinite(bx) and math.isfinite(by) and abs(bx) <= 1e15 and abs(by) <= 1e15):
                 continue
             gx, gy = homography_func(bx, by)
             v.ground_pos = (gx, gy)

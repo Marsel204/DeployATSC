@@ -411,12 +411,12 @@ def test_session_nan_footpoint_does_not_confirm_false_roi_exit_or_split_segment(
 
 
 def test_session_nan_footpoint_does_not_corrupt_detector_velocity_or_red_wait(video_factory, tmp_path):
-    """Sol Round 17: DetectorTracker.update_velocities must reject non-finite footpoints
-    before OpenCV perspectiveTransform (which otherwise projects NaN to (0, 0)), so a
-    returning stationary car reports 0 m/s and preserves the same red wait as missing frames."""
+    """Sol Round 17/18: DetectorTracker.update_velocities and ObservationSession must reject
+    non-finite and float32-overflowing footpoints (NaN, 1e40) before OpenCV perspectiveTransform
+    and ROI/crossing accounting, preserving the exact red wait and tracking state of missing frames."""
     from src.perception.detector_tracker import DetectorTracker
 
-    def make_velocity_detector(use_nan):
+    def make_velocity_detector(bad_y2):
         class RealVelocityDetector(ScriptedDetector):
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
@@ -428,8 +428,8 @@ def test_session_nan_footpoint_does_not_corrupt_detector_velocity_or_red_wait(vi
                 index = round(timestamp*FPS)
                 if index < 12 or 22 <= index < 36:
                     bbox = [86., 120., 114., 150.]
-                elif use_nan and 12 <= index < 22:
-                    bbox = [86., 120., 114., float('nan')]
+                elif bad_y2 is not None and 12 <= index < 22:
+                    bbox = [86., 120., 114., bad_y2]
                 else:
                     return [TrackedFrame([], withheld=(), epoch=self.epoch) for _ in frames]
                 v = TrackedVehicle(1, 2, 'car', bbox, .9, timestamp, obs_count=6, epoch=self.epoch)
@@ -439,24 +439,25 @@ def test_session_nan_footpoint_does_not_corrupt_detector_velocity_or_red_wait(vi
                 DetectorTracker.update_velocities(self, vehicles, project, timestamp=timestamp)
         return RealVelocityDetector
 
-    def run_red_wait(tag, use_nan):
+    def run_red_wait(tag, bad_y2):
         settings = run_payload(video_factory)
         settings['policy'] = {'debounce_frames': 1, 'stop_persistence_sec': .1,
                               'fragment_continuation': True, 'exit_persistence_sec': 0.3}
         class Manual(ObservationSession):
             def _worker(self):self.ready.set()
         session = Manual(settings, tmp_path/f'nan-vel-{tag}',
-                         detector_factory=make_velocity_detector(use_nan), anfis_factory=FakeANFIS)
+                         detector_factory=make_velocity_detector(bad_y2), anfis_factory=FakeANFIS)
         try:
             for _ in range(36):session._process_batch()
             row = next(iter(session.engine.waits.records.values()))
-            return row['red_wait_sec'], row['tracking_state'], len(session.engine.waits.records)
+            return row['red_wait_sec'], row['tracking_state'], row['crossed_stop_line'], len(session.engine.waits.records)
         finally:
             session.state = session.applied_state = 'stopped';session._cleanup()
 
-    wait_missing, state_missing, count_missing = run_red_wait('missing', False)
-    wait_nan, state_nan, count_nan = run_red_wait('nan', True)
-    assert count_nan == count_missing == 1
-    assert state_nan == state_missing
-    assert wait_nan == pytest.approx(wait_missing, abs=1e-6)
-    assert wait_nan > 0.75
+    wait_missing, state_missing, crossed_missing, count_missing = run_red_wait('missing', None)
+    assert count_missing == 1 and not crossed_missing and wait_missing > 0.75
+    for tag, bad_y2 in (('nan', float('nan')), ('overflow_1e40', 1e40), ('overflow_3e38', 3e38)):
+        wait_bad, state_bad, crossed_bad, count_bad = run_red_wait(tag, bad_y2)
+        assert count_bad == 1 and crossed_bad is False
+        assert state_bad == state_missing
+        assert wait_bad == pytest.approx(wait_missing, abs=1e-6)

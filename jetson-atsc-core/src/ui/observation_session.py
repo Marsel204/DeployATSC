@@ -62,17 +62,20 @@ def source_identity(value):
     return str(Path(value).resolve()) if "://" not in value else value
 
 
+_MAX_PIXEL_COORD = 1e15
+
+
 def _finite_point(point):
     try:x,y=float(point[0]),float(point[1])
     except (TypeError,IndexError,ValueError,OverflowError,KeyError):return False
-    return math.isfinite(x) and math.isfinite(y)
+    return math.isfinite(x) and math.isfinite(y) and abs(x)<=_MAX_PIXEL_COORD and abs(y)<=_MAX_PIXEL_COORD
 
 
 def _finite_box(values):
     if isinstance(values,(str,bytes,Mapping)):return None
     try:box=tuple(float(value) for value in values[:4])
     except (TypeError,IndexError,ValueError,OverflowError,KeyError):return None
-    if len(box)!=4 or not all(map(math.isfinite,box)):return None
+    if len(box)!=4 or not all(math.isfinite(v) and abs(v)<=_MAX_PIXEL_COORD for v in box):return None
     w,h=box[2]-box[0],box[3]-box[1]
     return box if w>0 and h>0 and all(map(math.isfinite,(w,h,(box[0]+box[2])/2,w*h))) else None
 
