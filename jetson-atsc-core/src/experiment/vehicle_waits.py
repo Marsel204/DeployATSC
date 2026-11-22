@@ -265,10 +265,68 @@ class VehicleWaits:
             while len(history) > HISTORY_SAMPLES and history[-1][0]-history[1][0] >= MIN_FIT_SPAN_SEC-1e-9:
                 history.popleft()
 
-    def _stationary_baseline(self, state, observation, timestamp, prev_obs, *, refresh_only=False):
-        """Return stationary pre-occlusion baseline (x, y1, y2, h_base) supported by two
-        consecutive prior sightings (or a preserved taller stationary baseline) while the
-        box's top edge and horizontal center remain pinned, else None."""
+    @staticmethod
+    def _corroborated_pairs(earlier):
+        return [(b[1], min(a[2], b[2])-min(a[3], b[3]), min(a[2], b[2]), min(a[3], b[3]))
+                for a, b in zip(earlier, earlier[1:])]
+
+    @staticmethod
+    def _merge_clip_baselines(existing, candidates):
+        pool = list(existing)+list(candidates)
+        if not pool:
+            return []
+        by_height = max(pool, key=lambda b: (b[3], b[2]))
+        by_rear = max(pool, key=lambda b: (b[2]-OCCLUSION_BOTTOM_SHARE*b[3], b[3]))
+        return [by_height] if by_height == by_rear else [by_height, by_rear]
+
+    @staticmethod
+    def _prune_clip_baselines(state, px, y1):
+        saved = state.get("clip_baselines")
+        if not saved:
+            return []
+        kept = [b for b in saved
+                if abs(px-b[0]) <= OCCLUSION_TOP_DRIFT_HEIGHTS*b[3]
+                and abs(y1-b[1]) <= OCCLUSION_TOP_DRIFT_HEIGHTS*b[3]]
+        state["clip_baselines"] = kept or None
+        return kept
+
+    def _refresh_clip_baselines(self, state, observation, timestamp, prev_obs):
+        """Record corroborated stationary baselines (tallest height and deepest rear)
+        so partial shrinkage or minor height jitter never degrades clip detection."""
+        history = state.get("history")
+        if not history or len(history) < 2 or prev_obs is None or history[-1][0] != prev_obs["time"]:
+            return
+        geom = self._valid_box_geometry(observation)
+        if geom is None:
+            return
+        px, py, height = geom
+        y1 = py-height
+        earlier = list(history)
+        pairs = self._corroborated_pairs(earlier)
+        saved = state.get("clip_baselines") or []
+        if self._merge_clip_baselines(saved, pairs) == saved:
+            return
+        samples = earlier+[(timestamp, px, py, height)]
+        motion = _fit(samples)
+        if motion is None:
+            return
+        y1_vals = [s[2]-s[3] for s in samples]
+        x_vals = [s[1] for s in samples]
+        y1_span = max(y1_vals)-min(y1_vals)
+        x_span = max(x_vals)-min(x_vals)
+        top_speed = math.hypot(motion[0], motion[2])
+        valid = [b for b in pairs
+                 if y1_span <= OCCLUSION_TOP_DRIFT_HEIGHTS*b[3]
+                 and x_span <= OCCLUSION_TOP_DRIFT_HEIGHTS*b[3]
+                 and top_speed < OCCLUSION_STATIC_TOP_SPEED*b[3]
+                 and abs(px-b[0]) <= OCCLUSION_TOP_DRIFT_HEIGHTS*b[3]
+                 and abs(y1-b[1]) <= OCCLUSION_TOP_DRIFT_HEIGHTS*b[3]]
+        if valid:
+            state["clip_baselines"] = self._merge_clip_baselines(saved, valid)
+
+    def _bottom_clipped_crossing(self, state, observation, timestamp, prev_obs):
+        """Return pre-occlusion baseline (x, y1, y2, h_base) when a stop-line crossing is
+        explained purely by bottom-edge occlusion on a stationary vehicle, else None."""
         history = state.get("history")
         if not history or len(history) < 2 or prev_obs is None or history[-1][0] != prev_obs["time"]:
             return None
@@ -278,55 +336,35 @@ class VehicleWaits:
         px, py, height = geom
         y1 = py-height
         earlier = list(history)
-        # Require two consecutive prior sightings supporting the taller baseline,
-        # breaking equal-height ties in favor of the most recent stationary geometry.
-        hist_base = max((b if b[3] <= a[3] else a for a, b in zip(earlier, earlier[1:])),
-                        key=lambda sample: (sample[3], sample[0]))
-        x_base, y2_base, h_base = hist_base[1], hist_base[2], hist_base[3]
-        y1_base = y2_base-h_base
-        candidate = (x_base, y1_base, y2_base, h_base)
-        saved = state.get("clip_baseline")
-        if saved is not None:
-            sx, sy1, sy2, sh = saved
-            if abs(px-sx) <= OCCLUSION_TOP_DRIFT_HEIGHTS*sh and abs(y1-sy1) <= OCCLUSION_TOP_DRIFT_HEIGHTS*sh:
-                if sh > h_base:
-                    if refresh_only:
-                        return None
-                    x_base, y1_base, y2_base, h_base = sx, sy1, sy2, sh
-                elif refresh_only and candidate == saved:
-                    return None
+        candidates = self._corroborated_pairs(earlier)+list(state.get("clip_baselines") or ())
         samples = earlier+[(timestamp, px, py, height)]
+        motion = _fit(samples)
+        if motion is None:
+            return None
         y1_vals = [s[2]-s[3] for s in samples]
         x_vals = [s[1] for s in samples]
-        if (max(y1_vals)-min(y1_vals) > OCCLUSION_TOP_DRIFT_HEIGHTS*h_base or
-                max(x_vals)-min(x_vals) > OCCLUSION_TOP_DRIFT_HEIGHTS*h_base):
-            return None
-        motion = _fit(samples)
-        if motion is None or math.hypot(motion[0], motion[2]) >= OCCLUSION_STATIC_TOP_SPEED*h_base:
-            return None
-        return (x_base, y1_base, y2_base, h_base)
-
-    def _bottom_clipped_crossing(self, state, observation, timestamp, prev_obs):
-        """Return pre-occlusion baseline (x, y1, y2, h_base) when a stop-line crossing is
-        explained purely by bottom-edge occlusion on a stationary vehicle, else None."""
-        baseline = self._stationary_baseline(state, observation, timestamp, prev_obs)
-        if baseline is None:
-            return None
-        geom = self._valid_box_geometry(observation)
-        if geom is None:
-            return None
-        px, py, height = geom
-        _, _, y2_base, h_base = baseline
-        if height > CROSSING_CLIP_SHRINK_RATIO*h_base+1e-9:
-            return None
-        if (y2_base-py) < OCCLUSION_BOTTOM_SHARE*(h_base-height)-1e-9:
-            return None
-        unclipped_y2 = py-height+h_base
-        if not math.isfinite(unclipped_y2):
-            return None
-        # Orientation-agnostic counterfactual: only suppress when restoring the
-        # pre-occlusion height places the vehicle's rear back behind the line.
-        return baseline if self.side((px, unclipped_y2)) < 0 else None
+        y1_span = max(y1_vals)-min(y1_vals)
+        x_span = max(x_vals)-min(x_vals)
+        top_speed = math.hypot(motion[0], motion[2])
+        qualifying = []
+        for b in candidates:
+            _, _, y2_base, h_base = b
+            if height > CROSSING_CLIP_SHRINK_RATIO*h_base+1e-9:
+                continue
+            if (y2_base-py) < OCCLUSION_BOTTOM_SHARE*(h_base-height)-1e-9:
+                continue
+            if (y1_span > OCCLUSION_TOP_DRIFT_HEIGHTS*h_base or
+                    x_span > OCCLUSION_TOP_DRIFT_HEIGHTS*h_base or
+                    top_speed >= OCCLUSION_STATIC_TOP_SPEED*h_base):
+                continue
+            unclipped_y2 = y1+h_base
+            if not math.isfinite(unclipped_y2):
+                continue
+            # Orientation-agnostic counterfactual: only suppress when restoring the
+            # pre-occlusion height places the vehicle's rear back behind the line.
+            if self.side((px, unclipped_y2)) < 0:
+                qualifying.append(b)
+        return max(qualifying, key=lambda b: (b[3], b[2])) if qualifying else None
 
     def _pending_crossing_confirmed(self, pending, observation):
         """True once a clipped track's unclipped rear also clears the stop line."""
@@ -343,11 +381,8 @@ class VehicleWaits:
                            valid_motion, continuing, keep_pending):
         row = state["row"]
         geom = self._valid_box_geometry(observation)
-        if continuing and state.get("clip_baseline") is not None and geom is not None:
-            bx, by1, _, bh = state["clip_baseline"]
-            if (abs(geom[0]-bx) > OCCLUSION_TOP_DRIFT_HEIGHTS*bh or
-                    abs((geom[1]-geom[2])-by1) > OCCLUSION_TOP_DRIFT_HEIGHTS*bh):
-                state["clip_baseline"] = None
+        if continuing and geom is not None:
+            self._prune_clip_baselines(state, geom[0], geom[1]-geom[2])
         pending = state.get("pending_crossing")
         if pending is not None:
             if self.side(observation.point) < 0:
@@ -364,25 +399,21 @@ class VehicleWaits:
             pending["recovered"] = 0
             if self._pending_crossing_confirmed(pending, observation):
                 self._cross(row, dict(pending["from"], phase=prev_obs["phase"]), observation, phase, timestamp, cycle_id)
-                state["pending_crossing"] = state["clip_baseline"] = None
+                state["pending_crossing"] = state["clip_baselines"] = None
                 return True
             return False
         if self.side(prev_obs["point"]) < 0 <= self.side(observation.point):
             clipped = self._bottom_clipped_crossing(state, observation, timestamp, prev_obs) if continuing else None
             if clipped is not None:
-                saved = state.get("clip_baseline")
-                if saved is None or clipped[3] >= saved[3]:
-                    state["clip_baseline"] = clipped
+                state["clip_baselines"] = self._merge_clip_baselines(state.get("clip_baselines") or (), [clipped])
                 if keep_pending:
                     state["pending_crossing"] = {"from": prev_obs, "h_base": clipped[3], "recovered": 0}
                 return False
             self._cross(row, prev_obs, observation, phase, timestamp, cycle_id)
-            state["clip_baseline"] = None
+            state["clip_baselines"] = None
             return True
         if continuing:
-            baseline = self._stationary_baseline(state, observation, timestamp, prev_obs, refresh_only=True)
-            if baseline is not None:
-                state["clip_baseline"] = baseline
+            self._refresh_clip_baselines(state, observation, timestamp, prev_obs)
         return False
 
     def _cross(self, row, previous, observation, phase, timestamp, cycle_id):
@@ -461,11 +492,11 @@ class VehicleWaits:
                             state, prev_obs, observation, phase, timestamp, sequence, cycle_id,
                             False, continuing, keep_pending=native_exit)
                     else:
-                        state["pending_crossing"] = state["clip_baseline"] = None
+                        state["pending_crossing"] = state["clip_baselines"] = None
                     if crossed_now:
                         self._clear_native_exit(state)
                     elif not native_exit:
-                        state["pending_crossing"] = state["clip_baseline"] = None
+                        state["pending_crossing"] = state["clip_baselines"] = None
                         row.update(completed=True,completed_at=timestamp,tracking_state="EXITED",right_censored=False);self.work+=1
                     else:
                         if not (in_native_exit and step_continuous):
@@ -481,7 +512,7 @@ class VehicleWaits:
                         state["stop_candidate"] = state["move_candidate"] = None
                         if timestamp-state["exit_candidate"] >= self.policy.exit_persistence_sec-1e-8:
                             row.update(completed=True,completed_at=state["exit_candidate"],tracking_state="EXITED",right_censored=False);self.work+=1
-                            state["pending_crossing"] = state["clip_baseline"] = None
+                            state["pending_crossing"] = state["clip_baselines"] = None
                             self._clear_native_exit(state)
                         else:
                             row["tracking_state"] = "EXIT_PENDING"
@@ -517,7 +548,7 @@ class VehicleWaits:
                         state, prev_obs, observation, phase, timestamp, sequence, cycle_id,
                         valid_motion, continuing, keep_pending=True)
                 else:
-                    state["pending_crossing"] = state["clip_baseline"] = None
+                    state["pending_crossing"] = state["clip_baselines"] = None
             if valid_motion:
                 speed = observation.speed_mps
                 if not state["stopped"]:
@@ -559,7 +590,7 @@ class VehicleWaits:
                 continue
             if identity not in present and not row["completed"]:
                 row["tracking_state"] = "LOST"
-                state["pending_crossing"] = state["clip_baseline"] = None
+                state["pending_crossing"] = state["clip_baselines"] = None
                 exit_last = state.get("exit_last") if native_exit else None
                 last_observed = max(row["last_seen"], exit_last["time"]) if exit_last is not None else row["last_seen"]
                 if timestamp-last_observed > self.policy.association_gap_sec:
@@ -833,7 +864,7 @@ class VehicleWaits:
         state["previous"] = dict(state["previous"], handoff=True)
         state["history"].clear()
         state["stopped"] = False; state["stop_candidate"] = state["move_candidate"] = None
-        state["pending_crossing"] = state["clip_baseline"] = state["last_valid_box"] = None
+        state["pending_crossing"] = state["clip_baselines"] = state["last_valid_box"] = None
         self._clear_native_exit(state)
         native = {"epoch": new[0], "local_id": new[1]}
         # Added on the first link only, so rows of unchanged runs keep their schema.
@@ -852,7 +883,7 @@ class VehicleWaits:
                 self._flag(row, reason)
                 state["previous"] = None
                 state["stop_candidate"] = state["move_candidate"] = None
-                state["pending_crossing"] = state["clip_baseline"] = state["last_valid_box"] = None
+                state["pending_crossing"] = state["clip_baselines"] = state["last_valid_box"] = None
                 self._clear_native_exit(state)
                 if "history" in state:state["history"].clear()
                 row["tracking_state"] = "UNKNOWN"

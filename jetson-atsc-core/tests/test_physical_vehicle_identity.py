@@ -1363,6 +1363,29 @@ def test_sustained_bottom_clip_requires_geometric_recovery_before_clearing_ancho
     assert not row_r5['completed'] and not row_r5['crossed_stop_line']
     assert waits_r5.active[(0, 1)].get('pending_crossing') is not None
 
+    # Sol S2 Round 6: corroborated recent baselines AND saved baselines are all evaluated so
+    # neither an equal-height tie-break nor a 1 px taller saved baseline hides a qualifying clip.
+    for label, seq_r6 in (
+        ('recent_shift_up_equal_h',
+         [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(6)]
+         + [[car(1, 276., x=150., height=60., speed=0.)] for _ in range(2)]
+         + [[car(1, 268., x=150., height=48., speed=0.)]]),
+        ('saved_1px_taller_before_recent',
+         [[car(1, 276., x=150., height=61., speed=0.)] for _ in range(6)]
+         + [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(12)]
+         + [[car(1, 268., x=150., height=48., speed=0.)]]),
+        ('saved_1px_taller_then_partial_shrink',
+         [[car(1, 276., x=150., height=61., speed=0.)] for _ in range(6)]
+         + [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(12)]
+         + [[car(1, 274., x=150., height=54., speed=0.)] for _ in range(10)]
+         + [[car(1, 268., x=150., height=48., speed=0.)]]),
+    ):
+        waits_r6 = book(side=lambda p: 270.-p[1])
+        play(waits_r6, seq_r6, phase='RED')
+        row_r6 = only_row(waits_r6)
+        assert not row_r6['completed'] and not row_r6['crossed_stop_line'], label
+        assert waits_r6.active[(0, 1)].get('pending_crossing') is not None, label
+
 
 def test_pending_crossing_confirms_across_consecutive_exit_pending_outside_frames():
     """Sol S3: an active crossing anchor is retained across consecutive outside frames
