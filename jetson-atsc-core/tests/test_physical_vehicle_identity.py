@@ -1417,12 +1417,33 @@ def test_sustained_bottom_clip_requires_geometric_recovery_before_clearing_ancho
          + [obs for i in range(40) for obs in [[car(1, 280., x=150.+i/80., height=60., speed=0.)]]*2]
          + [[car(1, 274., x=157., height=54., speed=0.)] for _ in range(12)]
          + [[car(1, 268., x=160., height=48., speed=0.)]]),
+        # Sol S11 Round 9: lossless drift-gate containment preserves x=157 across 40 higher-rear
+        # anchors and subsequent slow horizontal drift to x=165.9375 (within 9 px of x=157).
+        ('lossless_x_drift_containment_round9',
+         [[car(1, 280., x=157., height=60., speed=0.)] for _ in range(12)]
+         + [[car(1, 280.125, x=156.875, height=60., speed=0.)] for _ in range(12)]
+         + [obs for i in range(40) for obs in [[car(1, 280.125, x=150.+0.171875*i, height=60., speed=0.)]]*2]
+         + [[car(1, 274., x=min(156.703125+0.5*i, 165.9375), height=54., speed=0.)] for i in range(32)]
+         + [[car(1, 268., x=165.9375, height=48., speed=0.)]]),
     ):
         waits_r6 = book(side=lambda p: 270.-p[1])
         play(waits_r6, seq_r6, phase='RED')
         row_r6 = only_row(waits_r6)
         assert not row_r6['completed'] and not row_r6['crossed_stop_line'], label
         assert waits_r6.active[(0, 1)].get('pending_crossing') is not None, label
+
+    # Sol S2 Round 9: lossless nondominated frontier preserves (280, 60) across 40 finer steps
+    # at stop_y=274 so (273.65, 50.95) with top pinned at y1=222.7 stays pending, not SERVED.
+    waits_r9 = book(side=lambda p: 274.-p[1])
+    seq_r9 = ([[car(1, 280., x=150., height=60.1, speed=0.)] for _ in range(12)]
+              + [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(12)]
+              + [obs for i in range(40) for obs in [[car(1, 280., x=150., height=59.75-0.18*i, speed=0.)]]*2]
+              + [[car(1, 278.7, x=150., height=56., speed=0.)] for _ in range(12)]
+              + [[car(1, 273.65, x=150., height=50.95, speed=0.)]])
+    play(waits_r9, seq_r9, phase='RED')
+    row_r9 = only_row(waits_r9)
+    assert not row_r9['completed'] and not row_r9['crossed_stop_line']
+    assert waits_r9.active[(0, 1)].get('pending_crossing') is not None
 
 
 def test_pending_crossing_confirms_across_consecutive_exit_pending_outside_frames():

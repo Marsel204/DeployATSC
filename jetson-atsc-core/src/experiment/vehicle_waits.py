@@ -37,8 +37,6 @@ OCCLUSION_MAX_RECOVERY_RATIO = 1.2
 # occluder can cross the stop line while its unclipped rear stays behind it.
 CROSSING_CLIP_SHRINK_RATIO = .85
 CROSSING_RECOVERY_RATIO = .95
-MAX_CLIP_BASELINES = 32
-MAX_CLIP_FRONTIER_GROUPS = 12
 # Another observed box (any class, size or ID state) covering this much of the
 # smaller of it and the newborn, with footpoints this close (in smaller-box
 # heights), may be the same body or its neighbour: the link is ambiguous.
@@ -269,119 +267,35 @@ class VehicleWaits:
 
     @staticmethod
     def _corroborated_pairs(earlier):
-        return [(b[1], min(a[2], b[2])-min(a[3], b[3]), min(a[2], b[2]), min(a[3], b[3]))
-                for a, b in zip(earlier, earlier[1:])]
+        out = []
+        for a, b in zip(earlier, earlier[1:]):
+            y2 = a[2] if a[2] <= b[2] else b[2]
+            h = a[3] if a[3] <= b[3] else b[3]
+            out.append((b[1], y2-h, y2, h, y2-OCCLUSION_BOTTOM_SHARE*h))
+        return out
 
     @staticmethod
     def _dominates_baseline(a, b):
-        """True when stationary baseline ``a`` covers ``b`` in height, rear bottom-share
-        score, and (x, y1) drift-gate containment so ``b`` can never qualify without ``a``."""
-        ax, ay1, ay2, ah = a
-        bx, by1, by2, bh = b
-        if ah < bh:
+        """True when stationary baseline ``a`` losslessly covers ``b`` in height, rear
+        bottom-share score, and (x, y1) drift-gate containment so ``b`` can never survive
+        pruning or qualify for a clip without ``a`` also surviving and qualifying."""
+        if a == b:
+            return True
+        if a[3] < b[3] or a[4] < b[4]+1e-12:
             return False
-        if (ay2-OCCLUSION_BOTTOM_SHARE*ah) < (by2-OCCLUSION_BOTTOM_SHARE*bh):
-            return False
-        margin = OCCLUSION_TOP_DRIFT_HEIGHTS*(ah-bh)
-        return abs(ax-bx) <= margin and abs(ay1-by1) <= margin
+        margin = OCCLUSION_TOP_DRIFT_HEIGHTS*(a[3]-b[3])-1e-12
+        return abs(a[0]-b[0]) <= margin and abs(a[1]-b[1]) <= margin
 
     @classmethod
     def _merge_clip_baselines(cls, existing, candidates):
-        pool = list(existing)+list(candidates)
-        if not pool:
-            return []
-        # Remove dominated entries in O(|pool|^2) with direct float checks (no generator allocations).
-        rears = [b[2]-OCCLUSION_BOTTOM_SHARE*b[3] for b in pool]
-        n = len(pool)
-        nondominated = []
-        nd_rears = []
-        for i in range(n):
-            bx, by1, _, bh = pool[i]
-            br = rears[i]
-            dominated = False
-            for j in range(n):
-                if j == i:
-                    continue
-                ax, ay1, _, ah = pool[j]
-                if ah < bh or rears[j] < br:
-                    continue
-                margin = OCCLUSION_TOP_DRIFT_HEIGHTS*(ah-bh)
-                if abs(ax-bx) <= margin and abs(ay1-by1) <= margin:
-                    if pool[j] != pool[i] or j > i:
-                        dominated = True
-                        break
-            if not dominated:
-                nondominated.append(pool[i])
-                nd_rears.append(br)
-        m = len(nondominated)
-        if m <= MAX_CLIP_BASELINES:
-            return nondominated
-        # Preserve highest-coverage (h, rear_score) Pareto frontier groups with their
-        # x-drift extrema, then fill remaining budget via incremental 4D farthest-point coverage.
-        groups = {}
-        group_rear = {}
-        for idx, b in enumerate(nondominated):
-            key = (b[2], b[3])
-            if key not in groups:
-                groups[key] = [idx]
-                group_rear[key] = nd_rears[idx]
-            else:
-                groups[key].append(idx)
-        keys = list(groups)
-        frontier = []
-        for k in keys:
-            kr = group_rear[k]
-            kh = k[1]
-            if not any(o[1] >= kh and group_rear[o] >= kr and o != k for o in keys):
-                frontier.append(k)
-        frontier.sort(key=lambda k: (-k[1], group_rear[k]))
-        while len(frontier) > MAX_CLIP_FRONTIER_GROUPS:
-            # Drop the interior frontier point with smallest unique 2D Pareto hypervolume.
-            drop = min(range(1, len(frontier)-1),
-                       key=lambda i: (frontier[i][1]-frontier[i+1][1])*(group_rear[frontier[i]]-group_rear[frontier[i-1]]))
-            frontier.pop(drop)
-        keep = set()
-        for k in frontier:
-            idxs = groups[k]
-            keep.add(min(idxs, key=lambda idx: (nondominated[idx][0], -idx)))
-            keep.add(max(idxs, key=lambda idx: (nondominated[idx][0], idx)))
-        remaining = [idx for idx in range(m) if idx not in keep]
-        if len(keep) < MAX_CLIP_BASELINES and remaining:
-            def gap_to(c_idx, k_idx):
-                cx, cy1, _, ch = nondominated[c_idx]
-                kx, ky1, _, kh = nondominated[k_idx]
-                inv_h = 1./ch
-                inv_d = 1./(OCCLUSION_TOP_DRIFT_HEIGHTS*ch)
-                margin = OCCLUSION_TOP_DRIFT_HEIGHTS*(kh-ch)
-                g0 = (ch-kh)*inv_h if ch > kh else 0.
-                g1 = (nd_rears[c_idx]-nd_rears[k_idx])*inv_h if nd_rears[c_idx] > nd_rears[k_idx] else 0.
-                dx = abs(kx-cx)-margin
-                g2 = dx*inv_d if dx > 0. else 0.
-                dy = abs(ky1-cy1)-margin
-                g3 = dy*inv_d if dy > 0. else 0.
-                g = g0 if g0 >= g1 else g1
-                if g2 > g:g = g2
-                if g3 > g:g = g3
-                return g
-            kept_idxs = list(keep)
-            min_gaps = [min(gap_to(idx, k_idx) for k_idx in kept_idxs) for idx in remaining]
-            while len(keep) < MAX_CLIP_BASELINES and remaining:
-                best_pos = 0
-                best_g = min_gaps[0]
-                best_idx = remaining[0]
-                for pos in range(1, len(remaining)):
-                    g = min_gaps[pos]
-                    r_idx = remaining[pos]
-                    if g > best_g or (g == best_g and r_idx > best_idx):
-                        best_g = g; best_idx = r_idx; best_pos = pos
-                chosen = remaining.pop(best_pos)
-                min_gaps.pop(best_pos)
-                keep.add(chosen)
-                for pos, r_idx in enumerate(remaining):
-                    g = gap_to(r_idx, chosen)
-                    if g < min_gaps[pos]:
-                        min_gaps[pos] = g
-        return [nondominated[idx] for idx in sorted(keep)]
+        """Maintain the exact lossless nondominated set of live stationary baselines."""
+        kept = list(existing)
+        for cand in candidates:
+            if any(cls._dominates_baseline(s, cand) for s in kept):
+                continue
+            kept = [s for s in kept if not cls._dominates_baseline(cand, s)]
+            kept.append(cand)
+        return kept
 
     @staticmethod
     def _prune_clip_baselines(state, px, y1):
@@ -395,8 +309,8 @@ class VehicleWaits:
         return kept
 
     def _refresh_clip_baselines(self, state, observation, timestamp, prev_obs):
-        """Record nondominated corroborated stationary baselines so partial shrinkage,
-        interior height/rear trade-offs, or small stationary shifts never degrade clip detection."""
+        """Record all nondominated corroborated stationary baselines while pinned so partial
+        shrinkage, interior height/rear trade-offs, or stationary drift never lose eligibility."""
         history = state.get("history")
         if not history or len(history) < 2 or prev_obs is None or history[-1][0] != prev_obs["time"]:
             return
@@ -429,8 +343,8 @@ class VehicleWaits:
             state["clip_baselines"] = self._merge_clip_baselines(saved, valid)
 
     def _bottom_clipped_crossing(self, state, observation, timestamp, prev_obs):
-        """Return pre-occlusion baseline (x, y1, y2, h_base) when a stop-line crossing is
-        explained purely by bottom-edge occlusion on a stationary vehicle, else None."""
+        """Return pre-occlusion baseline (x, y1, y2, h_base, rear) when a stop-line crossing
+        is explained purely by bottom-edge occlusion on a stationary vehicle, else None."""
         history = state.get("history")
         if not history or len(history) < 2 or prev_obs is None or history[-1][0] != prev_obs["time"]:
             return None
@@ -452,7 +366,7 @@ class VehicleWaits:
         top_speed = math.hypot(motion[0], motion[2])
         qualifying = []
         for b in candidates:
-            _, _, y2_base, h_base = b
+            _, _, y2_base, h_base, _ = b
             if height > CROSSING_CLIP_SHRINK_RATIO*h_base+1e-9:
                 continue
             if (y2_base-py) < OCCLUSION_BOTTOM_SHARE*(h_base-height)-1e-9:
