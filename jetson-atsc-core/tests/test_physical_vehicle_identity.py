@@ -1518,6 +1518,24 @@ def test_sustained_stationary_jitter_per_frame_cost_stays_bounded():
     assert side_calls[0] <= 120, f'genuine departure scanned baselines ({side_calls[0]} side calls)'
     assert all(r['tracking_state'] == 'SERVED' and r['crossed_stop_line'] for r in waits_dep.records.values())
 
+    # Sol S12 (Round 13): equal-height baselines across many blocks must binary-search the full
+    # (h, y2) key so partial pruning stays fast (no linear walk across same-height blocks).
+    waits_eq = book(side=lambda p: 275.-p[1])
+    for f in range(1800):
+        step = f//2
+        dx = -0.5 if step < 250 else 0.0
+        y2 = 276.+0.002*step  # 900 distinct y2 values sharing the EXACT SAME height=60
+        obs = [car(1+k, y2, x=100.+80.*k+dx, height=60., speed=0.) for k in range(6)]
+        waits_eq.observe(obs, 'RED', f/FPS, f+1, 1, unassigned=())
+    assert len(waits_eq.active[(0, 1)]['clip_baselines']._blocks) >= 8
+    started = time.perf_counter()
+    # x=+8.6 prunes the 250 step<250 equal-height baselines per track on the departure frame.
+    waits_eq.observe([car(1+k, 262., x=100.+80.*k+8.6, height=48., speed=1.) for k in range(6)],
+                     'GREEN', 1800/FPS, 1801, 1, unassigned=())
+    eq_depart_ms = (time.perf_counter()-started)*1000.
+    assert eq_depart_ms < 15.0, f'equal-height partial-prune departure took {eq_depart_ms:.2f} ms'
+    assert all(r['tracking_state'] == 'SERVED' and r['crossed_stop_line'] for r in waits_eq.records.values())
+
     # Sol S13: growing height with fixed top/center evicts dominated live baselines (retaining 1/track).
     waits_grow = book(side=lambda p: 270.-p[1])
     for f in range(1800):
@@ -1592,6 +1610,38 @@ def test_missed_frame_clears_crossing_clip_evidence_but_preserves_fragment_histo
     waits_bad.observe([car(1, 268., x=150., height=48., speed=0.)], 'RED', 8/FPS, 9, 1, unassigned=())
     row_bad = only_row(waits_bad)
     assert row_bad['tracking_state'] == 'SERVED' and row_bad['crossed_stop_line']
+
+    # Sol S14 (Round 13): clip -> partial recovery behind line -> zero-width box ACROSS line
+    # clears pending_crossing WITHOUT falling through to SERVED; and a malformed box BEHIND
+    # the line cannot serve as the starting point for a crossing on the very next frame.
+    waits_hold = book(side=lambda p: 270.-p[1])
+    for f in range(5):
+        waits_hold.observe([car(1, 280., x=150., height=60., speed=0.)], 'RED', f/FPS, f+1, 1, unassigned=())
+    waits_hold.observe([car(1, 268., x=150., height=48., speed=0.)], 'RED', 5/FPS, 6, 1, unassigned=())
+    waits_hold.observe([car(1, 274., x=150., height=54., speed=0.)], 'RED', 6/FPS, 7, 1, unassigned=())
+    assert waits_hold.active[(0, 1)].get('pending_crossing') is not None
+    bad_across = replace(car(1, 268., x=150., height=48., speed=0.), bbox=(150., 220., 150., 268.), height=48.)
+    waits_hold.observe([bad_across], 'RED', 7/FPS, 8, 1, unassigned=())
+    assert waits_hold.active[(0, 1)].get('pending_crossing') is None
+    assert not only_row(waits_hold)['crossed_stop_line']
+    # Malformed box BEHIND line cannot start a crossing on the next valid frame across the line.
+    bad_behind = replace(car(1, 274., x=150., height=54., speed=0.), bbox=(150., 220., 150., 274.), height=54.)
+    waits_hold.observe([bad_behind], 'RED', 8/FPS, 9, 1, unassigned=())
+    waits_hold.observe([car(1, 268., x=150., height=48., speed=0.)], 'RED', 9/FPS, 10, 1, unassigned=())
+    assert not only_row(waits_hold)['crossed_stop_line']
+
+    # Sol Round 13 (stale re-entry): after acquisition invalidation clears previous=None, a fresh
+    # outside EXIT_PENDING observation behind the line followed by a consecutive in-ROI crossing
+    # must evaluate the crossing independently of wait interval accounting and complete SERVED.
+    waits_stale = book(exit_persistence_sec=0.3, side=lambda p: 270.-p[1])
+    waits_stale.observe([car(1, 280., x=150., height=60., speed=0.)], 'RED', 0., 1, 1, unassigned=())
+    waits_stale.invalidate(0.5, 'acquisition_stale')
+    assert waits_stale.active[(0, 1)]['previous'] is None
+    waits_stale.observe([car(1, 276., x=150., height=60., speed=2., in_region=False)], 'GREEN', 1.0, 2, 2, unassigned=())
+    assert waits_stale.active[(0, 1)]['previous'] is None and waits_stale.active[(0, 1)]['exit_last'] is not None
+    waits_stale.observe([car(1, 264., x=150., height=60., speed=2., in_region=True)], 'GREEN', 1.0+1/FPS, 3, 2, unassigned=())
+    row_stale = only_row(waits_stale)
+    assert row_stale['tracking_state'] == 'SERVED' and row_stale['crossed_stop_line'] and row_stale['crossing_cycle'] == 2
 
 
 def test_bottom_clip_rear_share_cutoff_uses_original_float_comparison():
