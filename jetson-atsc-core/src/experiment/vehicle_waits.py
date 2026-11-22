@@ -416,7 +416,8 @@ class _ClipBaselines:
     __slots__ = ("_x", "_y1", "_y2", "_h", "_rear", "_err", "_alive", "count",
                  "_root",
                  "_x_hi", "_x_lo", "_y_hi", "_y_lo",
-                 "_blocks", "_blk_max", "_slot_blk", "_rebuild", "_dom_sweep", "_dom_queue")
+                 "_blocks", "_blk_max", "_slot_blk", "_rebuild",
+                 "_dom_sweep", "_dom_queue", "_q_head", "_dom_cache")
 
     def __init__(self):
         self._x = array("d")
@@ -438,6 +439,8 @@ class _ClipBaselines:
         self._rebuild = None
         self._dom_sweep = None
         self._dom_queue = deque()
+        self._q_head = 0
+        self._dom_cache = []
 
     def __bool__(self):
         return self.count > 0
@@ -456,6 +459,8 @@ class _ClipBaselines:
         self._rebuild = None
         self._dom_sweep = None
         self._dom_queue.clear()
+        self._q_head = 0
+        self._dom_cache.clear()
 
     @staticmethod
     def _find_in_block(blk, h, y2, x):
@@ -562,16 +567,43 @@ class _ClipBaselines:
         self._slot_blk[i].live_count -= 1
         self.count -= 1
         if self._rebuild is not None:
-            shadow, _, _, mapping, _, q_new = self._rebuild
+            shadow, _, _, mapping, _, _ = self._rebuild
             new_i = mapping.pop(i, None)
             if new_i is not None and shadow._alive[new_i]:
                 shadow._alive[new_i] = 0
                 shadow._slot_blk[new_i].live_count -= 1
                 shadow.count -= 1
                 if shadow.count == 0:
-                    shadow.clear()
-                    mapping.clear()
-                    q_new.clear()
+                    self._rebuild = None
+
+    def _cache_dom(self, slot):
+        dc = self._dom_cache
+        if slot in dc:
+            dc.remove(slot)
+        elif len(dc) >= 8:
+            dc.pop(0)
+        dc.append(slot)
+
+    def _covered_by_hot(self, bx, by1, by2, bh, brear, berr):
+        alive = self._alive
+        xs, y1s, y2s, hs, rears, errs = self._x, self._y1, self._y2, self._h, self._rear, self._err
+        if self._dom_sweep is not None:
+            ds = self._dom_sweep[0]
+            if 0 <= ds < len(alive) and alive[ds] and _dominates_coords(
+                    xs[ds], y1s[ds], y2s[ds], hs[ds], rears[ds], errs[ds],
+                    bx, by1, by2, bh, brear, berr):
+                return True
+        dc = self._dom_cache
+        if not dc:
+            return False
+        for idx in range(len(dc)-1, -1, -1):
+            s = dc[idx]
+            if s >= len(alive) or not alive[s]:
+                del dc[idx]
+            elif _dominates_coords(xs[s], y1s[s], y2s[s], hs[s], rears[s], errs[s],
+                                   bx, by1, by2, bh, brear, berr):
+                return True
+        return False
 
     def _insert_raw(self, bx, by1, by2, bh, brear, berr):
         slot = len(self._x)
@@ -587,7 +619,8 @@ class _ClipBaselines:
         return slot
 
     def _step_compact(self, budget):
-        shadow, pos, end, mapping, q_old, q_new = self._rebuild
+        rb = self._rebuild
+        shadow, pos, end, mapping, q_scan, q_shadow = rb
         alive = self._alive
         xs, y1s, y2s, hs, rears, errs = self._x, self._y1, self._y2, self._h, self._rear, self._err
         copied = 0
@@ -599,22 +632,30 @@ class _ClipBaselines:
                 pos = i+1
                 i = alive.find(1, pos, end)
             if i != -1:
-                self._rebuild = (shadow, i, end, mapping, q_old, q_new)
+                rb[1] = i
                 return copied
-            pos = end
-        while q_old and copied < budget:
-            q = q_old.pop()
-            nq = mapping.get(q)
-            if nq is not None and shadow._alive[nq]:
-                q_new.appendleft(nq)
+            rb[1] = end
+        q_head = self._q_head
+        q_dq = self._dom_queue
+        while q_scan > q_head and copied < budget:
+            q_scan -= 1
+            q = q_dq[q_scan-q_head]
+            nq = mapping.get(q, -1)
+            if nq >= 0 and not shadow._alive[nq]:
+                nq = -1
+            q_shadow.appendleft(nq)
             copied += 1
-        if q_old:
-            self._rebuild = (shadow, pos, end, mapping, q_old, q_new)
+        if q_scan > q_head:
+            rb[4] = q_scan
             return copied
         if self._dom_sweep is not None:
             new_dom = mapping.get(self._dom_sweep[0])
-            self._dom_sweep = (new_dom, -2) if (new_dom is not None and shadow._alive[new_dom]) else None
-        self._dom_queue = q_new
+            self._dom_sweep = (new_dom, -2, len(shadow._x)) if (new_dom is not None and shadow._alive[new_dom]) else None
+        if self._dom_cache:
+            self._dom_cache = [nq for s in self._dom_cache
+                               if (nq := mapping.get(s)) is not None and shadow._alive[nq]]
+        self._dom_queue = q_shadow
+        self._q_head = 0
         self._x, self._y1, self._y2 = shadow._x, shadow._y1, shadow._y2
         self._h, self._rear, self._err = shadow._h, shadow._rear, shadow._err
         self._alive, self.count, self._root = shadow._alive, shadow.count, shadow._root
@@ -625,15 +666,14 @@ class _ClipBaselines:
         return copied or 1
 
     def has_dom_sweep(self):
-        return (self._dom_sweep is not None or bool(self._dom_queue) or
-                (self._rebuild is not None and bool(self._rebuild[4])))
+        return self._dom_sweep is not None or bool(self._dom_queue)
 
     def _queue_dom_sweep(self, slot, bx, by1, by2, bh, brear, berr):
         alive = self._alive
         xs, y1s, y2s, hs, rears, errs = self._x, self._y1, self._y2, self._h, self._rear, self._err
         if self._dom_sweep is not None:
             ds = self._dom_sweep[0]
-            if ds >= len(alive) or not alive[ds]:
+            if ds < 0 or ds >= len(alive) or not alive[ds]:
                 self._dom_sweep = None
             elif _dominates_coords(xs[ds], y1s[ds], y2s[ds], hs[ds], rears[ds], errs[ds],
                                    bx, by1, by2, bh, brear, berr):
@@ -643,37 +683,52 @@ class _ClipBaselines:
                 self._kill_slot(ds)
                 self._dom_sweep = None
         q_dq = self._dom_queue
+        rb = self._rebuild
         if q_dq:
             tail = []
             inspected = 0
             dominated = False
             while q_dq and inspected < 16:
                 q = q_dq.pop()
+                sq = None
+                if rb is not None:
+                    if rb[5]:
+                        sq = rb[5].pop()
+                    else:
+                        rb[4] -= 1
                 inspected += 1
-                if q >= len(alive) or not alive[q]:
+                if q < 0 or q >= len(alive) or not alive[q]:
                     continue
                 if _dominates_coords(xs[q], y1s[q], y2s[q], hs[q], rears[q], errs[q],
                                      bx, by1, by2, bh, brear, berr):
-                    tail.append(q)
+                    tail.append((q, sq))
                     dominated = True
                     break
                 if _dominates_coords(bx, by1, by2, bh, brear, berr,
                                      xs[q], y1s[q], y2s[q], hs[q], rears[q], errs[q]):
                     self._kill_slot(q)
+                    rb = self._rebuild
                     continue
-                tail.append(q)
+                tail.append((q, sq))
             if tail:
-                q_dq.extend(reversed(tail))
+                for q, sq in reversed(tail):
+                    q_dq.append(q)
+                    if rb is not None:
+                        if sq is None:
+                            rb[4] += 1
+                        else:
+                            rb[5].append(sq)
             if dominated:
                 return
-        if self._dom_sweep is None:
-            self._dom_sweep = (slot, -2)
+        if self._dom_sweep is None and not q_dq:
+            self._dom_sweep = (slot, -2, len(alive))
         else:
             q_dq.append(slot)
-            if self._rebuild is not None:
-                nq = self._rebuild[3].get(slot)
-                if nq is not None:
-                    self._rebuild[5].append(nq)
+            if rb is not None:
+                nq = rb[3].get(slot, -1)
+                if nq >= 0 and not rb[0]._alive[nq]:
+                    nq = -1
+                rb[5].append(nq)
 
     def step_dom_sweep(self, budget):
         if budget <= 0:
@@ -682,21 +737,20 @@ class _ClipBaselines:
         xs, y1s, y2s, hs, rears, errs = self._x, self._y1, self._y2, self._h, self._rear, self._err
         checked = 0
         while checked < budget:
-            while self._dom_sweep is None and checked < budget:
-                if self._rebuild is not None and self._rebuild[4]:
-                    cand = self._rebuild[4].popleft()
-                elif self._dom_queue:
-                    cand = self._dom_queue.popleft()
-                else:
-                    break
-                if cand < len(alive) and alive[cand]:
-                    self._dom_sweep = (cand, -2)
+            while self._dom_sweep is None and self._dom_queue and checked < budget:
+                cand = self._dom_queue.popleft()
+                if self._rebuild is not None and self._q_head == self._rebuild[4]:
+                    self._rebuild[5].popleft()
+                    self._rebuild[4] += 1
+                self._q_head += 1
+                if 0 <= cand < len(alive) and alive[cand]:
+                    self._dom_sweep = (cand, -2, len(alive))
                 else:
                     checked += 1
             if self._dom_sweep is None:
                 break
-            dom_slot, pos = self._dom_sweep
-            if dom_slot >= len(alive) or not alive[dom_slot]:
+            dom_slot, pos, sweep_end = self._dom_sweep
+            if dom_slot < 0 or dom_slot >= len(alive) or not alive[dom_slot]:
                 self._dom_sweep = None
                 continue
             ax, ay1, ay2, ah, arear, aerr = xs[dom_slot], y1s[dom_slot], y2s[dom_slot], hs[dom_slot], rears[dom_slot], errs[dom_slot]
@@ -708,36 +762,39 @@ class _ClipBaselines:
                     if not self._root_may_be_dominated(ax, ay1, ah, arear_lo, ax_lo, ax_hi, ay_lo, ay_hi):
                         self._dom_sweep = None
                         continue
-                    self._dom_sweep = (dom_slot, -1)
+                    self._dom_sweep = (dom_slot, -1, sweep_end)
                     if checked >= budget:
                         break
                 rem = budget-checked
                 if checked > 1 and rem < min(32, budget):
                     break
                 ev_b = [rem]
-                self._root, _, _ = self._evict_dominated(self._root, ax, ay1, ay2, ah, arear, aerr,
-                                                         ax_lo, ax_hi, ay_lo, ay_hi, arear_lo, ev_b, skip_slot=dom_slot)
+                self._root, _, ev = self._evict_dominated(self._root, ax, ay1, ay2, ah, arear, aerr,
+                                                          ax_lo, ax_hi, ay_lo, ay_hi, arear_lo, ev_b, skip_slot=dom_slot)
                 while self._root is not None and self._root.idxs is None and len(self._root.children) == 1:
                     self._root = self._root.children[0]
+                if ev:
+                    self._cache_dom(dom_slot)
                 checked += rem-max(0, ev_b[0])
                 if ev_b[0] > 0:
                     self._dom_sweep = None
                 else:
-                    self._dom_sweep = (dom_slot, 0)
+                    self._dom_sweep = (dom_slot, 0, sweep_end)
                 continue
-            i = alive.find(1, pos)
+            i = alive.find(1, pos, sweep_end)
             while i != -1 and checked < budget:
                 if i != dom_slot:
                     checked += 1
                     if _dominates_coords(ax, ay1, ay2, ah, arear, aerr,
                                          xs[i], y1s[i], y2s[i], hs[i], rears[i], errs[i]):
                         self._kill_slot(i)
+                        self._cache_dom(dom_slot)
                 pos = i+1
-                i = alive.find(1, pos)
+                i = alive.find(1, pos, sweep_end)
             if i == -1:
                 self._dom_sweep = None
             else:
-                self._dom_sweep = (dom_slot, i)
+                self._dom_sweep = (dom_slot, i, sweep_end)
         return checked
 
     def needs_compact(self):
@@ -755,9 +812,7 @@ class _ClipBaselines:
         if self._rebuild is None:
             if len(self._x) <= 2*max(self.count, 64):
                 return 0
-            q_old = self._dom_queue
-            self._dom_queue = deque()
-            self._rebuild = (_ClipBaselines(), 0, len(self._x), {}, q_old, deque())
+            self._rebuild = [_ClipBaselines(), 0, len(self._x), {}, self._q_head+len(self._dom_queue), deque()]
         return self._step_compact(budget)
 
     def prune(self, px, y1, *, compact=True):
@@ -795,10 +850,9 @@ class _ClipBaselines:
                 self.clear()
                 return False
         if self._rebuild is not None:
-            shadow, _, _, mapping, _, q_new = self._rebuild
+            shadow = self._rebuild[0]
             if not shadow.prune(px, y1, compact=False):
-                mapping.clear()
-                q_new.clear()
+                self._rebuild = None
         return True
 
     def _is_covered(self, node, bx, by1, by2, bh, brear, berr, rb, bx_lo, bx_hi, by_lo, by_hi, brear_hi, budget):
@@ -816,6 +870,13 @@ class _ClipBaselines:
                 budget[0] -= 1
                 if alive[i] and _dominates_coords(xs[i], y1s[i], y2s[i], hs[i], rears[i], errs[i],
                                                   bx, by1, by2, bh, brear, berr):
+                    was_hot = i in self._dom_cache
+                    self._cache_dom(i)
+                    if not was_hot and self.count > 1:
+                        ah = hs[i]; ra = OCCLUSION_TOP_DRIFT_HEIGHTS*ah
+                        if self._root_may_be_dominated(xs[i], y1s[i], ah, rears[i]-errs[i],
+                                                       xs[i]-ra, xs[i]+ra, y1s[i]-ra, y1s[i]+ra):
+                            self._queue_dom_sweep(i, xs[i], y1s[i], y2s[i], ah, rears[i], errs[i])
                     return True
                 if budget[0] <= 0:
                     return False
@@ -832,7 +893,7 @@ class _ClipBaselines:
 
     def covered(self, b, dom_budget=None):
         bx, by1, by2, bh, brear, berr = b
-        if self._has_exact(bx, by1, by2, bh):
+        if self._has_exact(bx, by1, by2, bh) or self._covered_by_hot(bx, by1, by2, bh, brear, berr):
             return True
         if dom_budget is None:
             dom_budget = [512]
@@ -999,7 +1060,7 @@ class _ClipBaselines:
 
     def add(self, b, *, compact=True, dom_budget=None):
         bx, by1, by2, bh, brear, berr = b
-        if self._has_exact(bx, by1, by2, bh):
+        if self._has_exact(bx, by1, by2, bh) or self._covered_by_hot(bx, by1, by2, bh, brear, berr):
             if compact:
                 self.maybe_compact()
             return
@@ -1032,8 +1093,10 @@ class _ClipBaselines:
         if self._rebuild is not None:
             shadow, _, _, mapping, _, _ = self._rebuild
             mapping[slot] = shadow._insert_raw(bx, by1, by2, bh, brear, berr)
-        if could_evict and self.count > 1 and dom_budget[0] <= 0:
-            self._queue_dom_sweep(slot, bx, by1, by2, bh, brear, berr)
+        if could_evict:
+            self._cache_dom(slot)
+            if self.count > 1 and dom_budget[0] <= 0:
+                self._queue_dom_sweep(slot, bx, by1, by2, bh, brear, berr)
         if compact:
             self.maybe_compact()
 
@@ -1155,6 +1218,7 @@ class VehicleWaits:
         # Frames with a continuation candidate but no complete same-frame detections.
         self.continuation_unavailable_frames = 0
         self._maint_cursor = 0
+        self._dom_cursor = 0
         # Persistent identities record per-interval tracking continuity for
         # acquisition collection; legacy exports keep their historical schema.
         self.record_tracking = False
@@ -1540,6 +1604,10 @@ class VehicleWaits:
         sweep_budget = [256]
         maint_states = []
         n_obs = len(observations) if continuing else 0
+        dom_window = 24
+        dom_start = (self._dom_cursor*dom_window) % n_obs if n_obs > dom_window else 0
+        if n_obs > dom_window:
+            self._dom_cursor += 1
         for obs_idx, observation in enumerate(observations):
             if observation.local_id is None or not observation.stable_id or not _finite_point(observation.point): continue
             identity = (observation.epoch, observation.local_id)
@@ -1575,7 +1643,15 @@ class VehicleWaits:
                     crossing_broken = bool(continuing and (self._invalid_crossing_geometry(observation) or
                                                            (geom is None and state.get("pending_crossing") is not None)))
                     if step_continuous:
-                        share = max(1, dom_budget[0]//max(1, n_obs-obs_idx)) if (continuing and dom_budget[0] > 0) else 0
+                        if continuing and dom_budget[0] > 0:
+                            if n_obs <= dom_window:
+                                share = max(1, dom_budget[0]//max(1, n_obs-obs_idx))
+                            elif (obs_idx-dom_start) % n_obs < dom_window:
+                                share = min(16, dom_budget[0])
+                            else:
+                                share = 0
+                        else:
+                            share = 0
                         track_dom = [share]
                         crossed_now = self._evaluate_crossing(
                             state, prev_obs, observation, phase, timestamp, sequence, cycle_id,
@@ -1638,7 +1714,15 @@ class VehicleWaits:
                     self._flag(row, "observation_gap")
                     state["stop_candidate"] = state["move_candidate"] = None
             if crossing_continuous:
-                share = max(1, dom_budget[0]//max(1, n_obs-obs_idx)) if (continuing and dom_budget[0] > 0) else 0
+                if continuing and dom_budget[0] > 0:
+                    if n_obs <= dom_window:
+                        share = max(1, dom_budget[0]//max(1, n_obs-obs_idx))
+                    elif (obs_idx-dom_start) % n_obs < dom_window:
+                        share = min(16, dom_budget[0])
+                    else:
+                        share = 0
+                else:
+                    share = 0
                 track_dom = [share]
                 self._evaluate_crossing(
                     state, prev_obs, observation, phase, timestamp, sequence, cycle_id,

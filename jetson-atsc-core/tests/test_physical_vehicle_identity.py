@@ -1913,6 +1913,89 @@ def test_sustained_stationary_jitter_per_frame_cost_stays_bounded():
         cb_65 = waits_drift65.active[(0, 1+k)]['clip_baselines']
         assert len(cb_65) <= 60 and len(cb_65._x) <= 220
 
+    # Sol Round 22:
+    # 1. Compaction preserves one authoritative FIFO for _dom_queue and never requeues
+    #    already-completed candidates or lets newly appended work jump ahead of older entries.
+    cb_fifo = _ClipBaselines()
+    for i in range(500):
+        cb_fifo.add((150.+0.001*i, 216., 276., 60., 276.-OCCLUSION_BOTTOM_SHARE*60., _rear_err(276., 60.)),
+                    compact=False, dom_budget=[0])
+    for j in range(200):
+        cb_fifo.add((150.+0.0005*j, 216., 277., 61., 277.-OCCLUSION_BOTTOM_SHARE*61., _rear_err(277., 61.)),
+                    compact=False, dom_budget=[0])
+    cb_fifo.prune(150.0, 225.1)  # prune all 500 h=60 -> 200 live h=61, 199 queued
+    assert cb_fifo.needs_compact() and len(cb_fifo._dom_queue) == 199
+    # Advance compaction through Phase 1 + 198 of 199 Phase 2 queue items, leaving 1 unremapped.
+    for _ in range(6):
+        cb_fifo.maybe_compact(64)
+    assert cb_fifo._rebuild is not None
+    # Append a newer candidate mid-compaction, then pop/finish 2 sweeps via step_dom_sweep:
+    # the oldest queued entry must run before the newly appended one, and completed sweeps
+    # must never reappear after compaction finishes.
+    newest_x = 150.15
+    cb_fifo.add((newest_x, 216., 278., 62., 278.-OCCLUSION_BOTTOM_SHARE*62., _rear_err(278., 62.)),
+                compact=False, dom_budget=[0])
+    # Note: 62 px may evict recent 61 px tail items; verify FIFO order of surviving queue across swap.
+    pre_swap_keys = [(cb_fifo._x[q], cb_fifo._h[q]) for q in cb_fifo._dom_queue if q >= 0 and cb_fifo._alive[q]]
+    assert pre_swap_keys[-1] == (newest_x, 62.)
+    # Pop the front-most pending item via step_dom_sweep (must be pre_swap_keys[0], NOT newest_x!).
+    cb_fifo._dom_sweep = None
+    cb_fifo.step_dom_sweep(1)
+    assert cb_fifo._dom_sweep is not None
+    assert (cb_fifo._x[cb_fifo._dom_sweep[0]], cb_fifo._h[cb_fifo._dom_sweep[0]]) == pre_swap_keys[0]
+    # Finish this front-most sweep and finish compaction; completed item must NOT reappear,
+    # and all remaining pending items keep exact FIFO order ending with (newest_x, 62.).
+    while cb_fifo._dom_sweep is not None and cb_fifo._dom_sweep[0] == 501:
+        cb_fifo.step_dom_sweep(1)
+    remaining_before_swap = [(cb_fifo._x[q], cb_fifo._h[q]) for q in cb_fifo._dom_queue if q >= 0 and cb_fifo._alive[q]]
+    assert remaining_before_swap == pre_swap_keys[1:]
+    while cb_fifo.needs_compact():
+        cb_fifo.maybe_compact(64)
+    remaining_after_swap = [(cb_fifo._x[q], cb_fifo._h[q]) for q in cb_fifo._dom_queue if q >= 0 and cb_fifo._alive[q]]
+    assert remaining_after_swap == remaining_before_swap
+    assert pre_swap_keys[0] not in remaining_after_swap and remaining_after_swap[-1] == (newest_x, 62.)
+
+    # Also verify draining the entire queue (including a mid-compaction append) before swap
+    # leaves _dom_queue completely empty after swap (zero requeued completed candidates).
+    cb_drain = _ClipBaselines()
+    for i in range(500):
+        cb_drain.add((150.+0.001*i, 216., 276., 60., 276.-OCCLUSION_BOTTOM_SHARE*60., _rear_err(276., 60.)),
+                     compact=False, dom_budget=[0])
+    for j in range(100):
+        cb_drain.add((150.+0.0005*j, 216., 277., 61., 277.-OCCLUSION_BOTTOM_SHARE*61., _rear_err(277., 61.)),
+                     compact=False, dom_budget=[0])
+    cb_drain.prune(150.0, 225.1)
+    for _ in range(3):
+        cb_drain.maybe_compact(64)
+    assert cb_drain._rebuild is not None
+    cb_drain.add((150.15, 216., 278., 62., 278.-OCCLUSION_BOTTOM_SHARE*62., _rear_err(278., 62.)),
+                 compact=False, dom_budget=[0])
+    while cb_drain.has_dom_sweep():
+        cb_drain.step_dom_sweep(256)
+    while cb_drain.needs_compact():
+        cb_drain.maybe_compact(64)
+    assert not cb_drain.has_dom_sweep() and len(cb_drain._dom_queue) == 0
+
+    # 2. Frozen sweep_end + hot dominator cache prevents continuous h=60 inserts on 300 tracks
+    #    from starving a second queued 61 px sweep or accumulating dominated baselines.
+    waits_s300 = book(side=lambda p: 270.-p[1])
+    seq_s = 0
+    for i in range(6):
+        waits_s300.observe([car(1+k, 280., x=150.+80.*k+0.01*i, height=60., speed=0.) for k in range(300)],
+                           'RED', seq_s/FPS, seq_s+1, 1, unassigned=()); seq_s += 1
+    for i in range(4):
+        waits_s300.observe([car(1+k, 281., x=150.+80.*k, height=61., speed=0.) for k in range(300)],
+                           'RED', seq_s/FPS, seq_s+1, 1, unassigned=()); seq_s += 1
+    for i in range(4):
+        waits_s300.observe([car(1+k, 281., x=150.5+80.*k, height=61., speed=0.) for k in range(300)],
+                           'RED', seq_s/FPS, seq_s+1, 1, unassigned=()); seq_s += 1
+    for f in range(400):
+        waits_s300.observe([car(1+k, 280., x=150.5+80.*k+0.0001*(f+1), height=60., speed=0.) for k in range(300)],
+                           'RED', seq_s/FPS, seq_s+1, 1, unassigned=()); seq_s += 1
+    for k in range(300):
+        cb_s = waits_s300.active[(0, 1+k)]['clip_baselines']
+        assert len(cb_s) == 2 and not cb_s.has_dom_sweep()
+
 
 def test_missed_frame_clears_crossing_clip_evidence_but_preserves_fragment_history():
     """Sol S14: a missed frame clears saved clip baselines AND crossing clip history so
