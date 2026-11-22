@@ -296,17 +296,22 @@ class _RNode:
 
 _BBLOCK_MAX = 512
 _HBLOCK_MAX = 256
+_FIFO_SHIFT = 8
+_FIFO_CHUNK = 1 << _FIFO_SHIFT
+_FIFO_MASK = _FIFO_CHUNK-1
 
 
 class _SlotFIFO:
-    """Power-of-2 ring buffer with O(1) FIFO/LIFO ends and O(1) indexed reads."""
-    __slots__ = ("_buf", "_head", "_size", "_mask", "base")
+    """Chunked ring-of-chunks FIFO with O(1) indexed reads and bounded-work append/appendleft."""
+    __slots__ = ("_chunks", "_c_head", "_c_count", "_c_mask", "_head_off", "_size", "base")
 
     def __init__(self):
-        self._buf = array("i")
-        self._head = 0
+        self._chunks = []
+        self._c_head = 0
+        self._c_count = 0
+        self._c_mask = 0
+        self._head_off = 0
         self._size = 0
-        self._mask = 0
         self.base = 0
 
     def __len__(self):
@@ -316,59 +321,103 @@ class _SlotFIFO:
         return self._size > 0
 
     def __getitem__(self, idx):
-        return self._buf[(self._head+idx) & self._mask]
+        pos = self._head_off+idx
+        return self._chunks[(self._c_head+(pos >> _FIFO_SHIFT)) & self._c_mask][pos & _FIFO_MASK]
 
     def __iter__(self):
-        buf = self._buf; head = self._head; mask = self._mask
-        for i in range(self._size):
-            yield buf[(head+i) & mask]
+        chunks = self._chunks; c_head = self._c_head; c_mask = self._c_mask
+        pos = self._head_off
+        end = pos+self._size
+        while pos < end:
+            chunk = chunks[(c_head+(pos >> _FIFO_SHIFT)) & c_mask]
+            lo = pos & _FIFO_MASK
+            hi = min(_FIFO_CHUNK, lo+(end-pos))
+            for i in range(lo, hi):
+                yield chunk[i]
+            pos += hi-lo
 
     def clear(self):
-        self._buf = array("i")
-        self._head = self._size = self._mask = 0
+        self._chunks = []
+        self._c_head = self._c_count = self._c_mask = self._head_off = self._size = 0
         self.base = 0
 
-    def _grow(self):
-        old = self._buf
+    def _grow_chunks(self):
+        old = self._chunks
         n = len(old)
         if not n:
-            self._buf = array("i", (0,))*8
-            self._mask = 7
-            self._head = 0
+            self._chunks = [None]*8
+            self._c_mask = 7
+            self._c_head = 0
             return
         new_cap = n*2
-        head = self._head
+        head = self._c_head
         tail_n = n-head
-        new_buf = array("i", (0,))*new_cap
-        new_buf[:tail_n] = old[head:]
+        new_chunks = [None]*new_cap
+        new_chunks[:tail_n] = old[head:]
         if head:
-            new_buf[tail_n:n] = old[:head]
-        self._buf = new_buf
-        self._head = 0
-        self._mask = new_cap-1
+            new_chunks[tail_n:n] = old[:head]
+        self._chunks = new_chunks
+        self._c_head = 0
+        self._c_mask = new_cap-1
 
     def append(self, val):
-        if self._size == len(self._buf):
-            self._grow()
-        self._buf[(self._head+self._size) & self._mask] = val
+        pos = self._head_off+self._size
+        c_idx = pos >> _FIFO_SHIFT
+        off = pos & _FIFO_MASK
+        if c_idx == self._c_count:
+            if self._c_count == len(self._chunks):
+                self._grow_chunks()
+            self._chunks[(self._c_head+self._c_count) & self._c_mask] = array("i", (0,))*_FIFO_CHUNK
+            self._c_count += 1
+        self._chunks[(self._c_head+c_idx) & self._c_mask][off] = val
         self._size += 1
 
     def appendleft(self, val):
-        if self._size == len(self._buf):
-            self._grow()
-        self._head = (self._head-1) & self._mask
-        self._buf[self._head] = val
+        if self._size == 0:
+            self._head_off = 0
+            self.append(val)
+            return
+        if self._head_off == 0:
+            if self._c_count == len(self._chunks):
+                self._grow_chunks()
+            self._c_head = (self._c_head-1) & self._c_mask
+            self._chunks[self._c_head] = array("i", (0,))*_FIFO_CHUNK
+            self._c_count += 1
+            self._head_off = _FIFO_MASK
+        else:
+            self._head_off -= 1
+        self._chunks[self._c_head][self._head_off] = val
         self._size += 1
 
     def pop(self):
         self._size -= 1
-        return self._buf[(self._head+self._size) & self._mask]
+        pos = self._head_off+self._size
+        c_idx = pos >> _FIFO_SHIFT
+        off = pos & _FIFO_MASK
+        slot_c = (self._c_head+c_idx) & self._c_mask
+        val = self._chunks[slot_c][off]
+        if self._size == 0:
+            self._chunks[slot_c] = None
+            self._c_head = self._c_count = self._head_off = 0
+        elif off == 0:
+            self._chunks[slot_c] = None
+            self._c_count -= 1
+        return val
 
     def popleft(self):
-        val = self._buf[self._head]
-        self._head = (self._head+1) & self._mask
+        val = self._chunks[self._c_head][self._head_off]
         self._size -= 1
         self.base += 1
+        if self._size == 0:
+            self._chunks[self._c_head] = None
+            self._c_head = self._c_count = self._head_off = 0
+        elif self._head_off == _FIFO_MASK:
+            self._chunks[self._c_head] = None
+            self._c_head = (self._c_head+1) & self._c_mask
+            self._c_count -= 1
+            self._head_off = 0
+        else:
+            self._head_off += 1
         return val
 
 
@@ -491,8 +540,8 @@ class _ClipBaselines:
                  "_root",
                  "_x_hi", "_x_lo", "_y_hi", "_y_lo",
                  "_blocks", "_blk_max", "_slot_blk", "_rebuild",
-                 "_dom_sweep", "_dom_queue", "_dom_cache",
-                 "_cover_probe", "_cover_queue", "_cover_cursor")
+                 "_dom_sweep", "_dom_queue", "_dom_pending", "_dom_cache",
+                 "_cover_probe", "_cover_pending", "_cover_count", "_cover_scan", "_sweep_turn")
 
     def __init__(self):
         self._x = array("d")
@@ -514,10 +563,13 @@ class _ClipBaselines:
         self._rebuild = None
         self._dom_sweep = None
         self._dom_queue = _SlotFIFO()
+        self._dom_pending = bytearray()
         self._dom_cache = []
         self._cover_probe = None
-        self._cover_queue = []
-        self._cover_cursor = 0
+        self._cover_pending = bytearray()
+        self._cover_count = 0
+        self._cover_scan = 0
+        self._sweep_turn = False
 
     def __bool__(self):
         return self.count > 0
@@ -536,10 +588,13 @@ class _ClipBaselines:
         self._rebuild = None
         self._dom_sweep = None
         self._dom_queue.clear()
+        self._dom_pending = bytearray()
         self._dom_cache.clear()
         self._cover_probe = None
-        self._cover_queue.clear()
-        self._cover_cursor = 0
+        self._cover_pending = bytearray()
+        self._cover_count = 0
+        self._cover_scan = 0
+        self._sweep_turn = False
 
     @staticmethod
     def _find_in_block(blk, h, y2, x):
@@ -645,6 +700,10 @@ class _ClipBaselines:
         alive[i] = 0
         self._slot_blk[i].live_count -= 1
         self.count -= 1
+        self._dom_pending[i] = 0
+        if self._cover_pending[i]:
+            self._cover_pending[i] = 0
+            self._cover_count -= 1
         if self._rebuild is not None:
             shadow, _, _, mapping, _, _ = self._rebuild
             new_i = mapping.pop(i, None)
@@ -652,6 +711,10 @@ class _ClipBaselines:
                 shadow._alive[new_i] = 0
                 shadow._slot_blk[new_i].live_count -= 1
                 shadow.count -= 1
+                shadow._dom_pending[new_i] = 0
+                if shadow._cover_pending[new_i]:
+                    shadow._cover_pending[new_i] = 0
+                    shadow._cover_count -= 1
                 if shadow.count == 0:
                     self._rebuild = None
 
@@ -689,6 +752,8 @@ class _ClipBaselines:
         self._x.append(bx); self._y1.append(by1); self._y2.append(by2)
         self._h.append(bh); self._rear.append(brear); self._err.append(berr)
         self._alive.append(1)
+        self._dom_pending.append(0)
+        self._cover_pending.append(0)
         self.count += 1
         rb = OCCLUSION_TOP_DRIFT_HEIGHTS*bh
         self._x_hi.push(bx+rb, slot); self._x_lo.push(-(bx-rb), slot)
@@ -706,7 +771,11 @@ class _ClipBaselines:
         if pos < end:
             i = alive.find(1, pos, end)
             while i != -1 and copied < budget:
-                mapping[i] = shadow._insert_raw(xs[i], y1s[i], y2s[i], hs[i], rears[i], errs[i])
+                new_i = shadow._insert_raw(xs[i], y1s[i], y2s[i], hs[i], rears[i], errs[i])
+                mapping[i] = new_i
+                if self._cover_pending[i]:
+                    shadow._cover_pending[new_i] = 1
+                    shadow._cover_count += 1
                 copied += 1
                 pos = i+1
                 i = alive.find(1, pos, end)
@@ -725,7 +794,9 @@ class _ClipBaselines:
             q_scan -= 1
             q = q_dq[q_scan-q_head]
             nq = mapping.get(q, -1)
-            if nq >= 0 and not shadow._alive[nq]:
+            if nq >= 0 and shadow._alive[nq] and not shadow._dom_pending[nq]:
+                shadow._dom_pending[nq] = 1
+            else:
                 nq = -1
             q_shadow.appendleft(nq)
             copied += 1
@@ -734,17 +805,22 @@ class _ClipBaselines:
             return copied
         if self._dom_sweep is not None:
             new_dom = mapping.get(self._dom_sweep[0])
-            self._dom_sweep = (new_dom, -2, len(shadow._x)) if (new_dom is not None and shadow._alive[new_dom]) else None
+            if new_dom is not None and shadow._alive[new_dom]:
+                self._dom_sweep = (new_dom, -2, len(shadow._x))
+                shadow._dom_pending[new_dom] = 1
+            else:
+                self._dom_sweep = None
         if self._dom_cache:
             self._dom_cache = [nq for s in self._dom_cache
                                if (nq := mapping.get(s)) is not None and shadow._alive[nq]]
         if self._cover_probe is not None:
             new_c = mapping.get(self._cover_probe[0])
             self._cover_probe = (new_c, 0, len(shadow._x)) if (new_c is not None and shadow._alive[new_c]) else None
-        if self._cover_queue:
-            self._cover_queue = [nq for s in self._cover_queue
-                                 if (nq := mapping.get(s)) is not None and shadow._alive[nq]]
         self._dom_queue = q_shadow
+        self._dom_pending = shadow._dom_pending
+        self._cover_pending = shadow._cover_pending
+        self._cover_count = shadow._cover_count
+        self._cover_scan = 0
         self._x, self._y1, self._y2 = shadow._x, shadow._y1, shadow._y2
         self._h, self._rear, self._err = shadow._h, shadow._rear, shadow._err
         self._alive, self.count, self._root = shadow._alive, shadow.count, shadow._root
@@ -756,25 +832,34 @@ class _ClipBaselines:
 
     def has_dom_sweep(self):
         return (self._dom_sweep is not None or bool(self._dom_queue) or
-                self._cover_probe is not None or bool(self._cover_queue))
+                self._cover_probe is not None or self._cover_count > 0)
 
     def _queue_cover_probe(self, slot):
-        if self._cover_probe is None and not self._cover_queue:
+        if self._cover_probe is None and self._cover_count == 0:
             self._cover_probe = (slot, 0, len(self._alive))
             return
-        cq = self._cover_queue
-        if len(cq) < 17:
-            cq.append(slot)
-        else:
-            cq[self._cover_cursor % 17] = slot
-            self._cover_cursor += 1
+        if not self._cover_pending[slot]:
+            self._cover_pending[slot] = 1
+            self._cover_count += 1
+            if slot < self._cover_scan:
+                self._cover_scan = slot
+            if self._rebuild is not None:
+                ns = self._rebuild[3].get(slot)
+                if ns is not None and self._rebuild[0]._alive[ns] and not self._rebuild[0]._cover_pending[ns]:
+                    self._rebuild[0]._cover_pending[ns] = 1
+                    self._rebuild[0]._cover_count += 1
 
     def _queue_dom_sweep(self, slot, bx, by1, by2, bh, brear, berr):
         alive = self._alive
+        dp = self._dom_pending
+        if slot < 0 or slot >= len(alive) or not alive[slot] or dp[slot]:
+            return
         xs, y1s, y2s, hs, rears, errs = self._x, self._y1, self._y2, self._h, self._rear, self._err
         if self._dom_sweep is not None:
             ds = self._dom_sweep[0]
             if ds < 0 or ds >= len(alive) or not alive[ds]:
+                if 0 <= ds < len(dp):
+                    dp[ds] = 0
                 self._dom_sweep = None
             elif _dominates_coords(xs[ds], y1s[ds], y2s[ds], hs[ds], rears[ds], errs[ds],
                                    bx, by1, by2, bh, brear, berr):
@@ -799,6 +884,10 @@ class _ClipBaselines:
                         rb[4] -= 1
                 inspected += 1
                 if q < 0 or q >= len(alive) or not alive[q]:
+                    if 0 <= q < len(dp):
+                        dp[q] = 0
+                    if rb is not None and rb[5] is not None and sq is not None and sq >= 0:
+                        rb[0]._dom_pending[sq] = 0
                     continue
                 if _dominates_coords(xs[q], y1s[q], y2s[q], hs[q], rears[q], errs[q],
                                      bx, by1, by2, bh, brear, berr):
@@ -821,13 +910,16 @@ class _ClipBaselines:
                             rb[5].append(sq)
             if dominated:
                 return
+        dp[slot] = 1
         if self._dom_sweep is None and not q_dq:
             self._dom_sweep = (slot, -2, len(alive))
         else:
             q_dq.append(slot)
             if rb is not None and rb[5] is not None:
                 nq = rb[3].get(slot, -1)
-                if nq >= 0 and not rb[0]._alive[nq]:
+                if nq >= 0 and rb[0]._alive[nq] and not rb[0]._dom_pending[nq]:
+                    rb[0]._dom_pending[nq] = 1
+                else:
                     nq = -1
                 rb[5].append(nq)
 
@@ -835,6 +927,7 @@ class _ClipBaselines:
         if budget <= 0:
             return 0
         alive = self._alive
+        dp = self._dom_pending
         xs, y1s, y2s, hs, rears, errs = self._x, self._y1, self._y2, self._h, self._rear, self._err
         checked = 0
         while checked < budget:
@@ -842,16 +935,22 @@ class _ClipBaselines:
                 q_head = self._dom_queue.base
                 cand = self._dom_queue.popleft()
                 if self._rebuild is not None and self._rebuild[5] is not None and q_head == self._rebuild[4]:
-                    self._rebuild[5].popleft()
+                    sq = self._rebuild[5].popleft()
                     self._rebuild[4] += 1
+                    if sq >= 0:
+                        self._rebuild[0]._dom_pending[sq] = 0
                 if 0 <= cand < len(alive) and alive[cand]:
                     self._dom_sweep = (cand, -2, len(alive))
                 else:
+                    if 0 <= cand < len(dp):
+                        dp[cand] = 0
                     checked += 1
             if self._dom_sweep is None:
                 break
             dom_slot, pos, sweep_end = self._dom_sweep
             if dom_slot < 0 or dom_slot >= len(alive) or not alive[dom_slot]:
+                if 0 <= dom_slot < len(dp):
+                    dp[dom_slot] = 0
                 self._dom_sweep = None
                 continue
             ax, ay1, ay2, ah, arear, aerr = xs[dom_slot], y1s[dom_slot], y2s[dom_slot], hs[dom_slot], rears[dom_slot], errs[dom_slot]
@@ -861,6 +960,7 @@ class _ClipBaselines:
                 if pos == -2:
                     checked += 1
                     if not self._root_may_be_dominated(ax, ay1, ah, arear_lo, ax_lo, ax_hi, ay_lo, ay_hi):
+                        dp[dom_slot] = 0
                         self._dom_sweep = None
                         continue
                     self._dom_sweep = (dom_slot, -1, sweep_end)
@@ -878,6 +978,7 @@ class _ClipBaselines:
                     self._cache_dom(dom_slot)
                 checked += rem-max(0, ev_b[0])
                 if ev_b[0] > 0:
+                    dp[dom_slot] = 0
                     self._dom_sweep = None
                 else:
                     self._dom_sweep = (dom_slot, 0, sweep_end)
@@ -893,6 +994,7 @@ class _ClipBaselines:
                 pos = i+1
                 i = alive.find(1, pos, sweep_end)
             if i == -1:
+                dp[dom_slot] = 0
                 self._dom_sweep = None
             else:
                 self._dom_sweep = (dom_slot, i, sweep_end)
@@ -902,12 +1004,25 @@ class _ClipBaselines:
         if budget <= 0:
             return 0
         alive = self._alive
+        cp = self._cover_pending
         xs, y1s, y2s, hs, rears, errs = self._x, self._y1, self._y2, self._h, self._rear, self._err
         checked = 0
         while checked < budget:
-            while self._cover_probe is None and self._cover_queue and checked < budget:
-                cand = self._cover_queue.pop(0)
-                if 0 <= cand < len(alive) and alive[cand]:
+            while self._cover_probe is None and self._cover_count > 0 and checked < budget:
+                cand = cp.find(1, self._cover_scan)
+                if cand == -1:
+                    self._cover_count = 0
+                    self._cover_scan = len(cp)
+                    break
+                cp[cand] = 0
+                self._cover_count -= 1
+                self._cover_scan = cand+1
+                if self._rebuild is not None:
+                    ns = self._rebuild[3].get(cand)
+                    if ns is not None and self._rebuild[0]._cover_pending[ns]:
+                        self._rebuild[0]._cover_pending[ns] = 0
+                        self._rebuild[0]._cover_count -= 1
+                if alive[cand]:
                     self._cover_probe = (cand, 0, len(alive))
                 else:
                     checked += 1
@@ -954,7 +1069,7 @@ class _ClipBaselines:
         if budget <= 0:
             return 0
         has_ev = self._dom_sweep is not None or bool(self._dom_queue)
-        has_cov = self._cover_probe is not None or bool(self._cover_queue)
+        has_cov = self._cover_probe is not None or self._cover_count > 0
         if not has_ev and not has_cov:
             return 0
         if not has_cov:
@@ -965,8 +1080,8 @@ class _ClipBaselines:
                 used += self._step_evict_sweep(budget-used)
             return used
         if budget == 1:
-            self._cover_cursor += 1
-            return self._step_cover_probe(1) if (self._cover_cursor & 1) else self._step_evict_sweep(1)
+            self._sweep_turn = not self._sweep_turn
+            return self._step_cover_probe(1) if self._sweep_turn else self._step_evict_sweep(1)
         half = budget//2
         used = self._step_evict_sweep(budget-half)
         used += self._step_cover_probe(budget-used)
@@ -1285,6 +1400,8 @@ class _ClipBaselines:
         self._x.append(bx); self._y1.append(by1); self._y2.append(by2)
         self._h.append(bh); self._rear.append(brear); self._err.append(berr)
         self._alive.append(1)
+        self._dom_pending.append(0)
+        self._cover_pending.append(0)
         self.count += 1
         self._x_hi.push(bx_hi, slot); self._x_lo.push(-bx_lo, slot)
         self._y_hi.push(by_hi, slot); self._y_lo.push(-by_lo, slot)
@@ -1810,7 +1927,12 @@ class VehicleWaits:
         dom_start = (self._dom_cursor*dom_window) % n_obs if n_obs > dom_window else 0
         if n_obs > dom_window:
             self._dom_cursor += 1
+        dom_rem = min(n_obs, dom_window)
         for obs_idx, observation in enumerate(observations):
+            in_dom = (n_obs <= dom_window) or ((obs_idx-dom_start) % n_obs < dom_window)
+            obs_dom_rem = dom_rem if in_dom else 0
+            if in_dom and dom_rem > 0:
+                dom_rem -= 1
             if observation.local_id is None or not observation.stable_id or not _finite_point(observation.point): continue
             identity = (observation.epoch, observation.local_id)
             present.add(identity)
@@ -1845,14 +1967,7 @@ class VehicleWaits:
                     crossing_broken = bool(continuing and (self._invalid_crossing_geometry(observation) or
                                                            (geom is None and state.get("pending_crossing") is not None)))
                     if step_continuous:
-                        if continuing and dom_budget[0] > 0:
-                            if n_obs <= dom_window:
-                                share = max(1, dom_budget[0]//max(1, n_obs-obs_idx))
-                            else:
-                                offset = (obs_idx-dom_start) % n_obs
-                                share = max(1, dom_budget[0]//(dom_window-offset)) if offset < dom_window else 0
-                        else:
-                            share = 0
+                        share = max(1, dom_budget[0]//obs_dom_rem) if (continuing and obs_dom_rem > 0 and dom_budget[0] > 0) else 0
                         track_dom = [share]
                         crossed_now = self._evaluate_crossing(
                             state, prev_obs, observation, phase, timestamp, sequence, cycle_id,
@@ -1915,14 +2030,7 @@ class VehicleWaits:
                     self._flag(row, "observation_gap")
                     state["stop_candidate"] = state["move_candidate"] = None
             if crossing_continuous:
-                if continuing and dom_budget[0] > 0:
-                    if n_obs <= dom_window:
-                        share = max(1, dom_budget[0]//max(1, n_obs-obs_idx))
-                    else:
-                        offset = (obs_idx-dom_start) % n_obs
-                        share = max(1, dom_budget[0]//(dom_window-offset)) if offset < dom_window else 0
-                else:
-                    share = 0
+                share = max(1, dom_budget[0]//obs_dom_rem) if (continuing and obs_dom_rem > 0 and dom_budget[0] > 0) else 0
                 track_dom = [share]
                 self._evaluate_crossing(
                     state, prev_obs, observation, phase, timestamp, sequence, cycle_id,

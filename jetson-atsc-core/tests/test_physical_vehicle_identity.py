@@ -1939,7 +1939,9 @@ def test_sustained_stationary_jitter_per_frame_cost_stays_bounded():
     pre_swap_keys = [(cb_fifo._x[q], cb_fifo._h[q]) for q in cb_fifo._dom_queue if q >= 0 and cb_fifo._alive[q]]
     assert pre_swap_keys[-1] == (newest_x, 62.)
     # Pop the front-most pending item via step_dom_sweep (must be pre_swap_keys[0], NOT newest_x!).
-    cb_fifo._dom_sweep = None
+    if cb_fifo._dom_sweep is not None:
+        cb_fifo._dom_pending[cb_fifo._dom_sweep[0]] = 0
+        cb_fifo._dom_sweep = None
     cb_fifo.step_dom_sweep(1)
     assert cb_fifo._dom_sweep is not None
     assert (cb_fifo._x[cb_fifo._dom_sweep[0]], cb_fifo._h[cb_fifo._dom_sweep[0]]) == pre_swap_keys[0]
@@ -2013,10 +2015,12 @@ def test_sustained_stationary_jitter_per_frame_cost_stays_bounded():
     cb_p1.add((165.8, 216., 277., 61., 277.-OCCLUSION_BOTTOM_SHARE*61., _rear_err(277., 61.)),
               compact=False, dom_budget=[0])
     cb_p1._dom_sweep = None; cb_p1._dom_queue.clear(); cb_p1._dom_cache.clear()
+    cb_p1._dom_pending[:] = bytes(len(cb_p1._dom_pending))
     cb_p1.prune(165.4, 216.)  # kills first 160 slots, leaving 4 live slots (160..163)
     assert len(cb_p1) == 4 and cb_p1.needs_compact()
     # Keep a dummy active sweep on slot 162 so covered() appends slot 161 to _dom_queue during Phase 1.
     cb_p1._dom_sweep = (162, -2, len(cb_p1._alive))
+    cb_p1._dom_pending[162] = 1
     cb_p1.maybe_compact(1)  # copies slot 160 only; slot 161 is not mapped yet!
     assert cb_p1._rebuild is not None and 161 not in cb_p1._rebuild[3]
     assert cb_p1.covered((165.01, 216., 276., 60., 276.-OCCLUSION_BOTTOM_SHARE*60., _rear_err(276., 60.)),
@@ -2043,15 +2047,101 @@ def test_sustained_stationary_jitter_per_frame_cost_stays_bounded():
         cb_25 = waits_25.active[(0, 1+k)]['clip_baselines']
         assert len(cb_25) == 32 and not cb_25.has_dom_sweep()
 
-    # 3. _SlotFIFO indexed reads stay O(1) at 131,072 entries (no quadratic deque middle-indexing).
+    # 3. _SlotFIFO indexed reads and chunked growth appends stay O(1) at 131,072 entries.
     from src.experiment.vehicle_waits import _SlotFIFO
     fifo = _SlotFIFO()
     for i in range(131072):
         fifo.append(i)
     started = time.perf_counter()
+    fifo.append(131072)
+    assert (time.perf_counter()-started)*1000. < 1.0
+    started = time.perf_counter()
     mid_vals = [fifo[65536+j] for j in range(64)]
     assert (time.perf_counter()-started)*1000. < 1.0
     assert mid_vals == [65536+j for j in range(64)]
+
+    # Sol Round 24:
+    # 1. Pending sweep membership bitmap deduplicates repeated dominator enqueues across
+    #    >16-entry queues (25 tracks cycling 32 nearby anchors over 800 frames).
+    waits_cyc = book(side=lambda p: 270.-p[1])
+    seq_c = 0
+    for a in range(32):
+        for _ in range(2):
+            obs = [car(1+k, 281., x=150.+80.*k+0.25*a, height=61., speed=0.) for k in range(25)]
+            waits_cyc.observe(obs, 'RED', seq_c/FPS, seq_c+1, 1, unassigned=()); seq_c += 1
+    for f in range(400):
+        a = f % 32
+        obs = [car(1+k, 280., x=150.+80.*k+0.25*a+0.0001*(f+1), height=60., speed=0.) for k in range(25)]
+        waits_cyc.observe(obs, 'RED', seq_c/FPS, seq_c+1, 1, unassigned=()); seq_c += 1
+    for k in range(25):
+        cb_c = waits_cyc.active[(0, 1+k)]['clip_baselines']
+        assert len(cb_c._dom_queue) <= len(cb_c._x)
+        q_list = list(cb_c._dom_queue)
+        assert len(q_list) == len(set(q_list))
+
+    # 2. Lossless resumable cover bitmap never drops overflow candidates (20 tall + 20 short
+    #    with dom_budget=[0] drains to exact 20 live baselines with 0 covered survivors).
+    cb_20 = _ClipBaselines()
+    for i in range(20):
+        bx = 150.+0.3*i
+        cb_20.add((bx, 220., 281., 61., 281.-OCCLUSION_BOTTOM_SHARE*61., _rear_err(281., 61.)),
+                  compact=False, dom_budget=[0])
+    cb_20._dom_cache.clear()
+    for i in range(20):
+        bx = 150.+0.3*i+0.01
+        cb_20.add((bx, 220., 280., 60., 280.-OCCLUSION_BOTTOM_SHARE*60., _rear_err(280., 60.)),
+                  compact=False, dom_budget=[0])
+    while cb_20.has_dom_sweep():
+        cb_20.step_dom_sweep(1)
+    assert len(cb_20) == 20 and not cb_20.has_dom_sweep()
+
+    # 3. Dedicated 1-unit scheduling flag alternates fairly between eviction and cover jobs
+    #    even when a new cover candidate arrives before every 1-unit maintenance step.
+    cb_alt = _ClipBaselines()
+    for i in range(25):
+        bx = 150.+0.3*i
+        cb_alt.add((bx, 220., 280., 60., 280.-OCCLUSION_BOTTOM_SHARE*60., _rear_err(280., 60.)),
+                   compact=False, dom_budget=[0])
+    for i in range(25):
+        bx = 150.+0.3*i
+        cb_alt.add((bx, 220., 281., 61., 281.-OCCLUSION_BOTTOM_SHARE*61., _rear_err(281., 61.)),
+                   compact=False, dom_budget=[0])
+    cb_alt._dom_cache.clear()
+    ev_calls = [0]; cov_calls = [0]
+    orig_ev = _ClipBaselines._step_evict_sweep; orig_cov = _ClipBaselines._step_cover_probe
+    _ClipBaselines._step_evict_sweep = lambda self, b: (ev_calls.__setitem__(0, ev_calls[0]+1), orig_ev(self, b))[1]
+    _ClipBaselines._step_cover_probe = lambda self, b: (cov_calls.__setitem__(0, cov_calls[0]+1), orig_cov(self, b))[1]
+    try:
+        for i in range(30):
+            bx = 150.+0.3*(i % 25)+0.001*(i+1)
+            cb_alt.add((bx, 220., 280., 60., 280.-OCCLUSION_BOTTOM_SHARE*60., _rear_err(280., 60.)),
+                       compact=False, dom_budget=[0])
+            cb_alt.step_dom_sweep(1)
+    finally:
+        _ClipBaselines._step_evict_sweep = orig_ev
+        _ClipBaselines._step_cover_probe = orig_cov
+    assert ev_calls[0] >= 10 and cov_calls[0] >= 10
+
+    # 4. Wrapped dominance window (n_obs=25, dom_start=2) distributes budget fairly in input order
+    #    so track 0 does not consume all 384 units while tracks 2..24 get 0.
+    waits_wrap = book(side=lambda p: 270.-p[1])
+    for f in range(5):
+        obs = [car(1+k, 281., x=150.+80.*k+0.01*f, height=61., speed=0.) for k in range(25)]
+        waits_wrap.observe(obs, 'RED', f/FPS, f+1, 1, unassigned=())
+    waits_wrap._dom_cursor = 2  # dom_start = (2*24) % 25 = 23 -> wraps around track 0..21
+    seen_shares = []
+    orig_eval = waits_wrap._evaluate_crossing
+    def spy_eval(state, prev_obs, observation, phase, timestamp, sequence, cycle_id,
+                 valid_motion, continuing, keep_pending, dom_budget):
+        seen_shares.append((observation.local_id, dom_budget[0]))
+        dom_budget[0] = 0  # simulate busy track consuming its whole share
+        return orig_eval(state, prev_obs, observation, phase, timestamp, sequence, cycle_id,
+                         valid_motion, continuing, keep_pending, dom_budget)
+    waits_wrap._evaluate_crossing = spy_eval
+    waits_wrap.observe([car(1+k, 281., x=150.+80.*k+0.2, height=61., speed=0.) for k in range(25)],
+                       'RED', 5/FPS, 6, 1, unassigned=())
+    nonzero = [sh for _, sh in seen_shares if sh > 0]
+    assert len(nonzero) == 24 and max(nonzero) == 16 and min(nonzero) == 16
 
 
 def test_missed_frame_clears_crossing_clip_evidence_but_preserves_fragment_history():
