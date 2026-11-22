@@ -50,6 +50,12 @@ MAX_LINKS_PER_ROW = 8
 MAX_PAIR_CHECKS = 4096
 
 
+def _finite_point(point):
+    try:px, py = float(point[0]), float(point[1])
+    except (TypeError, ValueError, IndexError, OverflowError, KeyError):return False
+    return math.isfinite(px) and math.isfinite(py)
+
+
 def _height(observation):
     height = observation.height
     if height is None and observation.bbox is not None:
@@ -387,7 +393,7 @@ class _ClipBaselines:
     __slots__ = ("_x", "_y1", "_y2", "_h", "_rear", "_err", "_alive", "count",
                  "_root", "_recent_q", "_recent_s",
                  "_x_hi", "_x_lo", "_y_hi", "_y_lo",
-                 "_blocks", "_blk_max", "_rebuild")
+                 "_blocks", "_blk_max", "_rebuild", "_dom_sweep")
 
     def __init__(self):
         self._x = array("d")
@@ -408,6 +414,7 @@ class _ClipBaselines:
         self._blocks = []
         self._blk_max = []
         self._rebuild = None
+        self._dom_sweep = None
 
     def __bool__(self):
         return self.count > 0
@@ -425,6 +432,7 @@ class _ClipBaselines:
         self._x_hi.clear(); self._x_lo.clear(); self._y_hi.clear(); self._y_lo.clear()
         self._blocks.clear(); self._blk_max.clear()
         self._rebuild = None
+        self._dom_sweep = None
 
     @staticmethod
     def _find_in_block(blk, h, y2):
@@ -509,6 +517,9 @@ class _ClipBaselines:
             pos = i+1
             i = alive.find(1, pos)
         if i == -1:
+            if self._dom_sweep is not None:
+                new_dom = mapping.get(self._dom_sweep[0])
+                self._dom_sweep = (new_dom, 0) if (new_dom is not None and shadow._alive[new_dom]) else None
             self._x, self._y1, self._y2 = shadow._x, shadow._y1, shadow._y2
             self._h, self._rear, self._err = shadow._h, shadow._rear, shadow._err
             self._alive, self.count, self._root = shadow._alive, shadow.count, shadow._root
@@ -519,6 +530,33 @@ class _ClipBaselines:
         else:
             self._rebuild = (shadow, i, mapping)
         return copied
+
+    def step_dom_sweep(self, budget):
+        if self._dom_sweep is None or budget <= 0:
+            return 0
+        dom_slot, pos = self._dom_sweep
+        alive = self._alive
+        if dom_slot >= len(alive) or not alive[dom_slot]:
+            self._dom_sweep = None
+            return 0
+        ax, ay1, ay2, ah, arear, aerr = (self._x[dom_slot], self._y1[dom_slot], self._y2[dom_slot],
+                                         self._h[dom_slot], self._rear[dom_slot], self._err[dom_slot])
+        xs, y1s, y2s, hs, rears, errs = self._x, self._y1, self._y2, self._h, self._rear, self._err
+        checked = 0
+        i = alive.find(1, pos)
+        while i != -1 and checked < budget:
+            if i != dom_slot:
+                checked += 1
+                if _dominates_coords(ax, ay1, ay2, ah, arear, aerr,
+                                     xs[i], y1s[i], y2s[i], hs[i], rears[i], errs[i]):
+                    self._kill_slot(i)
+            pos = i+1
+            i = alive.find(1, pos)
+        if i == -1:
+            self._dom_sweep = None
+        else:
+            self._dom_sweep = (dom_slot, i)
+        return checked
 
     def maybe_compact(self, budget=64):
         if budget <= 0:
@@ -573,13 +611,36 @@ class _ClipBaselines:
             shadow, _, mapping = self._rebuild
             if not shadow.prune(px, y1, compact=False):
                 mapping.clear()
-        if compact and self.count <= 16 and len(self._x) > 128:
-            self._rebuild = (_ClipBaselines(), 0, {})
-            self._step_compact(16)
         return True
 
-    def _is_covered(self, node, bx, by1, by2, bh, brear, berr, rb, bx_lo, bx_hi, by_lo, by_hi, brear_hi):
-        if node is None or node.max_h < bh:
+    def _has_exact(self, node, bx, by1, by2, bh, budget):
+        if (node is None or budget[0] <= 0 or
+                bx < node.min_x or bx > node.max_x or
+                by1 < node.min_y or by1 > node.max_y or
+                bh < node.min_h or bh > node.max_h):
+            return False
+        if node.idxs is not None:
+            alive = self._alive
+            xs, y1s, y2s, hs = self._x, self._y1, self._y2, self._h
+            for i in node.idxs:
+                budget[0] -= 1
+                if alive[i] and xs[i] == bx and y1s[i] == by1 and y2s[i] == by2 and hs[i] == bh:
+                    return True
+                if budget[0] <= 0:
+                    return False
+            return False
+        budget[0] -= 1
+        if budget[0] <= 0:
+            return False
+        for child in node.children:
+            if self._has_exact(child, bx, by1, by2, bh, budget):
+                return True
+            if budget[0] <= 0:
+                return False
+        return False
+
+    def _is_covered(self, node, bx, by1, by2, bh, brear, berr, rb, bx_lo, bx_hi, by_lo, by_hi, brear_hi, budget):
+        if node is None or budget[0] <= 0 or node.max_h < bh:
             return False
         can_dominate = (node.max_rear_lo >= brear_hi and
                         node.min_x_lo <= bx_lo and node.max_x_hi >= bx_hi and
@@ -597,76 +658,114 @@ class _ClipBaselines:
             xs, y1s, y2s, hs = self._x, self._y1, self._y2, self._h
             if not can_dominate:
                 for i in node.idxs:
+                    budget[0] -= 1
                     if alive[i] and xs[i] == bx and y1s[i] == by1 and y2s[i] == by2 and hs[i] == bh:
                         return True
+                    if budget[0] <= 0:
+                        return False
                 return False
             rears, errs = self._rear, self._err
             for i in node.idxs:
+                budget[0] -= 1
                 if alive[i] and _dominates_coords(xs[i], y1s[i], y2s[i], hs[i], rears[i], errs[i],
                                                   bx, by1, by2, bh, brear, berr):
                     return True
+                if budget[0] <= 0:
+                    return False
+            return False
+        budget[0] -= 1
+        if budget[0] <= 0:
             return False
         for child in node.children:
-            if self._is_covered(child, bx, by1, by2, bh, brear, berr, rb, bx_lo, bx_hi, by_lo, by_hi, brear_hi):
+            if self._is_covered(child, bx, by1, by2, bh, brear, berr, rb, bx_lo, bx_hi, by_lo, by_hi, brear_hi, budget):
                 return True
+            if budget[0] <= 0:
+                return False
         return False
 
-    def covered(self, b):
+    def covered(self, b, dom_budget=None):
         bx, by1, by2, bh, brear, berr = b
         if (bx, by1, by2, bh) in self._recent_s:
             return True
+        if dom_budget is None:
+            dom_budget = [512]
+        if dom_budget[0] <= 0:
+            return False
+        if self._has_exact(self._root, bx, by1, by2, bh, dom_budget):
+            return True
+        if dom_budget[0] <= 0:
+            return False
         rb = OCCLUSION_TOP_DRIFT_HEIGHTS*bh
         return self._is_covered(self._root, bx, by1, by2, bh, brear, berr,
-                                rb, bx-rb, bx+rb, by1-rb, by1+rb, brear+berr)
+                                rb, bx-rb, bx+rb, by1-rb, by1+rb, brear+berr, dom_budget)
 
-    def _evict_dominated(self, node, ax, ay1, ay2, ah, arear, aerr, ax_lo, ax_hi, ay_lo, ay_hi, arear_lo):
+    def _evict_dominated(self, node, ax, ay1, ay2, ah, arear, aerr, ax_lo, ax_hi, ay_lo, ay_hi, arear_lo, budget):
         # Strict positive rearrangement slack guarantees any b != a dominated by a has b.h < ah.
-        if (node is None or node.min_h >= ah or node.min_rear_hi > arear_lo or
+        if (node is None or budget[0] <= 0 or node.min_h >= ah or node.min_rear_hi > arear_lo or
                 node.max_x_lo < ax_lo or node.min_x_hi > ax_hi or
                 node.max_y_lo < ay_lo or node.min_y_hi > ay_hi):
-            return node, False
+            return node, False, False
         reach = OCCLUSION_TOP_DRIFT_HEIGHTS*(ah-node.min_h)+max(1e-9, 16.0*math.ulp(max(abs(ax), abs(ay1), ah, 1.0)))
         if ax+reach < node.min_x or ax-reach > node.max_x or ay1+reach < node.min_y or ay1-reach > node.max_y:
-            return node, False
+            return node, False, False
         if node.idxs is not None:
             alive = self._alive
             xs, y1s, y2s, hs, rears, errs = self._x, self._y1, self._y2, self._h, self._rear, self._err
             kept = array("I")
             removed = False
-            for i in node.idxs:
+            evicted = False
+            idx_list = node.idxs
+            n_idx = len(idx_list)
+            j = 0
+            while j < n_idx:
+                i = idx_list[j]
                 if not alive[i]:
                     removed = True
+                    j += 1
                     continue
+                if budget[0] <= 0:
+                    kept.extend(idx_list[j:])
+                    break
+                budget[0] -= 1
                 if _dominates_coords(ax, ay1, ay2, ah, arear, aerr,
                                      xs[i], y1s[i], y2s[i], hs[i], rears[i], errs[i]):
                     self._kill_slot(i)
                     removed = True
+                    evicted = True
                 else:
                     kept.append(i)
+                j += 1
             if not removed:
-                return node, False
+                return node, False, False
             if not kept:
-                return None, True
+                return None, True, evicted
             node.idxs = kept
             node.refresh_leaf(xs, y1s, hs, rears, errs)
-            return node, True
+            return node, True, evicted
+        budget[0] -= 1
         kept_children = []
         changed = False
-        for c in node.children:
-            nc, chg = self._evict_dominated(c, ax, ay1, ay2, ah, arear, aerr, ax_lo, ax_hi, ay_lo, ay_hi, arear_lo)
+        evicted = False
+        ch = node.children
+        for idx_c, c in enumerate(ch):
+            if budget[0] <= 0:
+                kept_children.extend(ch[idx_c:])
+                break
+            nc, chg, ev = self._evict_dominated(c, ax, ay1, ay2, ah, arear, aerr,
+                                                ax_lo, ax_hi, ay_lo, ay_hi, arear_lo, budget)
             if chg:
                 changed = True
+            if ev:
+                evicted = True
             if nc is not None:
                 kept_children.append(nc)
         if not changed:
-            return node, False
+            return node, False, evicted
         if not kept_children:
-            return None, True
-        if len(kept_children) == 1:
-            return kept_children[0], True
+            return None, True, evicted
         node.children = kept_children
         node.refresh_internal()
-        return node, True
+        return node, True, evicted
 
     def _rtree_insert(self, idx, bx, by1, bh, brear, berr):
         if self._root is None:
@@ -735,23 +834,33 @@ class _ClipBaselines:
         new_root.refresh_internal()
         self._root = new_root
 
-    def add(self, b, *, compact=True):
+    def add(self, b, *, compact=True, dom_budget=None):
         bx, by1, by2, bh, brear, berr = b
         key = (bx, by1, by2, bh)
         if key in self._recent_s:
             if compact:
                 self.maybe_compact()
             return
+        if dom_budget is None:
+            dom_budget = [512]
         rb = OCCLUSION_TOP_DRIFT_HEIGHTS*bh
         bx_lo, bx_hi, by_lo, by_hi = bx-rb, bx+rb, by1-rb, by1+rb
-        if self._is_covered(self._root, bx, by1, by2, bh, brear, berr,
-                            rb, bx_lo, bx_hi, by_lo, by_hi, brear+berr):
-            if compact:
-                self.maybe_compact()
-            return
-        if self._root is not None:
-            self._root, _ = self._evict_dominated(self._root, bx, by1, by2, bh, brear, berr,
-                                                  bx_lo, bx_hi, by_lo, by_hi, brear-berr)
+        if dom_budget[0] > 0:
+            if self._has_exact(self._root, bx, by1, by2, bh, dom_budget):
+                if compact:
+                    self.maybe_compact()
+                return
+            if dom_budget[0] > 0 and self._is_covered(self._root, bx, by1, by2, bh, brear, berr,
+                                                      rb, bx_lo, bx_hi, by_lo, by_hi, brear+berr, dom_budget):
+                if compact:
+                    self.maybe_compact()
+                return
+        evicted = False
+        if self._root is not None and dom_budget[0] > 0:
+            self._root, _, evicted = self._evict_dominated(self._root, bx, by1, by2, bh, brear, berr,
+                                                           bx_lo, bx_hi, by_lo, by_hi, brear-berr, dom_budget)
+            while self._root is not None and self._root.idxs is None and len(self._root.children) == 1:
+                self._root = self._root.children[0]
             if self.count == 0:
                 self.clear()
         slot = len(self._x)
@@ -767,6 +876,8 @@ class _ClipBaselines:
         self._y_hi.push(by_hi, slot); self._y_lo.push(-by_lo, slot)
         self._blocks_add(bh, by2, brear, berr, slot)
         self._rtree_insert(slot, bx, by1, bh, brear, berr)
+        if evicted and dom_budget[0] <= 0 and self._dom_sweep is None:
+            self._dom_sweep = (slot, 0)
         if compact:
             self.maybe_compact()
 
@@ -988,14 +1099,18 @@ class VehicleWaits:
             state["clip_baselines"] = None
 
     @staticmethod
-    def _advance_clip_compaction(state, compact_budget):
-        if compact_budget[0] <= 0 or state["row"]["completed"]:
+    def _advance_clip_compaction(state, compact_budget, dom_budget):
+        if state["row"]["completed"]:
             return
         saved = state.get("clip_baselines")
-        if saved is not None:
+        if saved is None:
+            return
+        if dom_budget[0] > 0:
+            dom_budget[0] -= saved.step_dom_sweep(dom_budget[0])
+        if compact_budget[0] > 0:
             compact_budget[0] -= saved.maybe_compact(compact_budget[0])
 
-    def _refresh_clip_baselines(self, state, observation, timestamp, prev_obs):
+    def _refresh_clip_baselines(self, state, observation, timestamp, prev_obs, dom_budget):
         """Record corroborated stationary baselines into the indexed set without
         scanning accumulated anchors on stationary frames."""
         history = state.get("clip_history")
@@ -1009,7 +1124,7 @@ class VehicleWaits:
         earlier = list(history)
         pairs = list(dict.fromkeys(self._corroborated_pairs(earlier)))
         saved = state.get("clip_baselines")
-        if saved is not None and all(saved.covered(p) for p in pairs):
+        if saved is not None and all(saved.covered(p, dom_budget) for p in pairs):
             return
         samples = earlier+[(timestamp, px, py, height)]
         motion = _fit(samples)
@@ -1032,7 +1147,7 @@ class VehicleWaits:
                 saved = _ClipBaselines()
                 state["clip_baselines"] = saved
             for b in valid:
-                saved.add(b, compact=False)
+                saved.add(b, compact=False, dom_budget=dom_budget)
 
     def _bottom_clipped_crossing(self, state, observation, timestamp, prev_obs):
         """Return ``(h_base, pair_to_save_or_None)`` when a stop-line crossing is
@@ -1117,7 +1232,7 @@ class VehicleWaits:
         return h is not None and not math.isfinite(py-h)
 
     def _evaluate_crossing(self, state, prev_obs, observation, phase, timestamp, sequence, cycle_id,
-                           valid_motion, continuing, keep_pending):
+                           valid_motion, continuing, keep_pending, dom_budget):
         row = state["row"]
         geom = self._valid_box_geometry(observation)
         pending = state.get("pending_crossing")
@@ -1158,7 +1273,7 @@ class VehicleWaits:
                     if saved is None:
                         saved = _ClipBaselines()
                         state["clip_baselines"] = saved
-                    saved.add(pair, compact=False)
+                    saved.add(pair, compact=False, dom_budget=dom_budget)
                 if keep_pending:
                     state["pending_crossing"] = {"from": prev_obs, "h_base": h_base, "recovered": 0}
                 return False
@@ -1166,7 +1281,7 @@ class VehicleWaits:
             self._clear_clip_state(state)
             return True
         if continuing:
-            self._refresh_clip_baselines(state, observation, timestamp, prev_obs)
+            self._refresh_clip_baselines(state, observation, timestamp, prev_obs, dom_budget)
         return False
 
     def _cross(self, row, previous, observation, phase, timestamp, cycle_id):
@@ -1210,8 +1325,9 @@ class VehicleWaits:
             self._continue_fragments(observations, timestamp, unassigned)
         present = set()
         compact_budget = [64]
+        dom_budget = [512]
         for observation in observations:
-            if observation.local_id is None or not observation.stable_id: continue
+            if observation.local_id is None or not observation.stable_id or not _finite_point(observation.point): continue
             identity = (observation.epoch, observation.local_id)
             present.add(identity)
             state = self.active.get(identity)
@@ -1247,7 +1363,7 @@ class VehicleWaits:
                     if step_continuous:
                         crossed_now = self._evaluate_crossing(
                             state, prev_obs, observation, phase, timestamp, sequence, cycle_id,
-                            False, continuing, keep_pending=native_exit)
+                            False, continuing, keep_pending=native_exit, dom_budget=dom_budget)
                     else:
                         self._clear_clip_state(state)
                     if crossed_now:
@@ -1273,7 +1389,7 @@ class VehicleWaits:
                         else:
                             row["tracking_state"] = "EXIT_PENDING"
                             if continuing:
-                                self._advance_clip_compaction(state, compact_budget)
+                                self._advance_clip_compaction(state, compact_budget, dom_budget)
                 continue
             if state is None:
                 state = self._new(observation, timestamp, sequence, segment)
@@ -1307,9 +1423,9 @@ class VehicleWaits:
             if crossing_continuous:
                 self._evaluate_crossing(
                     state, prev_obs, observation, phase, timestamp, sequence, cycle_id,
-                    valid_motion, continuing, keep_pending=True)
+                    valid_motion, continuing, keep_pending=True, dom_budget=dom_budget)
                 if continuing:
-                    self._advance_clip_compaction(state, compact_budget)
+                    self._advance_clip_compaction(state, compact_budget, dom_budget)
             elif prev_obs is not None or crossing_broken:
                 self._clear_clip_state(state)
             if valid_motion:

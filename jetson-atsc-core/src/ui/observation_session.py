@@ -62,6 +62,12 @@ def source_identity(value):
     return str(Path(value).resolve()) if "://" not in value else value
 
 
+def _finite_point(point):
+    try:x,y=float(point[0]),float(point[1])
+    except (TypeError,IndexError,ValueError,OverflowError,KeyError):return False
+    return math.isfinite(x) and math.isfinite(y)
+
+
 def _finite_box(values):
     if isinstance(values,(str,bytes,Mapping)):return None
     try:box=tuple(float(value) for value in values[:4])
@@ -342,7 +348,7 @@ class ObservationSession:
                         v.velocity_mps if getattr(v,"velocity_valid",False) else None,
                         v.bottom_center,stable_id=getattr(v,"stable_id",False),
                         velocity_valid=getattr(v,"velocity_valid",False),
-                        in_region=calibration.homography.is_in_approach_corridor(*v.bottom_center),
+                        in_region=_finite_point(v.bottom_center) and calibration.homography.is_in_approach_corridor(*v.bottom_center),
                         epoch=getattr(v,"epoch",detector.epoch),
                         bbox=_observed_box(v) if continuing else None,
                         source_bbox=_source_box(v) if continuing else None) for v in tracks]

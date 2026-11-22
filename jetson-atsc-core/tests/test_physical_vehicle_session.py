@@ -374,3 +374,37 @@ def test_session_malformed_box_behind_stop_line_never_starts_false_crossing(vide
             assert not bad_row['crossed_stop_line'] and bad_row['tracking_state'] != 'SERVED'
         good_row = run_crossing(tag, 'valid', y0, y1, flip_stop_line=flip)
         assert good_row['crossed_stop_line'] and good_row['tracking_state'] == 'SERVED'
+
+
+def test_session_nan_footpoint_does_not_confirm_false_roi_exit_or_split_segment(video_factory, tmp_path):
+    """Sol Round 16: non-finite footpoints (e.g. y2=NaN) must be treated as missing
+    observations rather than outside-ROI sightings, so 9 NaN frames under exit_persistence_sec=0.3
+    do not falsely close the row as EXITED or split the return into :segment-1."""
+    class NanFootpointDetector(ScriptedDetector):
+        def track(self, frames, timestamp=None):
+            index = round(timestamp*FPS)
+            if index == 0 or index == 10:
+                bbox = [86., 120., 114., 150.]
+            elif 1 <= index <= 9:
+                bbox = [86., 120., 114., float('nan')]
+            else:
+                return [TrackedFrame([], withheld=(), epoch=self.epoch) for _ in frames]
+            v = TrackedVehicle(1, 2, 'car', bbox, .9, timestamp, obs_count=6, epoch=self.epoch)
+            v.source_bbox = tuple(bbox)
+            return [TrackedFrame([v], withheld=(), epoch=self.epoch) for _ in frames]
+
+    settings = run_payload(video_factory)
+    settings['policy'] = {'debounce_frames': 1, 'stop_persistence_sec': .1,
+                          'fragment_continuation': True, 'exit_persistence_sec': 0.3}
+    class Manual(ObservationSession):
+        def _worker(self):self.ready.set()
+    session = Manual(settings, tmp_path/'nan-footpoint', detector_factory=NanFootpointDetector, anfis_factory=FakeANFIS)
+    try:
+        for _ in range(12):session._process_batch()
+        rows = {k.split(':', 1)[1]: r for k, r in session.engine.waits.records.items()}
+        assert set(rows) == {'acquisition:0:1'}
+        row = rows['acquisition:0:1']
+        assert not row['completed'] and row['tracking_state'] != 'EXITED'
+        assert 'observation_gap' in row['quality_flags']
+    finally:
+        session.state = session.applied_state = 'stopped';session._cleanup()

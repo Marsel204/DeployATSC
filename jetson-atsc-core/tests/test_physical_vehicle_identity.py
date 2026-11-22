@@ -1629,6 +1629,71 @@ def test_sustained_stationary_jitter_per_frame_cost_stays_bounded():
     assert max(mono_times) < 15.0, f'monotonic compaction spike {max(mono_times):.2f} ms'
     assert 1500 <= len(saved_mono) == len(saved_mono._x) <= 2000
 
+    # Sol Round 16 (S12 budgeted dominance, R-tree level balance, and shared 64-copy budget):
+    # 1. Anti-correlated near-dominators across 6 tracks stay inside the frame budget on hold.
+    waits_dom = book(side=lambda p: 270.-p[1])
+    for i in range(600):
+        t = 1.+i/600.
+        d = -1e-6 if i % 2 == 0 else 1e-6
+        h = 60.+t/0.15
+        for rep in range(2):
+            f = 2*i+rep
+            obs = [car(1+k, 216.+1.0000001*t-d+h, x=150.+80.*k+1.0000001*t+d, height=h, speed=0.) for k in range(6)]
+            waits_dom.observe(obs, 'RED', f/FPS, f+1, 1, unassigned=())
+    hold_dom = []
+    for k_f in range(5):
+        f = 1200+k_f
+        started = time.perf_counter()
+        waits_dom.observe([car(1+k, 276., x=150.+80.*k, height=60., speed=0.) for k in range(6)],
+                          'RED', f/FPS, f+1, 1, unassigned=())
+        hold_dom.append((time.perf_counter()-started)*1000.)
+    assert max(hold_dom) < 15.0, f'anti-correlated dominance frame took {max(hold_dom):.2f} ms'
+
+    # 2. Dominance deletion preserves uniform R-tree leaf depth across non-root levels.
+    def leaf_depths(node, depth=0):
+        if node is None: return set()
+        if node.idxs is not None: return {depth}
+        out = set()
+        for child in node.children: out |= leaf_depths(child, depth+1)
+        return out
+    waits_bal = book(side=lambda p: 270.-p[1])
+    for f in range(702):
+        waits_bal.observe([car(1, 280., x=150.+min(f, 699)/200., height=60., speed=0.)],
+                          'RED', f/FPS, f+1, 1, unassigned=())
+    for k_f in range(20):
+        f = 702+k_f
+        waits_bal.observe([car(1, 290., x=149.7, height=70., speed=0.)],
+                          'RED', f/FPS, f+1, 1, unassigned=())
+    assert len(leaf_depths(waits_bal.active[(0, 1)]['clip_baselines']._root)) == 1
+
+    # 3. Small prunes across 6 tracks (13 live/track = 78 total) respect the shared 64-copy budget.
+    waits_b64 = book(side=lambda p: 270.-p[1])
+    for f in range(1800):
+        step = f//2
+        x_off = 0. if step < 887 else 5.
+        waits_b64.observe([car(1+k, 276.+0.001*step, x=150.+80.*k+x_off, height=60., speed=0.) for k in range(6)],
+                          'RED', f/FPS, f+1, 1, unassigned=())
+    copied_on_1800 = [0]
+    from src.experiment.vehicle_waits import _ClipBaselines
+    orig_step = _ClipBaselines._step_compact
+    def spy_step(self, budget):
+        n = orig_step(self, budget)
+        copied_on_1800[0] += n
+        return n
+    _ClipBaselines._step_compact = spy_step
+    try:
+        waits_b64.observe([car(1+k, 264., x=150.+80.*k+10., height=48., speed=0.) for k in range(6)],
+                          'RED', 1800/FPS, 1801, 1, unassigned=())
+    finally:
+        _ClipBaselines._step_compact = orig_step
+    assert copied_on_1800[0] <= 64
+    for f in range(1801, 1805):
+        waits_b64.observe([car(1+k, 264., x=150.+80.*k+10., height=48., speed=0.) for k in range(6)],
+                          'RED', f/FPS, f+1, 1, unassigned=())
+    for k in range(6):
+        cb_k = waits_b64.active[(0, 1+k)]['clip_baselines']
+        assert len(cb_k) == len(cb_k._x) <= 20
+
 
 def test_missed_frame_clears_crossing_clip_evidence_but_preserves_fragment_history():
     """Sol S14: a missed frame clears saved clip baselines AND crossing clip history so
