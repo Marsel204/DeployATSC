@@ -1795,6 +1795,73 @@ def test_sustained_stationary_jitter_per_frame_cost_stays_bounded():
         cb_q.step_dom_sweep(64)
     assert len(cb_q) == 2
 
+    # Sol Round 19 (S12):
+    # 1. Mixed-height blocks reject by rear bound before per-height checks (both live and after
+    #    pruning higher-rear outliers in every block).
+    waits_mix = book(side=lambda p: 270.-p[1])
+    for f in range(4096):
+        h = 60.+0.00001*(f//2)
+        waits_mix.observe([car(1+k, 276., x=150.+80.*k, height=h, speed=0.) for k in range(6)],
+                          'RED', f/FPS, f+1, 1, unassigned=())
+    started = time.perf_counter()
+    waits_mix.observe([car(1+k, 269., x=150.+80.*k, height=48., speed=0.) for k in range(6)],
+                      'RED', 4096/FPS, 4097, 1, unassigned=())
+    mix_ms = (time.perf_counter()-started)*1000.
+    assert mix_ms < 10.0, f'mixed-height block rear rejection took {mix_ms:.2f} ms'
+    assert all(r['crossed_stop_line'] for r in waits_mix.records.values())
+
+    waits_mix_pruned = book(side=lambda p: 270.-p[1])
+    for f in range(4096):
+        step = f//2
+        outlier = step % 128 == 0
+        h = 60.+0.00001*step
+        y2 = 278. if outlier else 276.
+        x_off = 0. if outlier else 5.
+        waits_mix_pruned.observe([car(1+k, y2, x=150.+80.*k+x_off, height=h, speed=0.) for k in range(6)],
+                                 'RED', f/FPS, f+1, 1, unassigned=())
+    started = time.perf_counter()
+    waits_mix_pruned.observe([car(1+k, 269., x=160.+80.*k, height=48., speed=0.) for k in range(6)],
+                             'RED', 4096/FPS, 4097, 1, unassigned=())
+    mix_pruned_ms = (time.perf_counter()-started)*1000.
+    assert mix_pruned_ms < 10.0, f'pruned mixed-height rear rejection took {mix_pruned_ms:.2f} ms'
+    assert all(r['crossed_stop_line'] for r in waits_mix_pruned.records.values())
+
+    # 2. Deferred dominance enqueueing stays O(1) without copying _dom_queue, child-envelope checks
+    #    prevent false-positive queue growth, and compaction remaps large queues within budget.
+    rng19 = random.Random(19)
+    waits_q19 = book(side=lambda p: 270.-p[1])
+    q19_tail = []
+    for f in range(2500):
+        if f < 15:
+            obs = [car(1+k, 218.5+60., x=150.+80.*k, height=60., speed=0.) for k in range(6)]
+        elif f < 30:
+            obs = [car(1+k, 215.+61., x=150.+80.*k, height=61., speed=0.) for k in range(6)]
+        else:
+            obs = [car(1+k, 216.+61., x=150.+80.*k+0.18*(rng19.random()-0.5), height=61., speed=0.) for k in range(6)]
+        started = time.perf_counter()
+        waits_q19.observe(obs, 'RED', f/FPS, f+1, 1, unassigned=())
+        if f >= 2350:
+            q19_tail.append((time.perf_counter()-started)*1000.)
+    q19_median = sorted(q19_tail)[len(q19_tail)//2]
+    assert q19_median < 3.0, f'Round 19 enqueue tail median {q19_median:.2f} ms'
+    assert all(len(waits_q19.active[(0, 1+k)]['clip_baselines']._dom_queue) == 0 for k in range(6))
+
+    cb_bigq = _ClipBaselines()
+    cb_bigq.add((150., 218.5, 278.5, 60., 278.5-OCCLUSION_BOTTOM_SHARE*60., _rear_err(278.5, 60.)),
+                compact=False, dom_budget=[0])
+    cb_bigq.add((150., 215., 276., 61., 276.-OCCLUSION_BOTTOM_SHARE*61., _rear_err(276., 61.)),
+                compact=False, dom_budget=[0])
+    started = time.perf_counter()
+    for i in range(1500):
+        cb_bigq.add((150.+1e-4*i, 216., 277., 61., 277.-OCCLUSION_BOTTOM_SHARE*61., _rear_err(277., 61.)),
+                    compact=False, dom_budget=[0])
+    assert (time.perf_counter()-started)*1000. < 50.0
+    # Prune most entries so compaction runs, and confirm every compaction step respects budget=64.
+    cb_bigq.prune(150.145, 216.)
+    while cb_bigq.needs_compact():
+        assert cb_bigq.maybe_compact(64) <= 64
+    assert len(cb_bigq) == len(cb_bigq._x) > 0
+
 
 def test_missed_frame_clears_crossing_clip_evidence_but_preserves_fragment_history():
     """Sol S14: a missed frame clears saved clip baselines AND crossing clip history so
@@ -1858,6 +1925,20 @@ def test_missed_frame_clears_crossing_clip_evidence_but_preserves_fragment_histo
     waits_hold.observe([bad_behind], 'RED', 8/FPS, 9, 1, unassigned=())
     waits_hold.observe([car(1, 268., x=150., height=48., speed=0.)], 'RED', 9/FPS, 10, 1, unassigned=())
     assert not only_row(waits_hold)['crossed_stop_line']
+
+    # Sol Round 19: explicit oversized height (bbox=None) or out-of-bounds inferred top edge
+    # (py - height beyond _MAX_PIXEL_COORD) must NOT confirm a pending crossing; it clears clip state.
+    for bad_pt, bad_h in (((150., 265.), 1e40), ((150., -5e14), 8e14)):
+        waits_big_h = book(side=lambda p: 270.-p[1])
+        for f in range(6):
+            waits_big_h.observe([car(1, 280., x=150., height=60., speed=0.)], 'RED', f/FPS, f+1, 1, unassigned=())
+        waits_big_h.observe([car(1, 265., x=150., height=45., speed=0.)], 'RED', 6/FPS, 7, 1, unassigned=())
+        assert waits_big_h.active[(0, 1)].get('pending_crossing') is not None
+        huge_obs = VehicleObservation(1, 'car', 0., bad_pt, in_region=True, velocity_valid=True,
+                                      epoch=0, bbox=None, height=bad_h)
+        waits_big_h.observe([huge_obs], 'RED', 7/FPS, 8, 1, unassigned=())
+        assert waits_big_h.active[(0, 1)].get('pending_crossing') is None
+        assert not only_row(waits_big_h)['crossed_stop_line']
 
     # Sol Round 13 (stale re-entry): after acquisition invalidation clears previous=None, a fresh
     # outside EXIT_PENDING observation behind the line followed by a consecutive in-ROI crossing
