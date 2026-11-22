@@ -37,7 +37,8 @@ OCCLUSION_MAX_RECOVERY_RATIO = 1.2
 # occluder can cross the stop line while its unclipped rear stays behind it.
 CROSSING_CLIP_SHRINK_RATIO = .85
 CROSSING_RECOVERY_RATIO = .95
-MAX_CLIP_BASELINES = 16
+MAX_CLIP_BASELINES = 32
+MAX_CLIP_FRONTIER_GROUPS = 12
 # Another observed box (any class, size or ID state) covering this much of the
 # smaller of it and the newborn, with footpoints this close (in smaller-box
 # heights), may be the same body or its neighbour: the link is ambiguous.
@@ -289,35 +290,97 @@ class VehicleWaits:
         pool = list(existing)+list(candidates)
         if not pool:
             return []
+        # Remove dominated entries in O(|pool|^2) with direct float checks (no generator allocations).
+        rears = [b[2]-OCCLUSION_BOTTOM_SHARE*b[3] for b in pool]
+        n = len(pool)
         nondominated = []
-        for i, cand in enumerate(pool):
-            if any(cls._dominates_baseline(other, cand) and (other != cand or j > i)
-                   for j, other in enumerate(pool) if j != i):
-                continue
-            nondominated.append(cand)
-        if len(nondominated) <= MAX_CLIP_BASELINES:
+        nd_rears = []
+        for i in range(n):
+            bx, by1, _, bh = pool[i]
+            br = rears[i]
+            dominated = False
+            for j in range(n):
+                if j == i:
+                    continue
+                ax, ay1, _, ah = pool[j]
+                if ah < bh or rears[j] < br:
+                    continue
+                margin = OCCLUSION_TOP_DRIFT_HEIGHTS*(ah-bh)
+                if abs(ax-bx) <= margin and abs(ay1-by1) <= margin:
+                    if pool[j] != pool[i] or j > i:
+                        dominated = True
+                        break
+            if not dominated:
+                nondominated.append(pool[i])
+                nd_rears.append(br)
+        m = len(nondominated)
+        if m <= MAX_CLIP_BASELINES:
             return nondominated
-        # Always preserve the 2D (height, rear_score) Pareto frontier, then newest anchors.
-        def rear(b):
-            return b[2]-OCCLUSION_BOTTOM_SHARE*b[3]
-        frontier = [i for i, b in enumerate(nondominated)
-                    if not any(o[3] >= b[3] and rear(o) >= rear(b) and
-                               ((o[3], rear(o)) != (b[3], rear(b)) or j > i)
-                               for j, o in enumerate(nondominated) if j != i)]
-        if len(frontier) > MAX_CLIP_BASELINES:
-            by_h = max(frontier, key=lambda idx: (nondominated[idx][3], nondominated[idx][2], idx))
-            by_r = max(frontier, key=lambda idx: (rear(nondominated[idx]), nondominated[idx][3], idx))
-            keep = {by_h, by_r}
-            for idx in reversed(frontier):
-                if len(keep) >= MAX_CLIP_BASELINES:
-                    break
-                keep.add(idx)
-        else:
-            keep = set(frontier)
-            for idx in range(len(nondominated)-1, -1, -1):
-                if len(keep) >= MAX_CLIP_BASELINES:
-                    break
-                keep.add(idx)
+        # Preserve highest-coverage (h, rear_score) Pareto frontier groups with their
+        # x-drift extrema, then fill remaining budget via incremental 4D farthest-point coverage.
+        groups = {}
+        group_rear = {}
+        for idx, b in enumerate(nondominated):
+            key = (b[2], b[3])
+            if key not in groups:
+                groups[key] = [idx]
+                group_rear[key] = nd_rears[idx]
+            else:
+                groups[key].append(idx)
+        keys = list(groups)
+        frontier = []
+        for k in keys:
+            kr = group_rear[k]
+            kh = k[1]
+            if not any(o[1] >= kh and group_rear[o] >= kr and o != k for o in keys):
+                frontier.append(k)
+        frontier.sort(key=lambda k: (-k[1], group_rear[k]))
+        while len(frontier) > MAX_CLIP_FRONTIER_GROUPS:
+            # Drop the interior frontier point with smallest unique 2D Pareto hypervolume.
+            drop = min(range(1, len(frontier)-1),
+                       key=lambda i: (frontier[i][1]-frontier[i+1][1])*(group_rear[frontier[i]]-group_rear[frontier[i-1]]))
+            frontier.pop(drop)
+        keep = set()
+        for k in frontier:
+            idxs = groups[k]
+            keep.add(min(idxs, key=lambda idx: (nondominated[idx][0], -idx)))
+            keep.add(max(idxs, key=lambda idx: (nondominated[idx][0], idx)))
+        remaining = [idx for idx in range(m) if idx not in keep]
+        if len(keep) < MAX_CLIP_BASELINES and remaining:
+            def gap_to(c_idx, k_idx):
+                cx, cy1, _, ch = nondominated[c_idx]
+                kx, ky1, _, kh = nondominated[k_idx]
+                inv_h = 1./ch
+                inv_d = 1./(OCCLUSION_TOP_DRIFT_HEIGHTS*ch)
+                margin = OCCLUSION_TOP_DRIFT_HEIGHTS*(kh-ch)
+                g0 = (ch-kh)*inv_h if ch > kh else 0.
+                g1 = (nd_rears[c_idx]-nd_rears[k_idx])*inv_h if nd_rears[c_idx] > nd_rears[k_idx] else 0.
+                dx = abs(kx-cx)-margin
+                g2 = dx*inv_d if dx > 0. else 0.
+                dy = abs(ky1-cy1)-margin
+                g3 = dy*inv_d if dy > 0. else 0.
+                g = g0 if g0 >= g1 else g1
+                if g2 > g:g = g2
+                if g3 > g:g = g3
+                return g
+            kept_idxs = list(keep)
+            min_gaps = [min(gap_to(idx, k_idx) for k_idx in kept_idxs) for idx in remaining]
+            while len(keep) < MAX_CLIP_BASELINES and remaining:
+                best_pos = 0
+                best_g = min_gaps[0]
+                best_idx = remaining[0]
+                for pos in range(1, len(remaining)):
+                    g = min_gaps[pos]
+                    r_idx = remaining[pos]
+                    if g > best_g or (g == best_g and r_idx > best_idx):
+                        best_g = g; best_idx = r_idx; best_pos = pos
+                chosen = remaining.pop(best_pos)
+                min_gaps.pop(best_pos)
+                keep.add(chosen)
+                for pos, r_idx in enumerate(remaining):
+                    g = gap_to(r_idx, chosen)
+                    if g < min_gaps[pos]:
+                        min_gaps[pos] = g
         return [nondominated[idx] for idx in sorted(keep)]
 
     @staticmethod
@@ -343,7 +406,7 @@ class VehicleWaits:
         px, py, height = geom
         y1 = py-height
         earlier = list(history)
-        pairs = self._corroborated_pairs(earlier)
+        pairs = list(dict.fromkeys(self._corroborated_pairs(earlier)))
         saved = state.get("clip_baselines") or []
         if saved and all(any(self._dominates_baseline(s, p) for s in saved) for p in pairs):
             return

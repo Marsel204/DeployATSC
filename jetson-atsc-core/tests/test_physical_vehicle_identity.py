@@ -1391,6 +1391,32 @@ def test_sustained_bottom_clip_requires_geometric_recovery_before_clearing_ancho
          + [[car(1, 280., x=157., height=60., speed=0.)] for _ in range(12)]
          + [[car(1, 274., x=157., height=54., speed=0.)] for _ in range(10)]
          + [[car(1, 268., x=160., height=48., speed=0.)]]),
+        # Sol S2 Round 8: over-cap Pareto frontier jitter must not evict high-coverage (280, 60)
+        # (tested both at 17 points and 40 points > MAX_CLIP_BASELINES).
+        ('over_cap_frontier_preserves_qualifying_corner_17',
+         [[car(1, 276., x=150., height=61., speed=0.)] for _ in range(6)]
+         + [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(12)]
+         + [obs for i in range(17) for obs in [[car(1, 278.25, x=150., height=56.25-i/16., speed=0.)]]*2]
+         + [[car(1, 278.25, x=150., height=56.25-16/16., speed=0.)] for _ in range(12)]
+         + [[car(1, 268., x=150., height=48., speed=0.)]]),
+        ('over_cap_frontier_preserves_qualifying_corner_40',
+         [[car(1, 276., x=150., height=61., speed=0.)] for _ in range(6)]
+         + [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(12)]
+         + [obs for i in range(40) for obs in [[car(1, 278.25, x=150., height=56.25-i/40., speed=0.)]]*2]
+         + [[car(1, 278.25, x=150., height=56.25-39/40., speed=0.)] for _ in range(12)]
+         + [[car(1, 268., x=150., height=48., speed=0.)]]),
+        # Sol S11 Round 8: equal-score horizontal jitter must not evict older x=157 drift anchor
+        # (tested both at 17 jitter values and 40 jitter values > MAX_CLIP_BASELINES).
+        ('over_cap_equal_score_x_jitter_17',
+         [[car(1, 280., x=157., height=60., speed=0.)] for _ in range(12)]
+         + [obs for i in range(17) for obs in [[car(1, 280., x=150.+i/32., height=60., speed=0.)]]*2]
+         + [[car(1, 274., x=157., height=54., speed=0.)] for _ in range(12)]
+         + [[car(1, 268., x=160., height=48., speed=0.)]]),
+        ('over_cap_equal_score_x_jitter_40',
+         [[car(1, 280., x=157., height=60., speed=0.)] for _ in range(12)]
+         + [obs for i in range(40) for obs in [[car(1, 280., x=150.+i/80., height=60., speed=0.)]]*2]
+         + [[car(1, 274., x=157., height=54., speed=0.)] for _ in range(12)]
+         + [[car(1, 268., x=160., height=48., speed=0.)]]),
     ):
         waits_r6 = book(side=lambda p: 270.-p[1])
         play(waits_r6, seq_r6, phase='RED')
