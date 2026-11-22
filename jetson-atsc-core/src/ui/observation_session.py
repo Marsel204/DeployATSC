@@ -317,7 +317,14 @@ class ObservationSession:
             if self.identity_features:
                 identity_evidence=self.identity_features.extract(frame,tracks,calibration.homography.pixel_to_ground,
                     calibration.homography.is_in_approach_corridor)
-            else:detector.update_velocities(tracks,calibration.homography.pixel_to_ground,timestamp=packet.timestamp)
+            else:
+                finite_tracks=tracks
+                if any(not _finite_point(getattr(v,"bottom_center",None)) for v in tracks):
+                    finite_tracks=[]
+                    for v in tracks:
+                        if _finite_point(getattr(v,"bottom_center",None)):finite_tracks.append(v)
+                        else:v.velocity_valid=False;v.velocity_mps=0.0;v.ground_pos=None
+                detector.update_velocities(finite_tracks,calibration.homography.pixel_to_ground,timestamp=packet.timestamp)
             elapsed=(time.perf_counter()-started)*1000
             self._sample_execution_provenance(packet.timestamp)
             predictor=getattr(getattr(detector,"model",None),"predictor",None)

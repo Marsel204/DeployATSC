@@ -408,3 +408,55 @@ def test_session_nan_footpoint_does_not_confirm_false_roi_exit_or_split_segment(
         assert 'observation_gap' in row['quality_flags']
     finally:
         session.state = session.applied_state = 'stopped';session._cleanup()
+
+
+def test_session_nan_footpoint_does_not_corrupt_detector_velocity_or_red_wait(video_factory, tmp_path):
+    """Sol Round 17: DetectorTracker.update_velocities must reject non-finite footpoints
+    before OpenCV perspectiveTransform (which otherwise projects NaN to (0, 0)), so a
+    returning stationary car reports 0 m/s and preserves the same red wait as missing frames."""
+    from src.perception.detector_tracker import DetectorTracker
+
+    def make_velocity_detector(use_nan):
+        class RealVelocityDetector(ScriptedDetector):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.track_obs_counts = {}
+                self.max_history_len = 5
+                self.last_seen_timestamp = 0.0
+                self.max_gap_sec = 5.0
+            def track(self, frames, timestamp=None):
+                index = round(timestamp*FPS)
+                if index < 12 or 22 <= index < 36:
+                    bbox = [86., 120., 114., 150.]
+                elif use_nan and 12 <= index < 22:
+                    bbox = [86., 120., 114., float('nan')]
+                else:
+                    return [TrackedFrame([], withheld=(), epoch=self.epoch) for _ in frames]
+                v = TrackedVehicle(1, 2, 'car', bbox, .9, timestamp, obs_count=6, epoch=self.epoch)
+                v.source_bbox = tuple(bbox)
+                return [TrackedFrame([v], withheld=(), epoch=self.epoch) for _ in frames]
+            def update_velocities(self, vehicles, project, timestamp=None):
+                DetectorTracker.update_velocities(self, vehicles, project, timestamp=timestamp)
+        return RealVelocityDetector
+
+    def run_red_wait(tag, use_nan):
+        settings = run_payload(video_factory)
+        settings['policy'] = {'debounce_frames': 1, 'stop_persistence_sec': .1,
+                              'fragment_continuation': True, 'exit_persistence_sec': 0.3}
+        class Manual(ObservationSession):
+            def _worker(self):self.ready.set()
+        session = Manual(settings, tmp_path/f'nan-vel-{tag}',
+                         detector_factory=make_velocity_detector(use_nan), anfis_factory=FakeANFIS)
+        try:
+            for _ in range(36):session._process_batch()
+            row = next(iter(session.engine.waits.records.values()))
+            return row['red_wait_sec'], row['tracking_state'], len(session.engine.waits.records)
+        finally:
+            session.state = session.applied_state = 'stopped';session._cleanup()
+
+    wait_missing, state_missing, count_missing = run_red_wait('missing', False)
+    wait_nan, state_nan, count_nan = run_red_wait('nan', True)
+    assert count_nan == count_missing == 1
+    assert state_nan == state_missing
+    assert wait_nan == pytest.approx(wait_missing, abs=1e-6)
+    assert wait_nan > 0.75

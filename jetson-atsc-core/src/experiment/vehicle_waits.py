@@ -558,6 +558,11 @@ class _ClipBaselines:
             self._dom_sweep = (dom_slot, i)
         return checked
 
+    def needs_compact(self):
+        return (self._rebuild is not None or
+                (self.count == 0 and len(self._x) > 0) or
+                len(self._x) > 2*max(self.count, 64))
+
     def maybe_compact(self, budget=64):
         if budget <= 0:
             return 0
@@ -834,6 +839,15 @@ class _ClipBaselines:
         new_root.refresh_internal()
         self._root = new_root
 
+    def _root_may_be_dominated(self, ax, ay1, ah, arear_lo, ax_lo, ax_hi, ay_lo, ay_hi):
+        node = self._root
+        if (node is None or node.min_h >= ah or node.min_rear_hi > arear_lo or
+                node.max_x_lo < ax_lo or node.min_x_hi > ax_hi or
+                node.max_y_lo < ay_lo or node.min_y_hi > ay_hi):
+            return False
+        reach = OCCLUSION_TOP_DRIFT_HEIGHTS*(ah-node.min_h)+max(1e-9, 16.0*math.ulp(max(abs(ax), abs(ay1), ah, 1.0)))
+        return not (ax+reach < node.min_x or ax-reach > node.max_x or ay1+reach < node.min_y or ay1-reach > node.max_y)
+
     def add(self, b, *, compact=True, dom_budget=None):
         bx, by1, by2, bh, brear, berr = b
         key = (bx, by1, by2, bh)
@@ -855,10 +869,10 @@ class _ClipBaselines:
                 if compact:
                     self.maybe_compact()
                 return
-        evicted = False
-        if self._root is not None and dom_budget[0] > 0:
-            self._root, _, evicted = self._evict_dominated(self._root, bx, by1, by2, bh, brear, berr,
-                                                           bx_lo, bx_hi, by_lo, by_hi, brear-berr, dom_budget)
+        could_evict = self._root_may_be_dominated(bx, by1, bh, brear-berr, bx_lo, bx_hi, by_lo, by_hi)
+        if could_evict and dom_budget[0] > 0:
+            self._root, _, _ = self._evict_dominated(self._root, bx, by1, by2, bh, brear, berr,
+                                                     bx_lo, bx_hi, by_lo, by_hi, brear-berr, dom_budget)
             while self._root is not None and self._root.idxs is None and len(self._root.children) == 1:
                 self._root = self._root.children[0]
             if self.count == 0:
@@ -876,59 +890,79 @@ class _ClipBaselines:
         self._y_hi.push(by_hi, slot); self._y_lo.push(-by_lo, slot)
         self._blocks_add(bh, by2, brear, berr, slot)
         self._rtree_insert(slot, bx, by1, bh, brear, berr)
-        if evicted and dom_budget[0] <= 0 and self._dom_sweep is None:
-            self._dom_sweep = (slot, 0)
+        if could_evict and self.count > 1 and dom_budget[0] <= 0:
+            if self._dom_sweep is None or bh > self._h[self._dom_sweep[0]]:
+                self._dom_sweep = (slot, 0)
         if compact:
             self.maybe_compact()
 
-    def best_for_crossing(self, h_min, rear_floor, height, y1, px, eligible, side, best_key):
+    def best_for_crossing(self, height_eligible, rear_eligible, rear_floor, height, y1, px, side, best_key):
         """Return highest qualifying live ``(h_base, y2_base)`` beating ``best_key`` (or ``best_key``
-        unchanged) without scanning shorter heights after the tallest eligible baseline clears
-        a straight stop line."""
+        unchanged) without scanning shorter heights once monotonic height predicates fail or the
+        tallest eligible baseline clears a straight stop line."""
         blocks = self._blocks
         if not blocks or self.count == 0:
             return best_key
+        blk_max = self._blk_max
         alive = self._alive
-        h_floor = h_min-1e-9
-        for b_idx in range(len(blocks)-1, -1, -1):
+        skip_h = math.inf
+        b_idx = len(blocks)-1
+        while b_idx >= 0:
             blk = blocks[b_idx]
-            top_h = blk.h[-1]
-            if top_h < h_floor:
+            bh = blk.h; by2 = blk.y2
+            last_i = len(bh)-1 if bh[-1] < skip_h else bisect.bisect_left(bh, skip_h)-1
+            if last_i < 0:
+                b_idx -= 1
+                continue
+            top_h = bh[last_i]
+            if not height_eligible(top_h):
                 break
-            if best_key is not None and (top_h, blk.y2[-1]) <= best_key:
+            if best_key is not None and (top_h, by2[last_i]) <= best_key:
                 break
             if blk.max_rear_hi < rear_floor:
+                b_idx -= 1
                 continue
             top_y2 = y1+top_h
             top_behind = side((px, top_y2)) < 0 if (top_h >= height and math.isfinite(top_y2)) else None
             if top_behind is False:
                 return best_key
-            bh = blk.h; by2 = blk.y2; brear = blk.rear; berr = blk.err; bslots = blk.slots
-            last_i = len(bh)-1
-            for i in range(last_i, -1, -1):
+            brear = blk.rear; berr = blk.err; bslots = blk.slots
+            i = last_i
+            jumped = False
+            while i >= 0:
                 if not alive[bslots[i]]:
+                    i -= 1
                     continue
                 h_base = bh[i]
-                if h_base < h_floor:
+                if not height_eligible(h_base):
                     return best_key
                 y2_base = by2[i]
                 if best_key is not None and (h_base, y2_base) <= best_key:
                     return best_key
-                if brear[i]+berr[i] < rear_floor:
-                    continue
-                if not eligible(y2_base, h_base):
-                    continue
+                if brear[i]+berr[i] < rear_floor or not rear_eligible(y2_base, h_base):
+                    skip_h = h_base
+                    next_i = bisect.bisect_left(bh, h_base)-1
+                    if next_i >= 0:
+                        i = next_i
+                        continue
+                    b_idx = min(b_idx-1, bisect.bisect_left(blk_max, (h_base, -math.inf)))
+                    jumped = True
+                    break
                 if i == last_i and top_behind is not None:
                     behind = top_behind
                 else:
                     unclipped_y2 = y1+h_base
                     if not math.isfinite(unclipped_y2):
+                        i -= 1
                         continue
                     behind = side((px, unclipped_y2)) < 0
                 if behind:
                     return (h_base, y2_base)
                 if h_base >= height:
                     return best_key
+                i -= 1
+            if not jumped:
+                b_idx -= 1
         return best_key
 
 
@@ -966,6 +1000,7 @@ class VehicleWaits:
         self.continuation_skipped_frames = 0
         # Frames with a continuation candidate but no complete same-frame detections.
         self.continuation_unavailable_frames = 0
+        self._maint_cursor = 0
         # Persistent identities record per-interval tracking continuity for
         # acquisition collection; legacy exports keep their historical schema.
         self.record_tracking = False
@@ -1098,17 +1133,35 @@ class VehicleWaits:
         if saved is not None and not saved.prune(px, y1):
             state["clip_baselines"] = None
 
-    @staticmethod
-    def _advance_clip_compaction(state, compact_budget, dom_budget):
-        if state["row"]["completed"]:
+    def _advance_clip_maintenance(self, maint_states, compact_budget, dom_budget):
+        if not maint_states:
             return
-        saved = state.get("clip_baselines")
-        if saved is None:
-            return
-        if dom_budget[0] > 0:
-            dom_budget[0] -= saved.step_dom_sweep(dom_budget[0])
-        if compact_budget[0] > 0:
-            compact_budget[0] -= saved.maybe_compact(compact_budget[0])
+        dom_pending = [s["clip_baselines"] for s in maint_states
+                       if not s["row"]["completed"] and s.get("clip_baselines") is not None
+                       and s["clip_baselines"]._dom_sweep is not None]
+        if dom_pending and dom_budget[0] > 0:
+            n = len(dom_pending)
+            start = self._maint_cursor % n
+            ordered = dom_pending[start:]+dom_pending[:start]
+            for idx, saved in enumerate(ordered):
+                if dom_budget[0] <= 0:
+                    break
+                share = max(1, dom_budget[0]//(n-idx))
+                dom_budget[0] -= saved.step_dom_sweep(share)
+        compact_pending = [s["clip_baselines"] for s in maint_states
+                           if not s["row"]["completed"] and s.get("clip_baselines") is not None
+                           and s["clip_baselines"].needs_compact()]
+        if compact_pending and compact_budget[0] > 0:
+            n = len(compact_pending)
+            start = self._maint_cursor % n
+            ordered = compact_pending[start:]+compact_pending[:start]
+            for idx, saved in enumerate(ordered):
+                if compact_budget[0] <= 0:
+                    break
+                share = max(1, compact_budget[0]//(n-idx))
+                compact_budget[0] -= saved.maybe_compact(share)
+        if dom_pending or compact_pending:
+            self._maint_cursor += 1
 
     def _refresh_clip_baselines(self, state, observation, timestamp, prev_obs, dom_budget):
         """Record corroborated stationary baselines into the indexed set without
@@ -1172,15 +1225,16 @@ class VehicleWaits:
         top_speed = math.hypot(motion[0], motion[2])
         best_key = None
         best_pair = None
-        def eligible(y2_base, h_base):
+        def height_eligible(h_base):
             return (height <= CROSSING_CLIP_SHRINK_RATIO*h_base+1e-9 and
-                    (y2_base-py) >= OCCLUSION_BOTTOM_SHARE*(h_base-height)-1e-9 and
                     y1_span <= OCCLUSION_TOP_DRIFT_HEIGHTS*h_base and
                     x_span <= OCCLUSION_TOP_DRIFT_HEIGHTS*h_base and
                     top_speed < OCCLUSION_STATIC_TOP_SPEED*h_base)
+        def rear_eligible(y2_base, h_base):
+            return (y2_base-py) >= OCCLUSION_BOTTOM_SHARE*(h_base-height)-1e-9
         for b in self._corroborated_pairs(earlier):
             y2_base, h_base = b[2], b[3]
-            if not eligible(y2_base, h_base):
+            if not (height_eligible(h_base) and rear_eligible(y2_base, h_base)):
                 continue
             unclipped_y2 = y1+h_base
             if not math.isfinite(unclipped_y2):
@@ -1194,14 +1248,9 @@ class VehicleWaits:
                     best_pair = b
         saved = state.get("clip_baselines")
         if saved is not None:
-            h_min = max(
-                (height-1e-9)/CROSSING_CLIP_SHRINK_RATIO,
-                y1_span/OCCLUSION_TOP_DRIFT_HEIGHTS,
-                x_span/OCCLUSION_TOP_DRIFT_HEIGHTS,
-                top_speed/OCCLUSION_STATIC_TOP_SPEED,
-            )
             rear_floor = py-OCCLUSION_BOTTOM_SHARE*height-1e-9-_rear_err(py, height)
-            saved_key = saved.best_for_crossing(h_min, rear_floor, height, y1, px, eligible, self.side, best_key)
+            saved_key = saved.best_for_crossing(height_eligible, rear_eligible, rear_floor,
+                                                height, y1, px, self.side, best_key)
             if saved_key is not None and (best_key is None or saved_key > best_key):
                 best_key = saved_key
                 best_pair = None
@@ -1326,6 +1375,7 @@ class VehicleWaits:
         present = set()
         compact_budget = [64]
         dom_budget = [512]
+        maint_states = []
         for observation in observations:
             if observation.local_id is None or not observation.stable_id or not _finite_point(observation.point): continue
             identity = (observation.epoch, observation.local_id)
@@ -1388,8 +1438,8 @@ class VehicleWaits:
                             self._clear_native_exit(state)
                         else:
                             row["tracking_state"] = "EXIT_PENDING"
-                            if continuing:
-                                self._advance_clip_compaction(state, compact_budget, dom_budget)
+                            if continuing and state.get("clip_baselines") is not None:
+                                maint_states.append(state)
                 continue
             if state is None:
                 state = self._new(observation, timestamp, sequence, segment)
@@ -1424,8 +1474,8 @@ class VehicleWaits:
                 self._evaluate_crossing(
                     state, prev_obs, observation, phase, timestamp, sequence, cycle_id,
                     valid_motion, continuing, keep_pending=True, dom_budget=dom_budget)
-                if continuing:
-                    self._advance_clip_compaction(state, compact_budget, dom_budget)
+                if continuing and not row["completed"] and state.get("clip_baselines") is not None:
+                    maint_states.append(state)
             elif prev_obs is not None or crossing_broken:
                 self._clear_clip_state(state)
             if valid_motion:
@@ -1461,6 +1511,8 @@ class VehicleWaits:
             state["previous"] = {"time": timestamp, "sequence": sequence,
                 "phase": str(phase), "cycle": cycle_id, "valid_motion": valid_motion,
                 "point": observation.point, "crossing_broken": crossing_broken}
+        if maint_states:
+            self._advance_clip_maintenance(maint_states, compact_budget, dom_budget)
         for identity, state in list(self.active.items()):
             row = state["row"]
             if row["vehicle_id"] not in self.records and identity not in present and timestamp-state.get("_last_seen",row["last_seen"])>self.policy.association_gap_sec:

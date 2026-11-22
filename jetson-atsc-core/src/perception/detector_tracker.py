@@ -10,6 +10,7 @@ Supports:
 
 from __future__ import annotations
 
+import math
 import os
 import time
 from functools import lru_cache
@@ -656,11 +657,18 @@ class DetectorTracker:
         active_ids = set()
 
         for v in vehicles:
-            gx, gy = homography_func(v.bottom_center[0], v.bottom_center[1])
-            v.ground_pos = (gx, gy)
+            v.ground_pos = None
             v.velocity_valid = False
             v.velocity_mps = 0.0
             v.obs_count = 0
+            try:
+                bx, by = float(v.bottom_center[0]), float(v.bottom_center[1])
+            except (TypeError, ValueError, IndexError, OverflowError):
+                continue
+            if not (math.isfinite(bx) and math.isfinite(by)):
+                continue
+            gx, gy = homography_func(bx, by)
+            v.ground_pos = (gx, gy)
             # Each instance is camera-local; reset clears its epoch's namespace.
             # Detector-only array indices must never read or write stable history.
             if not v.stable_id or v.epoch != getattr(self,"epoch",0) or not np.isfinite([v.timestamp,gx,gy]).all():

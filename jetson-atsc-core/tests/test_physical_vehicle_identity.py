@@ -1694,6 +1694,37 @@ def test_sustained_stationary_jitter_per_frame_cost_stays_bounded():
         cb_k = waits_b64.active[(0, 1+k)]['clip_baselines']
         assert len(cb_k) == len(cb_k._x) <= 20
 
+    # Sol Round 17 (S12):
+    # 1. Exact monotonic height_eligible cutoff stops scanning immediately at top_speed == 0.35*h + 5e-11.
+    waits_spd = book(side=lambda p: 270.-p[1])
+    for f in range(3000):
+        x_off = 0.9*(f//2)/1500.
+        waits_spd.observe([car(1+k, 276., x=150.+80.*k+x_off, height=60., speed=0.) for k in range(6)],
+                          'RED', f/FPS, f+1, 1, unassigned=())
+    for j in range(8):
+        f = 3000+j
+        waits_spd.observe([car(1+k, 276., x=150.9+80.*k+0.7*j, height=60., speed=0.) for k in range(6)],
+                          'RED', f/FPS, f+1, 1, unassigned=())
+    started = time.perf_counter()
+    waits_spd.observe([car(1+k, 264., x=150.9+80.*k+0.7*8+5e-11, height=48., speed=1.) for k in range(6)],
+                      'GREEN', 3008/FPS, 3009, 1, unassigned=())
+    spd_ms = (time.perf_counter()-started)*1000.
+    assert spd_ms < 10.0, f'top-speed cutoff crossing took {spd_ms:.2f} ms'
+    assert all(r['crossed_stop_line'] for r in waits_spd.records.values())
+
+    # 2. Six-track dominance wave queues deferred eviction even after budget exhaustion and converges fairly.
+    waits_wave6 = book(side=lambda p: 270.-p[1])
+    for f in range(2000):
+        waits_wave6.observe([car(1+k, 280., x=150.+80.*k+(f//2)/1000., height=60., speed=0.) for k in range(6)],
+                            'RED', f/FPS, f+1, 1, unassigned=())
+    for j in range(301):
+        f = 2000+j
+        waits_wave6.observe([car(1+k, 290., x=150.5+80.*k, height=70., speed=0.) for k in range(6)],
+                            'RED', f/FPS, f+1, 1, unassigned=())
+    for k in range(6):
+        cb_k = waits_wave6.active[(0, 1+k)]['clip_baselines']
+        assert len(cb_k) == 1 and len(cb_k._x) == 1
+
 
 def test_missed_frame_clears_crossing_clip_evidence_but_preserves_fragment_history():
     """Sol S14: a missed frame clears saved clip baselines AND crossing clip history so
