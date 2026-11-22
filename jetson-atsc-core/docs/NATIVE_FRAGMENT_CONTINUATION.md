@@ -158,17 +158,18 @@ matching, so they never block a newborn on the frame they lapse.
   samples at high frame rates) and restoring `h_base` places its unclipped rear
   back behind the stop line (`side((x, y1 + h_base)) < 0`), the premature
   `SERVED` crossing is held as a pending crossing rather than completing the
-  row. A qualifying stationary clip also saves the pre-clip baseline behind the
-  line, and behind-line sightings keep the pending anchor until two consecutive
-  behind-line observations geometrically recover (`height >= 0.95 * h_base`),
-  preserving the pre-clip baseline while the box top and center stay within
-  `0.15 * h_base` so sustained behind-line clips or partial/95% recoveries
-  followed by another clip cannot degrade the baseline; genuine departures
-  (including full-height departures after recovery, or clipped departures whose
-  unclipped rear `side((x, y1 + h_base)) >= 0` clears the line) confirm
-  immediately across consecutive in-ROI, `EXIT_PENDING` outside, and same-ID
-  re-entry frames. Frame gaps, handoffs, confirmed exits, and invalidations
-  clear any pending crossing and stationary clip baseline.
+  row. While a vehicle remains stationary (box top and center pinned within
+  `0.15 * h_base`, top speed `< 0.35 * h_base/s`), its two-consecutive-sighting
+  supported baseline is preserved across partial bottom-edge shrinkage behind
+  the line and across partial/95% recoveries so cumulative bottom shrinkage
+  cannot degrade the baseline before crossing; behind-line sightings keep the
+  pending anchor until two consecutive behind-line observations geometrically
+  recover (`height >= 0.95 * h_base`). Genuine departures (including full-height
+  departures after recovery, or clipped departures whose unclipped rear
+  `side((x, y1 + h_base)) >= 0` clears the line) confirm immediately across
+  consecutive in-ROI, `EXIT_PENDING` outside, and same-ID re-entry frames.
+  Frame gaps, handoffs, confirmed exits, and invalidations clear any pending
+  crossing and stationary clip baseline.
 - **Opt-in ROI exit hysteresis (`RunPolicy.exit_persistence_sec`, default `0.0`,
   bounds `[0, 5]`)**: when non-zero, an active native vehicle stepping outside
   the ROI without a stop-line crossing enters `EXIT_PENDING` rather than

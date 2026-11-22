@@ -265,9 +265,10 @@ class VehicleWaits:
             while len(history) > HISTORY_SAMPLES and history[-1][0]-history[1][0] >= MIN_FIT_SPAN_SEC-1e-9:
                 history.popleft()
 
-    def _stationary_bottom_clip(self, state, observation, timestamp, prev_obs):
-        """Return pre-occlusion baseline (x, y1, y2, h_base) when the box shows a
-        qualifying stationary bottom-edge clip (behind or past the line), else None."""
+    def _stationary_baseline(self, state, observation, timestamp, prev_obs, *, require_taller=False):
+        """Return stationary pre-occlusion baseline (x, y1, y2, h_base) supported by two
+        consecutive prior sightings (or a preserved stationary baseline) while the box's
+        top edge and horizontal center remain pinned, else None."""
         history = state.get("history")
         if not history or len(history) < 2 or prev_obs is None or history[-1][0] != prev_obs["time"]:
             return None
@@ -285,13 +286,11 @@ class VehicleWaits:
         saved = state.get("clip_baseline")
         if saved is not None:
             sx, sy1, sy2, sh = saved
-            if (sh > h_base and abs(px-sx) <= OCCLUSION_TOP_DRIFT_HEIGHTS*sh
+            if (sh >= h_base and abs(px-sx) <= OCCLUSION_TOP_DRIFT_HEIGHTS*sh
                     and abs(y1-sy1) <= OCCLUSION_TOP_DRIFT_HEIGHTS*sh):
+                if require_taller:
+                    return None
                 x_base, y1_base, y2_base, h_base = sx, sy1, sy2, sh
-        if height > CROSSING_CLIP_SHRINK_RATIO*h_base+1e-9:
-            return None
-        if (y2_base-py) < OCCLUSION_BOTTOM_SHARE*(h_base-height)-1e-9:
-            return None
         samples = earlier+[(timestamp, px, py, height)]
         y1_vals = [s[2]-s[3] for s in samples]
         x_vals = [s[1] for s in samples]
@@ -306,19 +305,24 @@ class VehicleWaits:
     def _bottom_clipped_crossing(self, state, observation, timestamp, prev_obs):
         """Return pre-occlusion baseline (x, y1, y2, h_base) when a stop-line crossing is
         explained purely by bottom-edge occlusion on a stationary vehicle, else None."""
-        clipped = self._stationary_bottom_clip(state, observation, timestamp, prev_obs)
-        if clipped is None:
+        baseline = self._stationary_baseline(state, observation, timestamp, prev_obs)
+        if baseline is None:
             return None
         geom = self._valid_box_geometry(observation)
         if geom is None:
             return None
         px, py, height = geom
-        unclipped_y2 = py-height+clipped[3]
+        _, _, y2_base, h_base = baseline
+        if height > CROSSING_CLIP_SHRINK_RATIO*h_base+1e-9:
+            return None
+        if (y2_base-py) < OCCLUSION_BOTTOM_SHARE*(h_base-height)-1e-9:
+            return None
+        unclipped_y2 = py-height+h_base
         if not math.isfinite(unclipped_y2):
             return None
         # Orientation-agnostic counterfactual: only suppress when restoring the
         # pre-occlusion height places the vehicle's rear back behind the line.
-        return clipped if self.side((px, unclipped_y2)) < 0 else None
+        return baseline if self.side((px, unclipped_y2)) < 0 else None
 
     def _pending_crossing_confirmed(self, pending, observation):
         """True once a clipped track's unclipped rear also clears the stop line."""
@@ -372,11 +376,9 @@ class VehicleWaits:
             state["clip_baseline"] = None
             return True
         if continuing:
-            clipped = self._stationary_bottom_clip(state, observation, timestamp, prev_obs)
-            if clipped is not None:
-                saved = state.get("clip_baseline")
-                if saved is None or clipped[3] > saved[3]:
-                    state["clip_baseline"] = clipped
+            baseline = self._stationary_baseline(state, observation, timestamp, prev_obs, require_taller=True)
+            if baseline is not None:
+                state["clip_baseline"] = baseline
         return False
 
     def _cross(self, row, previous, observation, phase, timestamp, cycle_id):

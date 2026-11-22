@@ -1339,6 +1339,18 @@ def test_sustained_bottom_clip_requires_geometric_recovery_before_clearing_ancho
     assert not row_r3['completed'] and not row_r3['crossed_stop_line']
     assert waits_r3.active[(0, 1)].get('pending_crossing') is not None
 
+    # Sol S2 Round 4: gradual staircase shrinkage behind the line (60 x5 -> 54 x10 -> 48
+    # at y1=220, stop_y=270) where neither step alone reaches 15% must still preserve the
+    # 60 px baseline while pinned and catch the cumulative 20% shrink at the crossing.
+    waits_r4 = book(side=lambda p: 270.-p[1])
+    seq_r4 = [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(5)]
+    seq_r4 += [[car(1, 274., x=150., height=54., speed=0.)] for _ in range(10)]
+    seq_r4 += [[car(1, 268., x=150., height=48., speed=0.)]]
+    play(waits_r4, seq_r4, phase='RED')
+    row_r4 = only_row(waits_r4)
+    assert not row_r4['completed'] and not row_r4['crossed_stop_line']
+    assert waits_r4.active[(0, 1)].get('pending_crossing') is not None
+
 
 def test_pending_crossing_confirms_across_consecutive_exit_pending_outside_frames():
     """Sol S3: an active crossing anchor is retained across consecutive outside frames
@@ -1600,3 +1612,65 @@ def test_exit_pending_crossing_during_first_green_counts_in_live_and_archived_n_
     state, token = e.prepare_commit(); store.persist(state); e.acknowledge(token)
     archived = store.read()
     assert archived['comparisons'][0]['n_served'] == 1
+
+
+def test_delayed_vehicle_eviction_does_not_leak_archived_crossing_cycle_population(tmp_path):
+    """Sol S8 Round 4: when an open A/B episode delays vehicle eviction until after its
+    crossing cycle has been archived, retention acknowledgment must not recreate a stale
+    cycle_population entry for that already-archived cycle."""
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from src.common.types import TrafficSnapshot
+    from src.experiment.wait_savings import SchedulePolicy
+    from test_vehicle_identity import detection
+
+    roi = {'xmin': 0, 'ymin': 0, 'xmax': 16, 'ymax': 16}
+    book = ObservationEngine('paired-s8', RunPolicy(debounce_frames=1, stop_persistence_sec=0),
+                             roi, lambda p: p[1]-45.,
+                             lambda *_: SimpleNamespace(green_seconds=10, failsafe_active=False),
+                             identity_policy=IdentityPolicy(mode='persistent_v1', confirmation_observations=2,
+                                                            confirmation_sec=.1, exit_persistence_sec=0),
+                             schedule_policy=SchedulePolicy(enabled=True, unchanged_clearance=True),
+                             system_roi=roi)
+    book.enable_retention(1, tmp_path)
+    store = ExperimentStore(tmp_path, 'paired-s8', {})
+    frames_rgb = {
+        'RED': np.full((16, 16, 3), (0, 0, 255), np.uint8),
+        'GREEN': np.full((16, 16, 3), (0, 255, 0), np.uint8),
+        'YELLOW': np.full((16, 16, 3), (0, 255, 255), np.uint8),
+    }
+
+    def analyze():
+        return TrafficSnapshot(v_w_pcu=2, occupancy_pct=10, queue_meters=4), {'inference_calls': 1}
+
+    for seq in range(1, 4*250+1):
+        timestamp = (seq-1)/10
+        ep = int(timestamp // 25)
+        local = round(timestamp % 25, 6)
+        a = 'RED' if local < 1 or local >= 21.5 else 'GREEN' if local < 21 else 'YELLOW'
+        b = 'GREEN' if local < .2 or local >= 23 else 'YELLOW' if local < .4 else 'RED'
+        book.observe_system_frame(timestamp)
+        book.observe_a(frames_rgb[a], timestamp, seq, analyze, {'timestamp': timestamp, 'sequence': seq})
+        # One vehicle crosses during each B green while the A/B episode is open.
+        vid = 100+ep
+        if local < .15:
+            ev = (replace(detection(vid), point=(50., 40.), ground=(5., 4.)),)
+        elif local < .3:
+            ev = (replace(detection(vid), point=(50., 50.), ground=(5., 5.)),)
+        else:
+            ev = ()
+        book.observe_acquisition(frames_rgb[b], timestamp, seq, (), identity_evidence=ev)
+        if a == 'GREEN' and local == 1:
+            book.schedule.await_idle()
+        if seq % 9 == 0:
+            state, token = book.prepare_commit(); store.persist(state); book.acknowledge(token)
+            live_ids = {c['cycle_id'] for c in book.phase.cycles}
+            if book.phase.green:
+                live_ids.add(book.phase.green['cycle_id'])
+            live_ids.add(book.phase.cycle_id+1)
+            assert set(book.retention.cycle_population) <= live_ids
+    book.close()
+    state, token = book.prepare_commit(); store.persist(state); book.acknowledge(token)
+    live_ids = {c['cycle_id'] for c in book.phase.cycles}
+    assert set(book.retention.cycle_population) <= live_ids
+    assert len(book.retention.cycle_population) <= 1
