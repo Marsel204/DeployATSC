@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Mapping
+import bisect
+import heapq
 import math
 
 from src.common.json_data import clone as deepcopy
@@ -128,6 +130,214 @@ def _overlap_of_smaller(a, b):
     if width <= 0 or height <= 0:return 0.
     smaller = min((a[2]-a[0])*(a[3]-a[1]), (b[2]-b[0])*(b[3]-b[1]))
     return width*height/smaller if smaller > 0 else 0.
+
+
+def _dominates_baseline(a, b):
+    """True when stationary baseline ``a`` losslessly covers ``b`` in height, rear
+    bottom-share score, and (x, y1) drift-gate containment so ``b`` can never survive
+    pruning or qualify for a clip without ``a`` also surviving and qualifying."""
+    if a == b:
+        return True
+    if a[3] < b[3] or a[4] < b[4]:
+        return False
+    ra = OCCLUSION_TOP_DRIFT_HEIGHTS*a[3]
+    rb = OCCLUSION_TOP_DRIFT_HEIGHTS*b[3]
+    return (a[0]-ra <= b[0]-rb and a[0]+ra >= b[0]+rb and
+            a[1]-ra <= b[1]-rb and a[1]+ra >= b[1]+rb)
+
+
+class _ClipBaselines:
+    """Lossless heap-indexed stationary clip baselines for one active track.
+
+    Drift pruning checks four boundary min-heaps in O(1) on stationary frames
+    (amortized O(log N) per baseline). Exact duplicates and baselines dominated
+    by the top live dominators are rejected in O(1) without scanning accumulated
+    anchors, and crossing checks binary-search an exact incremental (h, rear)
+    skyline of live ``(y2, h)`` groups.
+    """
+    __slots__ = ("live", "seen", "group_counts", "x_hi", "x_lo", "y_hi", "y_lo",
+                 "dominators", "next_uid", "_skyline", "_skyline_h", "_skyline_keys")
+
+    def __init__(self):
+        self.live = {}
+        self.seen = set()
+        self.group_counts = {}
+        self.x_hi = []
+        self.x_lo = []
+        self.y_hi = []
+        self.y_lo = []
+        self.dominators = []
+        self.next_uid = 0
+        self._skyline = []
+        self._skyline_h = []
+        self._skyline_keys = set()
+
+    def __bool__(self):
+        return bool(self.live)
+
+    def _invalidate_skyline(self):
+        self._skyline = self._skyline_h = self._skyline_keys = None
+
+    def _remove(self, uid):
+        b = self.live.pop(uid, None)
+        if b is None:
+            return
+        self.seen.discard((b[0], b[1], b[2], b[3]))
+        key = (b[2], b[3])
+        count = self.group_counts[key]-1
+        if count <= 0:
+            del self.group_counts[key]
+            if self._skyline_keys is not None and key in self._skyline_keys:
+                self._invalidate_skyline()
+        else:
+            self.group_counts[key] = count
+
+    def _compact_heaps(self):
+        if not self.live:
+            self.x_hi.clear(); self.x_lo.clear(); self.y_hi.clear(); self.y_lo.clear()
+            self.dominators.clear()
+            self._skyline = []; self._skyline_h = []; self._skyline_keys = set()
+            return
+        x_hi = []; x_lo = []; y_hi = []; y_lo = []
+        for uid, b in self.live.items():
+            r = OCCLUSION_TOP_DRIFT_HEIGHTS*b[3]
+            x_hi.append((b[0]+r, uid))
+            x_lo.append((-(b[0]-r), uid))
+            y_hi.append((b[1]+r, uid))
+            y_lo.append((-(b[1]-r), uid))
+        heapq.heapify(x_hi); heapq.heapify(x_lo); heapq.heapify(y_hi); heapq.heapify(y_lo)
+        self.x_hi, self.x_lo, self.y_hi, self.y_lo = x_hi, x_lo, y_hi, y_lo
+        self.dominators = [d for d in self.dominators if d in self.live]
+
+    def prune(self, px, y1):
+        if not self.live:
+            return False
+        live = self.live
+        x_hi, x_lo, y_hi, y_lo = self.x_hi, self.x_lo, self.y_hi, self.y_lo
+        neg_px, neg_y1 = -px, -y1
+        while x_hi and x_hi[0][0] < px:
+            uid = heapq.heappop(x_hi)[1]
+            if uid in live:self._remove(uid)
+        while x_lo and x_lo[0][0] < neg_px:
+            uid = heapq.heappop(x_lo)[1]
+            if uid in live:self._remove(uid)
+        while y_hi and y_hi[0][0] < y1:
+            uid = heapq.heappop(y_hi)[1]
+            if uid in live:self._remove(uid)
+        while y_lo and y_lo[0][0] < neg_y1:
+            uid = heapq.heappop(y_lo)[1]
+            if uid in live:self._remove(uid)
+        if not live:
+            self._compact_heaps()
+            return False
+        if max(len(x_hi), len(x_lo), len(y_hi), len(y_lo)) > 4*max(len(live), 64):
+            self._compact_heaps()
+        return True
+
+    def covered(self, b):
+        if (b[0], b[1], b[2], b[3]) in self.seen:
+            return True
+        live = self.live
+        if self.dominators:
+            kept = None
+            for idx, d in enumerate(self.dominators):
+                dom = live.get(d)
+                if dom is None:
+                    if kept is None:kept = self.dominators[:idx]
+                    continue
+                if kept is not None:kept.append(d)
+                if _dominates_baseline(dom, b):
+                    if kept is not None:self.dominators = kept+self.dominators[idx+1:]
+                    return True
+            if kept is not None:
+                self.dominators = kept
+        return False
+
+    def _skyline_insert(self, h, y2, rear):
+        sky = self._skyline
+        sky_h = self._skyline_h
+        idx = bisect.bisect_left(sky_h, h)
+        if idx < len(sky) and sky[idx][2] >= rear:
+            return
+        hi = idx+1 if (idx < len(sky) and sky_h[idx] == h) else idx
+        lo = idx
+        while lo > 0 and sky[lo-1][2] <= rear:
+            lo -= 1
+        if lo < hi:
+            keys = self._skyline_keys
+            for old_h, old_y2, _ in sky[lo:hi]:
+                keys.discard((old_y2, old_h))
+            del sky[lo:hi]
+            del sky_h[lo:hi]
+        sky.insert(lo, (h, y2, rear))
+        sky_h.insert(lo, h)
+        self._skyline_keys.add((y2, h))
+
+    def add(self, b):
+        if self.covered(b):
+            return
+        uid = self.next_uid
+        self.next_uid = uid+1
+        self.live[uid] = b
+        self.seen.add((b[0], b[1], b[2], b[3]))
+        key = (b[2], b[3])
+        prev_count = self.group_counts.get(key, 0)
+        self.group_counts[key] = prev_count+1
+        if prev_count == 0 and self._skyline is not None:
+            self._skyline_insert(b[3], b[2], b[4])
+        r = OCCLUSION_TOP_DRIFT_HEIGHTS*b[3]
+        heapq.heappush(self.x_hi, (b[0]+r, uid))
+        heapq.heappush(self.x_lo, (-(b[0]-r), uid))
+        heapq.heappush(self.y_hi, (b[1]+r, uid))
+        heapq.heappush(self.y_lo, (-(b[1]-r), uid))
+        live = self.live
+        doms = [d for d in self.dominators if d in live and not _dominates_baseline(b, live[d])]
+        doms.append(uid)
+        if len(doms) > 8:
+            by_h = max(doms, key=lambda d: (live[d][3], live[d][2]))
+            by_r = max(doms, key=lambda d: (live[d][4], live[d][3]))
+            keep = [by_h]+([by_r] if by_r != by_h else [])
+            for d in reversed(doms):
+                if len(keep) >= 8:break
+                if d not in keep:keep.append(d)
+            doms = keep
+        self.dominators = doms
+
+    def _ensure_skyline(self):
+        if self._skyline is not None:
+            return
+        pts = sorted(((h, y2, y2-OCCLUSION_BOTTOM_SHARE*h) for y2, h in self.group_counts), reverse=True)
+        sky = []
+        max_rear = -math.inf
+        for h, y2, rear in pts:
+            if rear > max_rear:
+                max_rear = rear
+                sky.append((h, y2, rear))
+        sky.reverse()
+        self._skyline = sky
+        self._skyline_h = [p[0] for p in sky]
+        self._skyline_keys = {(p[1], p[0]) for p in sky}
+
+    def iter_crossing_candidates(self, h_min, rear_min):
+        """Yield live skyline ``(y2_base, h_base)`` pairs eligible for ``(h_min, rear_min)``
+        in descending ``(h_base, y2_base)`` order."""
+        if not self.group_counts:
+            return
+        self._ensure_skyline()
+        sky = self._skyline
+        lo = bisect.bisect_left(self._skyline_h, h_min-1e-9)
+        if lo >= len(sky):
+            return
+        l, r = lo, len(sky)
+        while l < r:
+            mid = (l+r)//2
+            if sky[mid][2] >= rear_min:
+                l = mid+1
+            else:
+                r = mid
+        for idx in range(l-1, lo-1, -1):
+            p = sky[idx]
+            yield p[1], p[0]
 
 
 class VehicleWaits:
@@ -275,42 +485,14 @@ class VehicleWaits:
         return out
 
     @staticmethod
-    def _dominates_baseline(a, b):
-        """True when stationary baseline ``a`` losslessly covers ``b`` in height, rear
-        bottom-share score, and (x, y1) drift-gate containment so ``b`` can never survive
-        pruning or qualify for a clip without ``a`` also surviving and qualifying."""
-        if a == b:
-            return True
-        if a[3] < b[3] or a[4] < b[4]+1e-12:
-            return False
-        margin = OCCLUSION_TOP_DRIFT_HEIGHTS*(a[3]-b[3])-1e-12
-        return abs(a[0]-b[0]) <= margin and abs(a[1]-b[1]) <= margin
-
-    @classmethod
-    def _merge_clip_baselines(cls, existing, candidates):
-        """Maintain the exact lossless nondominated set of live stationary baselines."""
-        kept = list(existing)
-        for cand in candidates:
-            if any(cls._dominates_baseline(s, cand) for s in kept):
-                continue
-            kept = [s for s in kept if not cls._dominates_baseline(cand, s)]
-            kept.append(cand)
-        return kept
-
-    @staticmethod
     def _prune_clip_baselines(state, px, y1):
         saved = state.get("clip_baselines")
-        if not saved:
-            return []
-        kept = [b for b in saved
-                if abs(px-b[0]) <= OCCLUSION_TOP_DRIFT_HEIGHTS*b[3]
-                and abs(y1-b[1]) <= OCCLUSION_TOP_DRIFT_HEIGHTS*b[3]]
-        state["clip_baselines"] = kept or None
-        return kept
+        if saved is not None and not saved.prune(px, y1):
+            state["clip_baselines"] = None
 
     def _refresh_clip_baselines(self, state, observation, timestamp, prev_obs):
-        """Record all nondominated corroborated stationary baselines while pinned so partial
-        shrinkage, interior height/rear trade-offs, or stationary drift never lose eligibility."""
+        """Record corroborated stationary baselines into the heap-indexed set without
+        scanning accumulated anchors on stationary frames."""
         history = state.get("history")
         if not history or len(history) < 2 or prev_obs is None or history[-1][0] != prev_obs["time"]:
             return
@@ -321,8 +503,8 @@ class VehicleWaits:
         y1 = py-height
         earlier = list(history)
         pairs = list(dict.fromkeys(self._corroborated_pairs(earlier)))
-        saved = state.get("clip_baselines") or []
-        if saved and all(any(self._dominates_baseline(s, p) for s in saved) for p in pairs):
+        saved = state.get("clip_baselines")
+        if saved is not None and all(saved.covered(p) for p in pairs):
             return
         samples = earlier+[(timestamp, px, py, height)]
         motion = _fit(samples)
@@ -333,18 +515,23 @@ class VehicleWaits:
         y1_span = max(y1_vals)-min(y1_vals)
         x_span = max(x_vals)-min(x_vals)
         top_speed = math.hypot(motion[0], motion[2])
-        valid = [b for b in pairs
-                 if y1_span <= OCCLUSION_TOP_DRIFT_HEIGHTS*b[3]
-                 and x_span <= OCCLUSION_TOP_DRIFT_HEIGHTS*b[3]
-                 and top_speed < OCCLUSION_STATIC_TOP_SPEED*b[3]
-                 and abs(px-b[0]) <= OCCLUSION_TOP_DRIFT_HEIGHTS*b[3]
-                 and abs(y1-b[1]) <= OCCLUSION_TOP_DRIFT_HEIGHTS*b[3]]
+        valid = []
+        for b in pairs:
+            r = OCCLUSION_TOP_DRIFT_HEIGHTS*b[3]
+            if (y1_span <= r and x_span <= r and
+                    top_speed < OCCLUSION_STATIC_TOP_SPEED*b[3] and
+                    b[0]-r <= px <= b[0]+r and b[1]-r <= y1 <= b[1]+r):
+                valid.append(b)
         if valid:
-            state["clip_baselines"] = self._merge_clip_baselines(saved, valid)
+            if saved is None:
+                saved = _ClipBaselines()
+                state["clip_baselines"] = saved
+            for b in valid:
+                saved.add(b)
 
     def _bottom_clipped_crossing(self, state, observation, timestamp, prev_obs):
-        """Return pre-occlusion baseline (x, y1, y2, h_base, rear) when a stop-line crossing
-        is explained purely by bottom-edge occlusion on a stationary vehicle, else None."""
+        """Return ``(h_base, pair_to_save_or_None)`` when a stop-line crossing is
+        explained purely by bottom-edge occlusion on a stationary vehicle, else None."""
         history = state.get("history")
         if not history or len(history) < 2 or prev_obs is None or history[-1][0] != prev_obs["time"]:
             return None
@@ -354,7 +541,6 @@ class VehicleWaits:
         px, py, height = geom
         y1 = py-height
         earlier = list(history)
-        candidates = self._corroborated_pairs(earlier)+list(state.get("clip_baselines") or ())
         samples = earlier+[(timestamp, px, py, height)]
         motion = _fit(samples)
         if motion is None:
@@ -364,25 +550,46 @@ class VehicleWaits:
         y1_span = max(y1_vals)-min(y1_vals)
         x_span = max(x_vals)-min(x_vals)
         top_speed = math.hypot(motion[0], motion[2])
-        qualifying = []
-        for b in candidates:
-            _, _, y2_base, h_base, _ = b
+        rear_min = py-OCCLUSION_BOTTOM_SHARE*height-1e-9
+        best_key = None
+        best_pair = None
+        def consider(y2_base, h_base, pair):
+            nonlocal best_key, best_pair
             if height > CROSSING_CLIP_SHRINK_RATIO*h_base+1e-9:
-                continue
-            if (y2_base-py) < OCCLUSION_BOTTOM_SHARE*(h_base-height)-1e-9:
-                continue
+                return
+            if (y2_base-OCCLUSION_BOTTOM_SHARE*h_base) < rear_min:
+                return
             if (y1_span > OCCLUSION_TOP_DRIFT_HEIGHTS*h_base or
                     x_span > OCCLUSION_TOP_DRIFT_HEIGHTS*h_base or
                     top_speed >= OCCLUSION_STATIC_TOP_SPEED*h_base):
-                continue
+                return
             unclipped_y2 = y1+h_base
             if not math.isfinite(unclipped_y2):
-                continue
+                return
             # Orientation-agnostic counterfactual: only suppress when restoring the
             # pre-occlusion height places the vehicle's rear back behind the line.
             if self.side((px, unclipped_y2)) < 0:
-                qualifying.append(b)
-        return max(qualifying, key=lambda b: (b[3], b[2])) if qualifying else None
+                key = (h_base, y2_base)
+                if best_key is None or key > best_key:
+                    best_key = key
+                    best_pair = pair
+        for b in self._corroborated_pairs(earlier):
+            consider(b[2], b[3], b)
+        saved = state.get("clip_baselines")
+        if saved is not None:
+            h_min = max(
+                (height-1e-9)/CROSSING_CLIP_SHRINK_RATIO,
+                y1_span/OCCLUSION_TOP_DRIFT_HEIGHTS,
+                x_span/OCCLUSION_TOP_DRIFT_HEIGHTS,
+                top_speed/OCCLUSION_STATIC_TOP_SPEED,
+            )
+            for y2_base, h_base in saved.iter_crossing_candidates(h_min, rear_min):
+                if best_key is not None and (h_base, y2_base) <= best_key:
+                    break
+                consider(y2_base, h_base, None)
+                if best_key == (h_base, y2_base):
+                    break
+        return (best_key[0], best_pair) if best_key is not None else None
 
     def _pending_crossing_confirmed(self, pending, observation):
         """True once a clipped track's unclipped rear also clears the stop line."""
@@ -423,9 +630,15 @@ class VehicleWaits:
         if self.side(prev_obs["point"]) < 0 <= self.side(observation.point):
             clipped = self._bottom_clipped_crossing(state, observation, timestamp, prev_obs) if continuing else None
             if clipped is not None:
-                state["clip_baselines"] = self._merge_clip_baselines(state.get("clip_baselines") or (), [clipped])
+                h_base, pair = clipped
+                if pair is not None:
+                    saved = state.get("clip_baselines")
+                    if saved is None:
+                        saved = _ClipBaselines()
+                        state["clip_baselines"] = saved
+                    saved.add(pair)
                 if keep_pending:
-                    state["pending_crossing"] = {"from": prev_obs, "h_base": clipped[3], "recovered": 0}
+                    state["pending_crossing"] = {"from": prev_obs, "h_base": h_base, "recovered": 0}
                 return False
             self._cross(row, prev_obs, observation, phase, timestamp, cycle_id)
             state["clip_baselines"] = None

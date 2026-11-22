@@ -1446,6 +1446,61 @@ def test_sustained_bottom_clip_requires_geometric_recovery_before_clearing_ancho
     assert waits_r9.active[(0, 1)].get('pending_crossing') is not None
 
 
+def test_sustained_stationary_jitter_per_frame_cost_stays_bounded():
+    """Sol S12: 6 stopped vehicles jittering < 1 px (1D horizontal and 3D x/y2/h) for
+    60 s (1800 frames at 30 FPS) keep per-frame and crossing wait processing bounded,
+    while slow unidirectional drift compacts all four boundary heaps."""
+    waits = book(side=lambda p: 270.-p[1])
+    tail_ms = []
+    for f in range(1800):
+        dx = (f % 1799)/1800.  # 1799 distinct sub-pixel x positions inside < 1 px
+        obs = [car(1+k, 280., x=100.+80.*k+dx, height=60., speed=0.) for k in range(6)]
+        started = time.perf_counter()
+        waits.observe(obs, 'RED', f/FPS, f+1, 1, unassigned=())
+        elapsed_ms = (time.perf_counter()-started)*1000.
+        if f >= 1650:
+            tail_ms.append(elapsed_ms)
+    median_ms = sorted(tail_ms)[len(tail_ms)//2]
+    assert median_ms < 5.0, f'1D jitter median tail frame time {median_ms:.2f} ms exceeds budget'
+    # Clipped frame on all 6 vehicles after 60 s of jitter is still caught as pending, not SERVED.
+    waits.observe([car(1+k, 268., x=100.+80.*k+0.5, height=48., speed=0.) for k in range(6)],
+                  'RED', 1800/FPS, 1801, 1, unassigned=())
+    assert all(not r['crossed_stop_line'] for r in waits.records.values())
+
+    # 3D (x, y2, h) sub-pixel jitter for 60 s: both stationary tail AND crossing frame stay fast.
+    waits_3d = book(side=lambda p: 270.-p[1])
+    tail_3d_ms = []
+    for f in range(1800):
+        obs = []
+        for k in range(6):
+            dx = (((f*37+k*13) % 997)/997.-0.5)*0.9
+            dy = (((f*53+k*29) % 991)/991.-0.5)*0.9
+            dh = (((f*71+k*41) % 983)/983.-0.5)*0.9
+            obs.append(car(1+k, 280.+dy, x=100.+80.*k+dx, height=60.+dh, speed=0.))
+        started = time.perf_counter()
+        waits_3d.observe(obs, 'RED', f/FPS, f+1, 1, unassigned=())
+        elapsed_ms = (time.perf_counter()-started)*1000.
+        if f >= 1650:
+            tail_3d_ms.append(elapsed_ms)
+    median_3d_ms = sorted(tail_3d_ms)[len(tail_3d_ms)//2]
+    assert median_3d_ms < 5.0, f'3D jitter median tail frame time {median_3d_ms:.2f} ms exceeds budget'
+    started = time.perf_counter()
+    waits_3d.observe([car(1+k, 268., x=100.+80.*k, height=48., speed=0.) for k in range(6)],
+                     'RED', 1800/FPS, 1801, 1, unassigned=())
+    cross_3d_ms = (time.perf_counter()-started)*1000.
+    assert cross_3d_ms < 10.0, f'3D jitter crossing frame time {cross_3d_ms:.2f} ms exceeds budget'
+    assert all(not r['crossed_stop_line'] for r in waits_3d.records.values())
+
+    # Slow unidirectional drift: all four boundary heaps stay compacted relative to live entries.
+    waits_creep = book(side=lambda p: 270.-p[1])
+    for f in range(1850):
+        waits_creep.observe([car(1, 280., x=100.+0.02*f, height=60., speed=0.)],
+                            'RED', f/FPS, f+1, 1, unassigned=())
+    saved = waits_creep.active[(0, 1)].get('clip_baselines')
+    assert saved is not None and len(saved.live) > 0
+    assert max(len(saved.x_hi), len(saved.x_lo), len(saved.y_hi), len(saved.y_lo)) <= 4*max(len(saved.live), 64)
+
+
 def test_pending_crossing_confirms_across_consecutive_exit_pending_outside_frames():
     """Sol S3: an active crossing anchor is retained across consecutive outside frames
     while EXIT_PENDING, and confirms SERVED once the reconstructed rear clears the line."""
