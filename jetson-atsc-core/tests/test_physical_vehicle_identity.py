@@ -1379,6 +1379,18 @@ def test_sustained_bottom_clip_requires_geometric_recovery_before_clearing_ancho
          + [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(12)]
          + [[car(1, 274., x=150., height=54., speed=0.)] for _ in range(10)]
          + [[car(1, 268., x=150., height=48., speed=0.)]]),
+        # Sol S2 Round 7: interior nondominated (h=60, rear=238.0) between (61, 233.3) and (54, 239.2).
+        ('nondominated_interior_height_rear',
+         [[car(1, 276., x=150., height=61., speed=0.)] for _ in range(6)]
+         + [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(12)]
+         + [[car(1, 277., x=150., height=54., speed=0.)] for _ in range(10)]
+         + [[car(1, 268., x=150., height=48., speed=0.)]]),
+        # Sol S11 Round 7: equal-score horizontal anchor (x=157) not dominated by older x=150 anchor.
+        ('equal_score_distinct_x_drift_gate',
+         [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(6)]
+         + [[car(1, 280., x=157., height=60., speed=0.)] for _ in range(12)]
+         + [[car(1, 274., x=157., height=54., speed=0.)] for _ in range(10)]
+         + [[car(1, 268., x=160., height=48., speed=0.)]]),
     ):
         waits_r6 = book(side=lambda p: 270.-p[1])
         play(waits_r6, seq_r6, phase='RED')

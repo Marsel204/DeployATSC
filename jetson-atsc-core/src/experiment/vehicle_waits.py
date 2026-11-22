@@ -37,6 +37,7 @@ OCCLUSION_MAX_RECOVERY_RATIO = 1.2
 # occluder can cross the stop line while its unclipped rear stays behind it.
 CROSSING_CLIP_SHRINK_RATIO = .85
 CROSSING_RECOVERY_RATIO = .95
+MAX_CLIP_BASELINES = 16
 # Another observed box (any class, size or ID state) covering this much of the
 # smaller of it and the newborn, with footpoints this close (in smaller-box
 # heights), may be the same body or its neighbour: the link is ambiguous.
@@ -271,13 +272,53 @@ class VehicleWaits:
                 for a, b in zip(earlier, earlier[1:])]
 
     @staticmethod
-    def _merge_clip_baselines(existing, candidates):
+    def _dominates_baseline(a, b):
+        """True when stationary baseline ``a`` covers ``b`` in height, rear bottom-share
+        score, and (x, y1) drift-gate containment so ``b`` can never qualify without ``a``."""
+        ax, ay1, ay2, ah = a
+        bx, by1, by2, bh = b
+        if ah < bh:
+            return False
+        if (ay2-OCCLUSION_BOTTOM_SHARE*ah) < (by2-OCCLUSION_BOTTOM_SHARE*bh):
+            return False
+        margin = OCCLUSION_TOP_DRIFT_HEIGHTS*(ah-bh)
+        return abs(ax-bx) <= margin and abs(ay1-by1) <= margin
+
+    @classmethod
+    def _merge_clip_baselines(cls, existing, candidates):
         pool = list(existing)+list(candidates)
         if not pool:
             return []
-        by_height = max(pool, key=lambda b: (b[3], b[2]))
-        by_rear = max(pool, key=lambda b: (b[2]-OCCLUSION_BOTTOM_SHARE*b[3], b[3]))
-        return [by_height] if by_height == by_rear else [by_height, by_rear]
+        nondominated = []
+        for i, cand in enumerate(pool):
+            if any(cls._dominates_baseline(other, cand) and (other != cand or j > i)
+                   for j, other in enumerate(pool) if j != i):
+                continue
+            nondominated.append(cand)
+        if len(nondominated) <= MAX_CLIP_BASELINES:
+            return nondominated
+        # Always preserve the 2D (height, rear_score) Pareto frontier, then newest anchors.
+        def rear(b):
+            return b[2]-OCCLUSION_BOTTOM_SHARE*b[3]
+        frontier = [i for i, b in enumerate(nondominated)
+                    if not any(o[3] >= b[3] and rear(o) >= rear(b) and
+                               ((o[3], rear(o)) != (b[3], rear(b)) or j > i)
+                               for j, o in enumerate(nondominated) if j != i)]
+        if len(frontier) > MAX_CLIP_BASELINES:
+            by_h = max(frontier, key=lambda idx: (nondominated[idx][3], nondominated[idx][2], idx))
+            by_r = max(frontier, key=lambda idx: (rear(nondominated[idx]), nondominated[idx][3], idx))
+            keep = {by_h, by_r}
+            for idx in reversed(frontier):
+                if len(keep) >= MAX_CLIP_BASELINES:
+                    break
+                keep.add(idx)
+        else:
+            keep = set(frontier)
+            for idx in range(len(nondominated)-1, -1, -1):
+                if len(keep) >= MAX_CLIP_BASELINES:
+                    break
+                keep.add(idx)
+        return [nondominated[idx] for idx in sorted(keep)]
 
     @staticmethod
     def _prune_clip_baselines(state, px, y1):
@@ -291,8 +332,8 @@ class VehicleWaits:
         return kept
 
     def _refresh_clip_baselines(self, state, observation, timestamp, prev_obs):
-        """Record corroborated stationary baselines (tallest height and deepest rear)
-        so partial shrinkage or minor height jitter never degrades clip detection."""
+        """Record nondominated corroborated stationary baselines so partial shrinkage,
+        interior height/rear trade-offs, or small stationary shifts never degrade clip detection."""
         history = state.get("history")
         if not history or len(history) < 2 or prev_obs is None or history[-1][0] != prev_obs["time"]:
             return
@@ -304,7 +345,7 @@ class VehicleWaits:
         earlier = list(history)
         pairs = self._corroborated_pairs(earlier)
         saved = state.get("clip_baselines") or []
-        if self._merge_clip_baselines(saved, pairs) == saved:
+        if saved and all(any(self._dominates_baseline(s, p) for s in saved) for p in pairs):
             return
         samples = earlier+[(timestamp, px, py, height)]
         motion = _fit(samples)
