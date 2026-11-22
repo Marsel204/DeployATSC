@@ -295,6 +295,31 @@ def _collect_idxs(node, out):
     _collect_idxs(node.right, out)
 
 
+_HBLOCK_MAX = 128
+_HBLOCK_MERGE_TRIGGER = 32
+_HBLOCK_MERGE_MAX = 96
+
+
+class _HBlock:
+    __slots__ = ("h", "y2", "rear", "err", "cnt", "max_rear_hi")
+
+    def __init__(self, h=None, y2=None, rear=None, err=None, cnt=None, max_rear_hi=-math.inf):
+        self.h = array("d") if h is None else h
+        self.y2 = array("d") if y2 is None else y2
+        self.rear = array("d") if rear is None else rear
+        self.err = array("d") if err is None else err
+        self.cnt = array("I") if cnt is None else cnt
+        self.max_rear_hi = max_rear_hi
+
+    def refresh_max_rear_hi(self):
+        m = -math.inf
+        rear = self.rear; err = self.err
+        for i in range(len(rear)):
+            v = rear[i]+err[i]
+            if v > m: m = v
+        self.max_rear_hi = m
+
+
 class _ClipBaselines:
     """Lossless compact-array indexed stationary clip baselines for one active track.
 
@@ -304,12 +329,14 @@ class _ClipBaselines:
       drift-gate envelopes answers drift pruning (O(1) on stationary frames and
       O(1) on whole-track departure), dominance/duplicate checks, and live
       eviction of provably dominated entries.
-    - A conservative incremental (h, rear) skyline in ``array('d')`` columns
-      answers crossing checks via C binary search and O(1) straight-line checks.
+    - A 2-level blocked sorted ``(h, y2)`` index (``_HBlock`` chunks of <= 128
+      unique refcounted groups) supports O(log B) incremental inserts and
+      deletes with zero rebuilds on partial drift pruning, plus O(1) straight-
+      line crossing shortcuts.
     """
     __slots__ = ("_x", "_y1", "_y2", "_h", "_rear", "_err", "_free", "count",
                  "_root", "_recent_q", "_recent_s",
-                 "_sky_h", "_sky_y2", "_sky_rear", "_sky_err", "_sky_lo", "_sky_hi")
+                 "_blocks", "_blk_max_h", "_blk_max_y2")
 
     def __init__(self):
         self._x = array("d")
@@ -323,12 +350,9 @@ class _ClipBaselines:
         self._root = None
         self._recent_q = deque()
         self._recent_s = set()
-        self._sky_h = array("d")
-        self._sky_y2 = array("d")
-        self._sky_rear = array("d")
-        self._sky_err = array("d")
-        self._sky_lo = array("d")
-        self._sky_hi = array("d")
+        self._blocks = []
+        self._blk_max_h = array("d")
+        self._blk_max_y2 = array("d")
 
     def __bool__(self):
         return self.count > 0
@@ -343,25 +367,101 @@ class _ClipBaselines:
         self.count = 0
         self._root = None
         self._recent_q.clear(); self._recent_s.clear()
-        self._sky_h = array("d"); self._sky_y2 = array("d")
-        self._sky_rear = array("d"); self._sky_err = array("d")
-        self._sky_lo = array("d"); self._sky_hi = array("d")
+        self._blocks.clear()
+        self._blk_max_h = array("d"); self._blk_max_y2 = array("d")
 
-    def _invalidate_skyline(self):
-        self._sky_h = self._sky_y2 = self._sky_rear = self._sky_err = self._sky_lo = self._sky_hi = None
+    def _find_block(self, h, y2):
+        blocks = self._blocks
+        max_h = self._blk_max_h; max_y2 = self._blk_max_y2
+        b_idx = bisect.bisect_left(max_h, h)
+        n = len(blocks)
+        while b_idx < n and max_h[b_idx] == h and max_y2[b_idx] < y2:
+            b_idx += 1
+        return b_idx
 
-    def _in_skyline(self, y2, h):
-        sky_h = self._sky_h
-        if sky_h is None:
-            return False
-        idx = bisect.bisect_left(sky_h, h)
-        sky_y2 = self._sky_y2
-        n = len(sky_h)
-        while idx < n and sky_h[idx] == h:
-            if sky_y2[idx] == y2:
-                return True
-            idx += 1
-        return False
+    def _blocks_add(self, h, y2, rear, err):
+        blocks = self._blocks
+        max_h = self._blk_max_h; max_y2 = self._blk_max_y2
+        r_hi = rear+err
+        if not blocks:
+            blk = _HBlock(array("d", (h,)), array("d", (y2,)), array("d", (rear,)),
+                          array("d", (err,)), array("I", (1,)), r_hi)
+            blocks.append(blk); max_h.append(h); max_y2.append(y2)
+            return
+        b_idx = self._find_block(h, y2)
+        if b_idx == len(blocks):
+            b_idx -= 1
+        blk = blocks[b_idx]
+        bh = blk.h; by2 = blk.y2
+        i = bisect.bisect_left(bh, h)
+        n = len(bh)
+        while i < n and bh[i] == h:
+            if by2[i] == y2:
+                blk.cnt[i] += 1
+                return
+            if by2[i] > y2:
+                break
+            i += 1
+        bh.insert(i, h); by2.insert(i, y2)
+        blk.rear.insert(i, rear); blk.err.insert(i, err); blk.cnt.insert(i, 1)
+        if r_hi > blk.max_rear_hi:
+            blk.max_rear_hi = r_hi
+        if i == len(bh)-1:
+            max_h[b_idx] = h; max_y2[b_idx] = y2
+        if len(bh) > _HBLOCK_MAX:
+            mid = len(bh)//2
+            right = _HBlock(bh[mid:], by2[mid:], blk.rear[mid:], blk.err[mid:], blk.cnt[mid:])
+            right.refresh_max_rear_hi()
+            del bh[mid:]; del by2[mid:]; del blk.rear[mid:]; del blk.err[mid:]; del blk.cnt[mid:]
+            blk.refresh_max_rear_hi()
+            max_h[b_idx] = bh[-1]; max_y2[b_idx] = by2[-1]
+            blocks.insert(b_idx+1, right)
+            max_h.insert(b_idx+1, right.h[-1])
+            max_y2.insert(b_idx+1, right.y2[-1])
+
+    def _blocks_remove(self, h, y2):
+        blocks = self._blocks
+        if not blocks:
+            return
+        max_h = self._blk_max_h; max_y2 = self._blk_max_y2
+        b_idx = self._find_block(h, y2)
+        if b_idx >= len(blocks):
+            return
+        blk = blocks[b_idx]
+        bh = blk.h; by2 = blk.y2
+        i = bisect.bisect_left(bh, h)
+        n = len(bh)
+        while i < n and bh[i] == h and by2[i] < y2:
+            i += 1
+        if i >= n or bh[i] != h or by2[i] != y2:
+            return
+        c = blk.cnt[i]-1
+        if c > 0:
+            blk.cnt[i] = c
+            return
+        removed_hi = blk.rear[i]+blk.err[i]
+        del bh[i]; del by2[i]; del blk.rear[i]; del blk.err[i]; del blk.cnt[i]
+        if not bh:
+            del blocks[b_idx]; del max_h[b_idx]; del max_y2[b_idx]
+            return
+        if removed_hi >= blk.max_rear_hi:
+            blk.refresh_max_rear_hi()
+        max_h[b_idx] = bh[-1]; max_y2[b_idx] = by2[-1]
+        if len(bh) < _HBLOCK_MERGE_TRIGGER and len(blocks) > 1:
+            if b_idx+1 < len(blocks) and len(bh)+len(blocks[b_idx+1].h) <= _HBLOCK_MERGE_MAX:
+                nxt = blocks[b_idx+1]
+                bh.extend(nxt.h); by2.extend(nxt.y2)
+                blk.rear.extend(nxt.rear); blk.err.extend(nxt.err); blk.cnt.extend(nxt.cnt)
+                if nxt.max_rear_hi > blk.max_rear_hi: blk.max_rear_hi = nxt.max_rear_hi
+                max_h[b_idx] = bh[-1]; max_y2[b_idx] = by2[-1]
+                del blocks[b_idx+1]; del max_h[b_idx+1]; del max_y2[b_idx+1]
+            elif b_idx > 0 and len(blocks[b_idx-1].h)+len(bh) <= _HBLOCK_MERGE_MAX:
+                prv = blocks[b_idx-1]
+                prv.h.extend(bh); prv.y2.extend(by2)
+                prv.rear.extend(blk.rear); prv.err.extend(blk.err); prv.cnt.extend(blk.cnt)
+                if blk.max_rear_hi > prv.max_rear_hi: prv.max_rear_hi = blk.max_rear_hi
+                max_h[b_idx-1] = prv.h[-1]; max_y2[b_idx-1] = prv.y2[-1]
+                del blocks[b_idx]; del max_h[b_idx]; del max_y2[b_idx]
 
     def _alloc_slot(self, bx, by1, by2, bh, brear, berr):
         if self._free:
@@ -375,11 +475,10 @@ class _ClipBaselines:
         self.count += 1
         return i
 
-    def _free_slot(self, i, check_skyline):
+    def _free_slot(self, i):
         if self._recent_s:
             self._recent_s.discard((self._x[i], self._y1[i], self._y2[i], self._h[i]))
-        if check_skyline and self._sky_h is not None and self._in_skyline(self._y2[i], self._h[i]):
-            self._invalidate_skyline()
+        self._blocks_remove(self._h[i], self._y2[i])
         self._free.append(i)
         self.count -= 1
 
@@ -403,7 +502,7 @@ class _ClipBaselines:
     def _free_subtree(self, node):
         if node.idxs is not None:
             for i in node.idxs:
-                self._free_slot(i, True)
+                self._free_slot(i)
             return
         self._free_subtree(node.left)
         self._free_subtree(node.right)
@@ -423,7 +522,7 @@ class _ClipBaselines:
                 if bx-r <= px <= bx+r and by1-r <= y1 <= by1+r:
                     kept.append(i)
                 else:
-                    self._free_slot(i, True)
+                    self._free_slot(i)
                     removed = True
             if not removed:
                 return node, False
@@ -515,9 +614,7 @@ class _ClipBaselines:
             for i in node.idxs:
                 if _dominates_coords(ax, ay1, ay2, ah, arear, aerr,
                                      xs[i], y1s[i], y2s[i], hs[i], rears[i], errs[i]):
-                    # Dominance is transitive on (h, rear): inserting a immediately supersedes
-                    # any evicted entry on the skyline without uncovering hidden entries.
-                    self._free_slot(i, False)
+                    self._free_slot(i)
                     removed = True
                 else:
                     kept.append(i)
@@ -578,54 +675,6 @@ class _ClipBaselines:
                     else: gp.right = rebuilt
                 return
 
-    def _skyline_insert(self, h, y2, rear, err):
-        sky_h = self._sky_h; sky_y2 = self._sky_y2
-        sky_rear = self._sky_rear; sky_err = self._sky_err
-        sky_lo = self._sky_lo; sky_hi = self._sky_hi
-        new_lo = rear-err
-        new_hi = rear+err
-        idx = bisect.bisect_left(sky_h, h)
-        n = len(sky_h)
-        if idx < n and sky_lo[idx] >= new_hi:
-            return
-        while idx < n and sky_h[idx] == h:
-            if sky_y2[idx] == y2:
-                return
-            if sky_y2[idx] > y2:
-                break
-            idx += 1
-        del_idx = []
-        stop_k = -1
-        for k in range(idx-1, -1, -1):
-            rk = sky_rear[k]; ek = sky_err[k]
-            if rk+ek <= new_lo:
-                del_idx.append(k)
-            elif rk-ek > new_hi:
-                stop_k = k
-                break
-        if del_idx:
-            for k in del_idx:
-                del sky_h[k]; del sky_y2[k]; del sky_rear[k]
-                del sky_err[k]; del sky_lo[k]; del sky_hi[k]
-            idx -= len(del_idx)
-        sfx_lo = new_lo if idx >= len(sky_h) or new_lo >= sky_lo[idx] else sky_lo[idx]
-        sfx_hi = new_hi if idx >= len(sky_h) or new_hi >= sky_hi[idx] else sky_hi[idx]
-        sky_h.insert(idx, h); sky_y2.insert(idx, y2)
-        sky_rear.insert(idx, rear); sky_err.insert(idx, err)
-        sky_lo.insert(idx, sfx_lo); sky_hi.insert(idx, sfx_hi)
-        for k in range(idx-1, stop_k, -1):
-            changed = False
-            if sfx_lo > sky_lo[k]:
-                sky_lo[k] = sfx_lo; changed = True
-            else:
-                sfx_lo = sky_lo[k]
-            if sfx_hi > sky_hi[k]:
-                sky_hi[k] = sfx_hi; changed = True
-            else:
-                sfx_hi = sky_hi[k]
-            if not changed:
-                break
-
     def add(self, b):
         bx, by1, by2, bh, brear, berr = b
         key = (bx, by1, by2, bh)
@@ -644,63 +693,57 @@ class _ClipBaselines:
         self._recent_q.append(key)
         if len(self._recent_q) > MAX_HISTORY_SAMPLES:
             self._recent_s.discard(self._recent_q.popleft())
-        if self._sky_h is not None:
-            self._skyline_insert(bh, by2, brear, berr)
+        self._blocks_add(bh, by2, brear, berr)
         self._kd_insert(slot, bx, by1, bh, brear, berr)
         if len(self._x) > 4*max(self.count, 64):
             self._compact_slots()
 
-    def _ensure_skyline(self):
-        if self._sky_h is not None:
-            return
-        idxs = []
-        _collect_idxs(self._root, idxs)
-        y2s, hs, rears, errs = self._y2, self._h, self._rear, self._err
-        pts = sorted(((hs[i], y2s[i], rears[i], errs[i]) for i in idxs), reverse=True)
-        sky_h = array("d"); sky_y2 = array("d")
-        sky_rear = array("d"); sky_err = array("d")
-        sky_lo = array("d"); sky_hi = array("d")
-        sfx_lo = -math.inf
-        sfx_hi = -math.inf
-        prev_h = prev_y2 = None
-        for h, y2, rear, err in pts:
-            if h == prev_h and y2 == prev_y2:
+    def best_for_crossing(self, h_min, rear_floor, height, y1, px, eligible, side, best_key):
+        """Return highest qualifying ``(h_base, y2_base)`` beating ``best_key`` (or ``best_key``
+        unchanged) without rebuilding on partial drift pruning or scanning shorter heights
+        after the tallest eligible baseline clears a straight stop line."""
+        blocks = self._blocks
+        if not blocks:
+            return best_key
+        h_floor = h_min-1e-9
+        for b_idx in range(len(blocks)-1, -1, -1):
+            blk = blocks[b_idx]
+            top_h = blk.h[-1]
+            if top_h < h_floor:
+                break
+            if best_key is not None and (top_h, blk.y2[-1]) <= best_key:
+                break
+            if blk.max_rear_hi < rear_floor:
                 continue
-            prev_h, prev_y2 = h, y2
-            if rear+err <= sfx_lo:
-                continue
-            if rear-err > sfx_lo: sfx_lo = rear-err
-            if rear+err > sfx_hi: sfx_hi = rear+err
-            sky_h.append(h); sky_y2.append(y2)
-            sky_rear.append(rear); sky_err.append(err)
-            sky_lo.append(sfx_lo); sky_hi.append(sfx_hi)
-        sky_h.reverse(); sky_y2.reverse()
-        sky_rear.reverse(); sky_err.reverse()
-        sky_lo.reverse(); sky_hi.reverse()
-        self._sky_h = sky_h; self._sky_y2 = sky_y2
-        self._sky_rear = sky_rear; self._sky_err = sky_err
-        self._sky_lo = sky_lo; self._sky_hi = sky_hi
-
-    def crossing_slice(self, h_min, rear_floor):
-        """Return ``(sky_h, sky_y2, lo, hi)`` covering all live skyline entries eligible for
-        ``(h_min, rear_floor)``, ordered ascending by ``(h_base, y2_base)``."""
-        if self.count == 0:
-            return (), (), 0, -1
-        self._ensure_skyline()
-        sky_h = self._sky_h
-        lo = bisect.bisect_left(sky_h, h_min-1e-9)
-        n = len(sky_h)
-        if lo >= n:
-            return sky_h, self._sky_y2, lo, lo-1
-        sky_hi = self._sky_hi
-        l, r = lo, n
-        while l < r:
-            mid = (l+r)//2
-            if sky_hi[mid] >= rear_floor:
-                l = mid+1
-            else:
-                r = mid
-        return sky_h, self._sky_y2, lo, l-1
+            top_y2 = y1+top_h
+            top_behind = side((px, top_y2)) < 0 if (top_h >= height and math.isfinite(top_y2)) else None
+            if top_behind is False:
+                return best_key
+            bh = blk.h; by2 = blk.y2; brear = blk.rear; berr = blk.err
+            last_i = len(bh)-1
+            for i in range(last_i, -1, -1):
+                h_base = bh[i]
+                if h_base < h_floor:
+                    return best_key
+                y2_base = by2[i]
+                if best_key is not None and (h_base, y2_base) <= best_key:
+                    return best_key
+                if brear[i]+berr[i] < rear_floor:
+                    continue
+                if not eligible(y2_base, h_base):
+                    continue
+                if i == last_i and top_behind is not None:
+                    behind = top_behind
+                else:
+                    unclipped_y2 = y1+h_base
+                    if not math.isfinite(unclipped_y2):
+                        continue
+                    behind = side((px, unclipped_y2)) < 0
+                if behind:
+                    return (h_base, y2_base)
+                if h_base >= height:
+                    return best_key
+        return best_key
 
 
 class VehicleWaits:
@@ -840,16 +883,17 @@ class VehicleWaits:
         except (TypeError, ValueError, IndexError, OverflowError, KeyError):px = py = float("nan")
         valid_sample = height is not None and all(map(math.isfinite, (px, py, py-height)))
         if not recent or not valid_sample:history.clear()
-        if not consecutive or not valid_sample:
-            clip_history.clear()
-            if not valid_sample:
-                state["clip_baselines"] = None
         if valid_sample:
-            sample = (timestamp, px, py, height)
-            history.append(sample)
+            history.append((timestamp, px, py, height))
             while len(history) > HISTORY_SAMPLES and history[-1][0]-history[1][0] >= MIN_FIT_SPAN_SEC-1e-9:
                 history.popleft()
-            clip_history.append(sample)
+        clip_geom = self._valid_box_geometry(observation)
+        if not consecutive or clip_geom is None:
+            clip_history.clear()
+            if clip_geom is None:
+                self._clear_clip_state(state)
+        if clip_geom is not None:
+            clip_history.append((timestamp, clip_geom[0], clip_geom[1], clip_geom[2]))
             while len(clip_history) > HISTORY_SAMPLES and clip_history[-1][0]-clip_history[1][0] >= MIN_FIT_SPAN_SEC-1e-9:
                 clip_history.popleft()
 
@@ -959,32 +1003,10 @@ class VehicleWaits:
                 top_speed/OCCLUSION_STATIC_TOP_SPEED,
             )
             rear_floor = py-OCCLUSION_BOTTOM_SHARE*height-1e-9-_rear_err(py, height)
-            sky_h, sky_y2, lo, hi = saved.crossing_slice(h_min, rear_floor)
-            if hi >= lo:
-                # For a straight calibrated stop line (side(px, py) >= 0 and h_base >= height),
-                # if the tallest skyline baseline in [lo, hi] clears the line, every shorter
-                # baseline in [lo, hi] clears it too.
-                top_h = sky_h[hi]
-                top_y2 = y1+top_h
-                top_behind = self.side((px, top_y2)) < 0 if (top_h >= height and math.isfinite(top_y2)) else None
-                if top_behind is not False:
-                    for idx in range(hi, lo-1, -1):
-                        h_base, y2_base = sky_h[idx], sky_y2[idx]
-                        if best_key is not None and (h_base, y2_base) <= best_key:
-                            break
-                        if not eligible(y2_base, h_base):
-                            continue
-                        if idx == hi and top_behind is not None:
-                            behind = top_behind
-                        else:
-                            unclipped_y2 = y1+h_base
-                            if not math.isfinite(unclipped_y2):
-                                continue
-                            behind = self.side((px, unclipped_y2)) < 0
-                        if behind:
-                            best_key = (h_base, y2_base)
-                            best_pair = None
-                        break
+            saved_key = saved.best_for_crossing(h_min, rear_floor, height, y1, px, eligible, self.side, best_key)
+            if saved_key is not None and (best_key is None or saved_key > best_key):
+                best_key = saved_key
+                best_pair = None
         return (best_key[0], best_pair) if best_key is not None else None
 
     def _pending_crossing_confirmed(self, pending, observation):
@@ -1002,8 +1024,11 @@ class VehicleWaits:
                            valid_motion, continuing, keep_pending):
         row = state["row"]
         geom = self._valid_box_geometry(observation)
-        if continuing and geom is not None:
-            self._prune_clip_baselines(state, geom[0], geom[1]-geom[2])
+        if continuing:
+            if geom is None:
+                self._clear_clip_state(state)
+            else:
+                self._prune_clip_baselines(state, geom[0], geom[1]-geom[2])
         pending = state.get("pending_crossing")
         if pending is not None:
             if self.side(observation.point) < 0:

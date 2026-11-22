@@ -1492,8 +1492,9 @@ def test_sustained_stationary_jitter_per_frame_cost_stays_bounded():
     assert cross_3d_ms < 10.0, f'3D jitter crossing frame time {cross_3d_ms:.2f} ms exceeds budget'
     assert all(not r['crossed_stop_line'] for r in waits_3d.records.values())
 
-    # Sol S12: genuine departure after 60 s of Pareto skyline accumulation (900 skyline points/track)
-    # must check only the tallest eligible baseline on the straight stop line, not scan all 900.
+    # Sol S12: genuine departure after 60 s of Pareto accumulation (900 unique (h, y2)/track),
+    # INCLUDING partial drift pruning on the departure frame, must avoid rebuilding/sorting
+    # and check only the tallest eligible baseline on the straight stop line.
     side_calls = [0]
     def counted_side(p):
         side_calls[0] += 1
@@ -1501,19 +1502,20 @@ def test_sustained_stationary_jitter_per_frame_cost_stays_bounded():
     waits_dep = book(side=counted_side)
     for f in range(1800):
         step = f//2
+        dx = -0.5 if step < 15 else 0.0
         h = 60.-0.001*step
         y2 = 276.-0.0004*step
-        obs = [car(1+k, y2, x=100.+80.*k, height=h, speed=0.) for k in range(6)]
+        obs = [car(1+k, y2, x=100.+80.*k+dx, height=h, speed=0.) for k in range(6)]
         waits_dep.observe(obs, 'RED', f/FPS, f+1, 1, unassigned=())
-    assert len(waits_dep.active[(0, 1)]['clip_baselines']._sky_h) >= 850
+    assert len(waits_dep.active[(0, 1)]['clip_baselines']) >= 850
     side_calls[0] = 0
     started = time.perf_counter()
-    # y1=214 stays within drift gate of all 900 baselines while unclipped y1+60=274 clears y=275.
-    waits_dep.observe([car(1+k, 262., x=100.+80.*k, height=48., speed=1.) for k in range(6)],
+    # x=+8.6 prunes the 15 step<15 baselines while ~885 survive; y1=214 clears y=275 for all.
+    waits_dep.observe([car(1+k, 262., x=100.+80.*k+8.6, height=48., speed=1.) for k in range(6)],
                       'GREEN', 1800/FPS, 1801, 1, unassigned=())
     depart_ms = (time.perf_counter()-started)*1000.
-    assert depart_ms < 15.0, f'genuine departure took {depart_ms:.2f} ms'
-    assert side_calls[0] <= 120, f'genuine departure scanned skyline ({side_calls[0]} side calls)'
+    assert depart_ms < 15.0, f'genuine departure after partial prune took {depart_ms:.2f} ms'
+    assert side_calls[0] <= 120, f'genuine departure scanned baselines ({side_calls[0]} side calls)'
     assert all(r['tracking_state'] == 'SERVED' and r['crossed_stop_line'] for r in waits_dep.records.values())
 
     # Sol S13: growing height with fixed top/center evicts dominated live baselines (retaining 1/track).
@@ -1533,7 +1535,7 @@ def test_sustained_stationary_jitter_per_frame_cost_stays_bounded():
                   + [[car(1, 290., x=150.4, height=70., speed=0.)] for _ in range(12)])
     play(waits_spread, seq_spread, phase='RED')
     saved_spread = waits_spread.active[(0, 1)]['clip_baselines']
-    assert len(saved_spread) == 1 and saved_spread._sky_h[0] == 70.
+    assert len(saved_spread) == 1 and saved_spread._blocks[0].h[0] == 70.
     assert saved_spread._h[saved_spread._root.idxs[0]] == 70.
 
     # Slow unidirectional drift: column arrays stay compacted relative to live count.
@@ -1570,6 +1572,26 @@ def test_missed_frame_clears_crossing_clip_evidence_but_preserves_fragment_histo
     waits_link.observe([], 'GREEN', 7/FPS, 8, 1, unassigned=())
     waits_link.observe([car(2, 200.+3.*8, x=150., height=60., speed=3.)], 'GREEN', 8/FPS, 9, 1, unassigned=())
     assert len(waits_link.records) == 1 and only_row(waits_link).get('identity_links')
+
+    # Sol S14 (Round 12): invalid geometry (zero-width box, even with explicit height) must
+    # clear pending_crossing, clip_baselines, and clip_history so subsequent crossings serve.
+    from dataclasses import replace
+    waits_bad = book(side=lambda p: 270.-p[1])
+    for f in range(5):
+        waits_bad.observe([car(1, 280., x=150., height=60., speed=0.)], 'RED', f/FPS, f+1, 1, unassigned=())
+    waits_bad.observe([car(1, 268., x=150., height=48., speed=0.)], 'RED', 5/FPS, 6, 1, unassigned=())
+    assert waits_bad.active[(0, 1)].get('pending_crossing') is not None
+    # Zero-width malformed box with explicit height=48: must clear all clip state and not enter clip_history.
+    bad_obs = replace(car(1, 268., x=150., height=48., speed=0.), bbox=(150., 220., 150., 268.), height=48.)
+    waits_bad.observe([bad_obs], 'RED', 6/FPS, 7, 1, unassigned=())
+    assert waits_bad.active[(0, 1)].get('pending_crossing') is None
+    assert waits_bad.active[(0, 1)].get('clip_baselines') is None
+    assert len(waits_bad.active[(0, 1)].get('clip_history', ())) == 0
+    # Next two valid observations cross the stop line -> must complete SERVED.
+    waits_bad.observe([car(1, 274., x=150., height=54., speed=0.)], 'RED', 7/FPS, 8, 1, unassigned=())
+    waits_bad.observe([car(1, 268., x=150., height=48., speed=0.)], 'RED', 8/FPS, 9, 1, unassigned=())
+    row_bad = only_row(waits_bad)
+    assert row_bad['tracking_state'] == 'SERVED' and row_bad['crossed_stop_line']
 
 
 def test_bottom_clip_rear_share_cutoff_uses_original_float_comparison():
