@@ -359,10 +359,6 @@ class DetectorTracker:
                 frames.append((None, None))
         return frames
 
-    def _withheld(self, result, call) -> Optional[tuple]:
-        """Post-NMS vehicle boxes of this result the tracker did not emit, or None."""
-        return self._evidence(result, call)[0]
-
     def _evidence(self, result, call) -> Tuple[Optional[tuple], Optional[tuple]]:
         """(withheld vehicle boxes, raw source box per emitted row), or (None, None)."""
         if call is None:
@@ -380,20 +376,34 @@ class DetectorTracker:
             order = []
         elif emitted_count == len(xyxy) and len(idx) == 0:
             # Untracked passthrough: every detection is an observation, in detection order.
-            return (), tuple(tuple(float(v) for v in xyxy[j]) for j in range(len(xyxy)))
+            emitted = set(range(len(xyxy)))
+            order = list(range(len(xyxy)))
         else:
             return None, None
-        sources = tuple(tuple(float(v) for v in xyxy[j]) for j in order)
+        sources = []
+        for j in order:
+            if not np.isfinite(cls[j]):
+                return None, None
+            box = tuple(float(v) for v in xyxy[j])
+            if self.map_class(int(cls[j])) is not None and not np.isfinite(box).all():
+                return None, None
+            sources.append(box)
         withheld = []
         for j in range(len(xyxy)):
             if j in emitted:
                 continue
+            if not np.isfinite(cls[j]):
+                return None, None
             name = self.map_class(int(cls[j]))
+            if name is None:
+                continue
             box = tuple(float(v) for v in xyxy[j])
-            if name is None or not np.isfinite(box).all() or box[2] <= box[0] or box[3] <= box[1]:
+            if not np.isfinite(box).all() or not np.isfinite(conf[j]):
+                return None, None
+            if box[2] <= box[0] or box[3] <= box[1]:
                 continue
             withheld.append((box, name, float(conf[j])))
-        return tuple(withheld), sources
+        return tuple(withheld), tuple(sources)
 
     def set_tracking_profile(self, name: str) -> None:
         """Select before tracking starts; reset_tracking preserves this choice."""

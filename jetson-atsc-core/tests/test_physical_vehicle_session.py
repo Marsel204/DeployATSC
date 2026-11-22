@@ -181,3 +181,72 @@ def test_default_off_session_keeps_the_historical_observe_acquisition_contract(v
         assert getattr(session.detectors['acquisition'], '_provenance', None) is None
     finally:
         session.state = session.applied_state = 'stopped';session._cleanup()
+
+
+def test_malformed_withheld_entries_degrade_to_unavailable_evidence_without_crashing(video_factory, tmp_path):
+    """Sol S3: malformed entries in TrackedFrame.withheld yield unavailable evidence (None)
+    and never crash ObservationSession."""
+    from src.ui.observation_session import _withheld_boxes
+    clean_frame = TrackedFrame([scripted_vehicle(1, 100., 60., 0., 0)], withheld=(), epoch=0)
+    assert _withheld_boxes(clean_frame, 0) == ()
+    for bad in ([()], [None], [123], [('', 'car', .9)], 42, ''):
+        bad_frame = TrackedFrame([scripted_vehicle(1, 100., 60., 0., 0)], withheld=bad, epoch=0)
+        assert _withheld_boxes(bad_frame, 0) is None
+
+    class MalformedWithheldDetector(ScriptedDetector):
+        def track(self, frames, timestamp=None):
+            index = round(timestamp*FPS)
+            withheld = [()] if index == 14 else ()
+            return [TrackedFrame([scripted_vehicle(track_id, x, y, timestamp, self.epoch)
+                     for track_id, y, x in script(index)], withheld=withheld, epoch=self.epoch) for _ in frames]
+
+    rows, unavailable = run_session(video_factory, tmp_path, MalformedWithheldDetector, 20)
+    assert not any(r.get('identity_links') for r in rows.values())
+    assert {'acquisition:0:1', 'acquisition:0:2'} <= set(rows)
+    assert unavailable >= 1
+
+
+@pytest.mark.parametrize('mode,continuing,expect_box_parses,expect_obs', [
+    ('native', False, False, True),
+    ('native', True, True, True),
+    ('persistent_v1', False, False, False),
+    ('persistent_v1', True, False, False),
+])
+def test_default_off_and_persistent_sessions_skip_continuation_box_parsing(
+    video_factory, tmp_path, monkeypatch, mode, continuing, expect_box_parses, expect_obs
+):
+    """Sol S4: default-off native and persistent_v1 sessions do not parse continuation boxes,
+    and persistent_v1 does not construct native VehicleObservation objects."""
+    from src.ui import observation_session as module
+    box_calls, source_calls, obs_calls = [], [], []
+    orig_box, orig_source, orig_obs = module._box, module._source_box, module.VehicleObservation
+
+    def spy_box(v):
+        box_calls.append(v); return orig_box(v)
+
+    def spy_source(v):
+        source_calls.append(v); return orig_source(v)
+
+    def spy_obs(*args, **kwargs):
+        obs_calls.append((args, kwargs)); return orig_obs(*args, **kwargs)
+
+    monkeypatch.setattr(module, '_box', spy_box)
+    monkeypatch.setattr(module, '_source_box', spy_source)
+    monkeypatch.setattr(module, 'VehicleObservation', spy_obs)
+
+    settings = run_payload(video_factory)
+    settings['policy'] = {'debounce_frames': 1, 'stop_persistence_sec': .1, 'fragment_continuation': continuing}
+    if mode == 'persistent_v1':
+        settings['vehicle_identity'] = {'mode': 'persistent_v1'}
+
+    class Manual(ObservationSession):
+        def _worker(self):self.ready.set()
+
+    session = Manual(settings, tmp_path/'runs', detector_factory=ScriptedDetector, anfis_factory=FakeANFIS)
+    try:
+        for _ in range(5):session._process_batch()
+    finally:
+        session.state = session.applied_state = 'stopped';session._cleanup()
+    assert bool(obs_calls) is expect_obs
+    assert bool(box_calls) is expect_box_parses
+    assert bool(source_calls) is expect_box_parses

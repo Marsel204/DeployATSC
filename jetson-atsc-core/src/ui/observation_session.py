@@ -62,6 +62,7 @@ def source_identity(value):
 
 
 def _finite_box(values):
+    if isinstance(values,(str,bytes)):return None
     try:box=tuple(float(value) for value in values[:4])
     except (TypeError,IndexError,ValueError):return None
     return box if len(box)==4 and all(map(math.isfinite,box)) and box[3]>box[1] and box[2]>box[0] else None
@@ -84,9 +85,10 @@ def _withheld_boxes(tracks,epoch):
     fallback, a frame from another tracker epoch, or a frame with an emitted
     box whose raw source detection is unattributed yields None (unavailable)."""
     withheld=getattr(tracks,"withheld",None)
-    if withheld is None or getattr(tracks,"epoch",None)!=epoch:return None
+    if withheld is None or isinstance(withheld,(str,bytes)) or getattr(tracks,"epoch",None)!=epoch:return None
     if any(_source_box(track) is None for track in tracks):return None
-    boxes=tuple(_finite_box(item[0]) for item in withheld)
+    try:boxes=tuple(_finite_box(item[0]) for item in withheld)
+    except (TypeError,IndexError,KeyError):return None
     return None if None in boxes else boxes
 
 
@@ -305,12 +307,6 @@ class ObservationSession:
             predictor=getattr(getattr(detector,"model",None),"predictor",None)
             neural_device=str(getattr(predictor,"device","injected/unknown"))
             with self.lock:
-                observations=[VehicleObservation(v.track_id,v.class_name,
-                    v.velocity_mps if getattr(v,"velocity_valid",False) else None,
-                    v.bottom_center,stable_id=getattr(v,"stable_id",False),
-                    velocity_valid=getattr(v,"velocity_valid",False),
-                    in_region=calibration.homography.is_in_approach_corridor(*v.bottom_center),
-                    epoch=getattr(v,"epoch",detector.epoch),bbox=_box(v),source_bbox=_source_box(v)) for v in tracks]
                 if identity_evidence is not None:
                     resolution=self.engine.observe_acquisition(frame,packet.timestamp,packet.sequence,(),generation=generation,
                         identity_evidence=identity_evidence.detections,camera_stable=identity_evidence.camera_stable,
@@ -331,7 +327,16 @@ class ObservationSession:
                             labels.append((tuple(int(x) for x in item.bbox),label))
                     labels=tuple(labels)
                 else:
-                    if getattr(self,"fragment_continuation",False):
+                    continuing=getattr(self,"fragment_continuation",False)
+                    observations=[VehicleObservation(v.track_id,v.class_name,
+                        v.velocity_mps if getattr(v,"velocity_valid",False) else None,
+                        v.bottom_center,stable_id=getattr(v,"stable_id",False),
+                        velocity_valid=getattr(v,"velocity_valid",False),
+                        in_region=calibration.homography.is_in_approach_corridor(*v.bottom_center),
+                        epoch=getattr(v,"epoch",detector.epoch),
+                        bbox=_box(v) if continuing else None,
+                        source_bbox=_source_box(v) if continuing else None) for v in tracks]
+                    if continuing:
                         self.engine.observe_acquisition(frame,packet.timestamp,packet.sequence,observations,generation=generation,
                             unassigned_boxes=_withheld_boxes(tracks,detector.epoch))
                     else:

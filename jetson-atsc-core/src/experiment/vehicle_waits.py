@@ -57,13 +57,15 @@ def _fit(history):
 
 
 def _raw_box(box):
+    if isinstance(box, (str, bytes)):return None
     try:x1, y1, x2, y2 = (float(v) for v in box[:4])
     except (TypeError, ValueError, IndexError):return None
     return (x1, y1, x2, y2) if all(map(math.isfinite, (x1, y1, x2, y2))) and x2 > x1 and y2 > y1 else None
 
 
 def _competitors(observations, unassigned):
-    """(observation or None, footpoint, height, bbox) for every box of the frame.
+    """(observation or None, footpoint, height, bbox) for every box of the frame,
+    or None when any supplied box is unreadable (fail closed).
 
     An observation competes with its own box and, when it carries one, with
     the raw detection the tracker emitted it from (``source_bbox``): smoothing
@@ -71,16 +73,27 @@ def _competitors(observations, unassigned):
     belong to the observation, so a newborn's own source never vetoes it.
     ``unassigned`` are the frame's actual detections the tracker did not emit:
     they can only veto a link, never become rows."""
-    found = [(o, o.point, _height(o), o.bbox) for o in observations]
+    found = []
     for o in observations:
-        source = getattr(o, "source_bbox", None)
-        source = None if source is None else _raw_box(source)
-        if source is not None and source != o.bbox:
-            found.append((o, ((source[0]+source[2])/2, source[3]), source[3]-source[1], source))
-    for box in unassigned:
-        box = _raw_box(box)
-        if box is not None:
+        box = None
+        if o.bbox is not None:
+            box = _raw_box(o.bbox)
+            if box is None:return None
+        found.append((o, o.point, _height(o), box))
+        raw_source = getattr(o, "source_bbox", None)
+        if raw_source is not None:
+            source = _raw_box(raw_source)
+            if source is None:return None
+            if source != box:
+                found.append((o, ((source[0]+source[2])/2, source[3]), source[3]-source[1], source))
+    if isinstance(unassigned, (str, bytes)):return None
+    try:
+        for raw in unassigned:
+            box = _raw_box(raw)
+            if box is None:return None
             found.append((None, ((box[0]+box[2])/2, box[3]), box[3]-box[1], box))
+    except TypeError:
+        return None
     return found
 
 
@@ -374,15 +387,6 @@ class VehicleWaits:
             identity = (o.epoch, o.local_id)
             height = _height(o)
             if height is not None and self._fresh(identity):newborns.append((identity, o, height))
-        # The raw detection a newborn was emitted from (``source_bbox``) is the same
-        # vehicle seen before smoothing: it widens ambiguity, never acceptance. A
-        # supplied but unreadable source fails closed (the newborn may compete, not link).
-        sources = []
-        for _, o, _ in newborns:
-            raw = getattr(o, "source_bbox", None)
-            source = None if raw is None else _raw_box(raw)
-            sources.append((raw is None or source is not None,
-                            None if source is None else ((source[0]+source[2])/2, source[3])))
         if not newborns:return
         present = {(o.epoch, o.local_id) for o in observations if o.local_id is not None and o.stable_id}
         lost = []
@@ -412,11 +416,24 @@ class VehicleWaits:
         if len(newborns)*len(lost) > MAX_PAIR_CHECKS:
             self.continuation_skipped_frames += 1
             return
+        # Validate every supplied observation/source/unassigned box before matching:
+        # any unreadable competitor box makes the frame's evidence unavailable.
+        competitors = _competitors(observations, unassigned)
+        if competitors is None:
+            self.continuation_unavailable_frames += 1
+            return
+        # The raw detection a newborn was emitted from (``source_bbox``) is the same
+        # vehicle seen before smoothing: it widens ambiguity, never acceptance.
+        source_points = []
+        for _, o, _ in newborns:
+            raw = getattr(o, "source_bbox", None)
+            source = None if raw is None else _raw_box(raw)
+            source_points.append(None if source is None else ((source[0]+source[2])/2, source[3]))
         # Degrees on position alone: class and size do not make a nearby box less of a competitor.
         new_degree = [0]*len(newborns); lost_degree = [0]*len(lost); edge = {}
         for i, (new, o, _) in enumerate(newborns):
             px, py = o.point
-            source_valid, source_point = sources[i]
+            source_point = source_points[i]
             for j, (old, _, _, predicted, height, gate, _) in enumerate(lost):
                 if old[0] != new[0]:continue
                 error = math.hypot(predicted[0]-px, predicted[1]-py)/height
@@ -425,15 +442,13 @@ class VehicleWaits:
                     predicted[0]-source_point[0], predicted[1]-source_point[1])/height <= gate
                 if in_emitted or in_source:
                     new_degree[i] += 1; lost_degree[j] += 1
-                    if in_emitted and source_valid:edge[i] = (j, error)
-        competitors = None
+                    if in_emitted:edge[i] = (j, error)
         for i, (j, error) in edge.items():
             if new_degree[i] != 1 or lost_degree[j] != 1:continue
             new, o, new_height = newborns[i]
             old, state, dt, predicted, height, gate, fitted = lost[j]
             if state["row"]["class_name"] != o.class_name:continue
             if max(height, new_height)/min(height, new_height) > MAX_HEIGHT_RATIO:continue
-            if competitors is None:competitors = _competitors(observations, unassigned)
             if self._competed(o, new_height, predicted, height, gate, competitors):continue
             self._link(old, new, state, o, timestamp, dt, error, gate, predicted, fitted)
 

@@ -64,7 +64,9 @@ continues a row whose last observation was at most `max_gap_sec` earlier, when:
    on every emitted vehicle). When it is unavailable (tracker error and
    detection-only fallback, a detector without the provenance hook, a frame
    from an older tracker epoch, an image whose tracker updates cannot be
-   attributed to it, an emitted vehicle without an attributed `source_bbox`)
+   attributed to it, an emitted vehicle without an attributed `source_bbox`,
+   non-finite vehicle coordinates, or any unreadable/malformed competitor box
+   or withheld entry)
    no link is made in that frame (`continuation_unavailable_frames`, counted
    when a newborn and a lost row were both present).
    Direct callers pass the withheld boxes themselves:

@@ -716,3 +716,34 @@ def test_raw_source_footpoint_alone_never_links():
 def test_malformed_newborn_source_box_fails_closed(source):
     assert observe_newborn_frame(lost_one(), [newborn(source=source)]) == []
     assert observe_newborn_frame(lost_one(), [newborn(source=narrow(50.))]) == [(1, 2)]
+
+
+@pytest.mark.parametrize('case', ['truncated_competitor_source', 'truncated_competitor_bbox',
+                                  'truncated_unassigned', 'nonfinite_unassigned'])
+def test_malformed_competitor_or_unassigned_box_makes_frame_evidence_unavailable(case):
+    """Sol S2: unreadable competitor or unassigned boxes must fail closed for the frame."""
+    frames = lost_one()
+    other = VehicleObservation(3, 'car', 2., (100., NEWBORN_Y), height=40., bbox=narrow(100.),
+                               source_bbox=narrow(68.))
+    unassigned = ()
+    if case == 'truncated_competitor_source':
+        other = VehicleObservation(3, 'car', 2., (100., NEWBORN_Y), height=40., bbox=narrow(100.),
+                                   source_bbox=(65., NEWBORN_Y-40.))
+    elif case == 'truncated_competitor_bbox':
+        other = VehicleObservation(3, 'car', 2., (100., NEWBORN_Y), height=40., bbox=(97., NEWBORN_Y-40.),
+                                   source_bbox=narrow(68.))
+    elif case == 'truncated_unassigned':
+        other = None
+        unassigned = [(65., NEWBORN_Y-40.)]
+    else:
+        other = None
+        unassigned = [(65., NEWBORN_Y-40., float('nan'), NEWBORN_Y)]
+
+    waits = book()
+    end = play(waits, frames)
+    last = [newborn(source=narrow(66.))] + ([other] if other is not None else [])
+    waits.observe(last, 'RED', end/FPS, end+1, 1, unassigned=unassigned)
+    row_links = [(l['from']['local_id'], l['to']['local_id'])
+                 for r in waits.records.values() for l in r.get('identity_links', ())]
+    assert row_links == []
+    assert waits.continuation_unavailable_frames == 1

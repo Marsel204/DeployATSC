@@ -117,12 +117,30 @@ def test_non_vehicle_and_degenerate_withheld_boxes_are_not_evidence():
     # Only the valid vehicle-class box is evidence: the person and the zero-area box are not.
     assert [(w[0], w[1]) for w in frame.withheld] == [((117., 100., 123., 140.), 'car')]
     none = type('R', (), {'boxes': None})()
-    calls = [(np.array([[0, 0, 1, 1.]]), np.array([4.])),              # valid person
-             (np.array([[5, 5, 5, 9.]]), np.array([1.])),              # zero-width car
-             (np.array([[5, 9, 8, 5.]]), np.array([1.])),              # inverted car
-             (np.array([[0, 0, np.nan, 4.]]), np.array([1.]))]          # non-finite car
-    for xyxy, cls in calls:
-        assert detector._withheld(none, (xyxy, cls, np.array([.9]), np.zeros(0, int))) == ()
+    ignored = [(np.array([[0, 0, 1, 1.]]), np.array([4.])),            # valid person
+               (np.array([[5, 5, 5, 9.]]), np.array([1.])),            # zero-width car
+               (np.array([[5, 9, 8, 5.]]), np.array([1.]))]            # inverted car
+    for xyxy, cls in ignored:
+        assert detector._evidence(none, (xyxy, cls, np.array([.9]), np.zeros(0, int))) == ((), ())
+    nonfinite = (np.array([[0, 0, np.nan, 4.]]), np.array([1.]), np.array([.9]), np.zeros(0, int))
+    assert detector._evidence(none, nonfinite) == (None, None)
+
+
+def test_nonfinite_withheld_vehicle_box_makes_frame_evidence_unavailable_and_blocks_link(monkeypatch):
+    """Sol S1: a NaN coordinate on a withheld vehicle detection makes the frame's evidence
+    unavailable (withheld=None) instead of silently dropping the box and linking 1 -> 2."""
+    frames = review_repro()
+    frames[6][1][2] = np.nan
+    detector, step, _ = real_detector(monkeypatch, frames)
+    waits = VehicleWaits('run', RunPolicy(fragment_continuation=True), lambda point:-1)
+    tracked = []
+    for f in range(len(frames)):
+        frame = step(f)
+        tracked.append(frame)
+        waits.observe(observations(frame), 'RED', f/FPS, f+1, 1, unassigned=_withheld_boxes(frame, detector.epoch))
+    assert tracked[6].withheld is None
+    assert links(waits) == []
+    assert waits.continuation_unavailable_frames == 1
 
 
 def test_callback_order_with_the_real_predictor_and_model(monkeypatch):
