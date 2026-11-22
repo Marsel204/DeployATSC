@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+from array import array
 from collections import deque
 from collections.abc import Mapping
 import bisect
-import heapq
 import math
 
 from src.common.json_data import clone as deepcopy
@@ -132,212 +132,575 @@ def _overlap_of_smaller(a, b):
     return width*height/smaller if smaller > 0 else 0.
 
 
-def _dominates_baseline(a, b):
-    """True when stationary baseline ``a`` losslessly covers ``b`` in height, rear
-    bottom-share score, and (x, y1) drift-gate containment so ``b`` can never survive
-    pruning or qualify for a clip without ``a`` also surviving and qualifying."""
-    if a == b:
+def _rear_err(y2, h):
+    """Conservative float64 rearrangement slack between ``(y2-py)-0.7*(h-height)``
+    and ``(y2-0.7*h)-(py-0.7*height)`` so dominance never drops cutoff candidates."""
+    return max(1e-12, 16.0*math.ulp(max(abs(y2), abs(h), 1.0)))
+
+
+def _dominates_coords(ax, ay1, ay2, ah, arear, aerr, bx, by1, by2, bh, brear, berr):
+    """True when stationary baseline ``a`` provably covers ``b`` in height, rear
+    bottom-share score (with rearrangement slack), and (x, y1) drift bounds."""
+    if ax == bx and ay1 == by1 and ay2 == by2 and ah == bh:
         return True
-    if a[3] < b[3] or a[4] < b[4]:
+    if ah < bh or arear-aerr < brear+berr:
         return False
-    ra = OCCLUSION_TOP_DRIFT_HEIGHTS*a[3]
-    rb = OCCLUSION_TOP_DRIFT_HEIGHTS*b[3]
-    return (a[0]-ra <= b[0]-rb and a[0]+ra >= b[0]+rb and
-            a[1]-ra <= b[1]-rb and a[1]+ra >= b[1]+rb)
+    ra = OCCLUSION_TOP_DRIFT_HEIGHTS*ah
+    rb = OCCLUSION_TOP_DRIFT_HEIGHTS*bh
+    return (ax-ra <= bx-rb and ax+ra >= bx+rb and
+            ay1-ra <= by1-rb and ay1+ra >= by1+rb)
+
+
+_KD_LEAF_MAX = 32
+
+
+class _KDNode:
+    __slots__ = ("axis", "split", "left", "right", "idxs", "count",
+                 "min_x", "max_x", "min_y", "max_y", "min_h", "max_h",
+                 "max_rear_lo", "min_rear_hi",
+                 "min_x_hi", "max_x_hi", "min_x_lo", "max_x_lo",
+                 "min_y_hi", "max_y_hi", "min_y_lo", "max_y_lo")
+
+    def __init__(self, *, idxs=None, axis=0, split=0.0, left=None, right=None):
+        self.axis = axis; self.split = split; self.left = left; self.right = right
+        self.idxs = idxs
+        self.count = 0
+        self.min_x = self.min_y = self.min_h = math.inf
+        self.max_x = self.max_y = self.max_h = -math.inf
+        self.max_rear_lo = -math.inf; self.min_rear_hi = math.inf
+        self.min_x_hi = self.min_x_lo = self.min_y_hi = self.min_y_lo = math.inf
+        self.max_x_hi = self.max_x_lo = self.max_y_hi = self.max_y_lo = -math.inf
+
+    def include_point(self, bx, by1, bh, brear, berr):
+        r = OCCLUSION_TOP_DRIFT_HEIGHTS*bh
+        x_hi = bx+r; x_lo = bx-r; y_hi = by1+r; y_lo = by1-r
+        r_lo = brear-berr; r_hi = brear+berr
+        if bx < self.min_x: self.min_x = bx
+        if bx > self.max_x: self.max_x = bx
+        if by1 < self.min_y: self.min_y = by1
+        if by1 > self.max_y: self.max_y = by1
+        if bh < self.min_h: self.min_h = bh
+        if bh > self.max_h: self.max_h = bh
+        if r_lo > self.max_rear_lo: self.max_rear_lo = r_lo
+        if r_hi < self.min_rear_hi: self.min_rear_hi = r_hi
+        if x_hi < self.min_x_hi: self.min_x_hi = x_hi
+        if x_hi > self.max_x_hi: self.max_x_hi = x_hi
+        if x_lo < self.min_x_lo: self.min_x_lo = x_lo
+        if x_lo > self.max_x_lo: self.max_x_lo = x_lo
+        if y_hi < self.min_y_hi: self.min_y_hi = y_hi
+        if y_hi > self.max_y_hi: self.max_y_hi = y_hi
+        if y_lo < self.min_y_lo: self.min_y_lo = y_lo
+        if y_lo > self.max_y_lo: self.max_y_lo = y_lo
+        self.count += 1
+
+    def refresh_leaf(self, xs, y1s, hs, rears, errs):
+        idxs = self.idxs
+        if not idxs:
+            self.count = 0
+            self.min_x = self.min_y = self.min_h = math.inf
+            self.max_x = self.max_y = self.max_h = -math.inf
+            self.max_rear_lo = -math.inf; self.min_rear_hi = math.inf
+            self.min_x_hi = self.min_x_lo = self.min_y_hi = self.min_y_lo = math.inf
+            self.max_x_hi = self.max_x_lo = self.max_y_hi = self.max_y_lo = -math.inf
+            return
+        min_x = min_y = min_h = math.inf
+        max_x = max_y = max_h = -math.inf
+        max_rear_lo = -math.inf; min_rear_hi = math.inf
+        min_x_hi = min_x_lo = min_y_hi = min_y_lo = math.inf
+        max_x_hi = max_x_lo = max_y_hi = max_y_lo = -math.inf
+        for i in idxs:
+            bx = xs[i]; by1 = y1s[i]; bh = hs[i]
+            r = OCCLUSION_TOP_DRIFT_HEIGHTS*bh
+            x_hi = bx+r; x_lo = bx-r; y_hi = by1+r; y_lo = by1-r
+            r_lo = rears[i]-errs[i]; r_hi = rears[i]+errs[i]
+            if bx < min_x: min_x = bx
+            if bx > max_x: max_x = bx
+            if by1 < min_y: min_y = by1
+            if by1 > max_y: max_y = by1
+            if bh < min_h: min_h = bh
+            if bh > max_h: max_h = bh
+            if r_lo > max_rear_lo: max_rear_lo = r_lo
+            if r_hi < min_rear_hi: min_rear_hi = r_hi
+            if x_hi < min_x_hi: min_x_hi = x_hi
+            if x_hi > max_x_hi: max_x_hi = x_hi
+            if x_lo < min_x_lo: min_x_lo = x_lo
+            if x_lo > max_x_lo: max_x_lo = x_lo
+            if y_hi < min_y_hi: min_y_hi = y_hi
+            if y_hi > max_y_hi: max_y_hi = y_hi
+            if y_lo < min_y_lo: min_y_lo = y_lo
+            if y_lo > max_y_lo: max_y_lo = y_lo
+        self.min_x = min_x; self.max_x = max_x
+        self.min_y = min_y; self.max_y = max_y
+        self.min_h = min_h; self.max_h = max_h
+        self.max_rear_lo = max_rear_lo; self.min_rear_hi = min_rear_hi
+        self.min_x_hi = min_x_hi; self.max_x_hi = max_x_hi
+        self.min_x_lo = min_x_lo; self.max_x_lo = max_x_lo
+        self.min_y_hi = min_y_hi; self.max_y_hi = max_y_hi
+        self.min_y_lo = min_y_lo; self.max_y_lo = max_y_lo
+        self.count = len(idxs)
+
+    def refresh_internal(self):
+        l, r = self.left, self.right
+        self.min_x = l.min_x if l.min_x < r.min_x else r.min_x
+        self.max_x = l.max_x if l.max_x > r.max_x else r.max_x
+        self.min_y = l.min_y if l.min_y < r.min_y else r.min_y
+        self.max_y = l.max_y if l.max_y > r.max_y else r.max_y
+        self.min_h = l.min_h if l.min_h < r.min_h else r.min_h
+        self.max_h = l.max_h if l.max_h > r.max_h else r.max_h
+        self.max_rear_lo = l.max_rear_lo if l.max_rear_lo > r.max_rear_lo else r.max_rear_lo
+        self.min_rear_hi = l.min_rear_hi if l.min_rear_hi < r.min_rear_hi else r.min_rear_hi
+        self.min_x_hi = l.min_x_hi if l.min_x_hi < r.min_x_hi else r.min_x_hi
+        self.max_x_hi = l.max_x_hi if l.max_x_hi > r.max_x_hi else r.max_x_hi
+        self.min_x_lo = l.min_x_lo if l.min_x_lo < r.min_x_lo else r.min_x_lo
+        self.max_x_lo = l.max_x_lo if l.max_x_lo > r.max_x_lo else r.max_x_lo
+        self.min_y_hi = l.min_y_hi if l.min_y_hi < r.min_y_hi else r.min_y_hi
+        self.max_y_hi = l.max_y_hi if l.max_y_hi > r.max_y_hi else r.max_y_hi
+        self.min_y_lo = l.min_y_lo if l.min_y_lo < r.min_y_lo else r.min_y_lo
+        self.max_y_lo = l.max_y_lo if l.max_y_lo > r.max_y_lo else r.max_y_lo
+        self.count = l.count+r.count
+
+
+def _build_kd(idxs, xs, y1s, hs, rears, errs):
+    if len(idxs) <= _KD_LEAF_MAX:
+        node = _KDNode(idxs=array("I", idxs))
+        node.refresh_leaf(xs, y1s, hs, rears, errs)
+        return node
+    min_x = min_y = math.inf
+    max_x = max_y = -math.inf
+    for i in idxs:
+        bx = xs[i]; by1 = y1s[i]
+        if bx < min_x: min_x = bx
+        if bx > max_x: max_x = bx
+        if by1 < min_y: min_y = by1
+        if by1 > max_y: max_y = by1
+    axis = 0 if (max_x-min_x) >= (max_y-min_y) else 1
+    coords = xs if axis == 0 else y1s
+    ordered = sorted(idxs, key=coords.__getitem__)
+    mid = len(ordered)//2
+    split = coords[ordered[mid]]
+    left = _build_kd(ordered[:mid], xs, y1s, hs, rears, errs)
+    right = _build_kd(ordered[mid:], xs, y1s, hs, rears, errs)
+    node = _KDNode(axis=axis, split=split, left=left, right=right)
+    node.refresh_internal()
+    return node
+
+
+def _collect_idxs(node, out):
+    if node is None:
+        return
+    if node.idxs is not None:
+        out.extend(node.idxs)
+        return
+    _collect_idxs(node.left, out)
+    _collect_idxs(node.right, out)
 
 
 class _ClipBaselines:
-    """Lossless heap-indexed stationary clip baselines for one active track.
+    """Lossless compact-array indexed stationary clip baselines for one active track.
 
-    Drift pruning checks four boundary min-heaps in O(1) on stationary frames
-    (amortized O(log N) per baseline). Exact duplicates and baselines dominated
-    by the top live dominators are rejected in O(1) without scanning accumulated
-    anchors, and crossing checks binary-search an exact incremental (h, rear)
-    skyline of live ``(y2, h)`` groups.
+    - Baselines are stored in contiguous ``array('d')`` columns (no per-entry
+      boxed Python tuples or floats), giving minimal memory and O(1) teardown.
+    - A scapegoat-balanced 2D (x, y1) KD-tree carrying height, rear, and
+      drift-gate envelopes answers drift pruning (O(1) on stationary frames and
+      O(1) on whole-track departure), dominance/duplicate checks, and live
+      eviction of provably dominated entries.
+    - A conservative incremental (h, rear) skyline in ``array('d')`` columns
+      answers crossing checks via C binary search and O(1) straight-line checks.
     """
-    __slots__ = ("live", "seen", "group_counts", "x_hi", "x_lo", "y_hi", "y_lo",
-                 "dominators", "next_uid", "_skyline", "_skyline_h", "_skyline_keys")
+    __slots__ = ("_x", "_y1", "_y2", "_h", "_rear", "_err", "_free", "count",
+                 "_root", "_recent_q", "_recent_s",
+                 "_sky_h", "_sky_y2", "_sky_rear", "_sky_err", "_sky_lo", "_sky_hi")
 
     def __init__(self):
-        self.live = {}
-        self.seen = set()
-        self.group_counts = {}
-        self.x_hi = []
-        self.x_lo = []
-        self.y_hi = []
-        self.y_lo = []
-        self.dominators = []
-        self.next_uid = 0
-        self._skyline = []
-        self._skyline_h = []
-        self._skyline_keys = set()
+        self._x = array("d")
+        self._y1 = array("d")
+        self._y2 = array("d")
+        self._h = array("d")
+        self._rear = array("d")
+        self._err = array("d")
+        self._free = array("I")
+        self.count = 0
+        self._root = None
+        self._recent_q = deque()
+        self._recent_s = set()
+        self._sky_h = array("d")
+        self._sky_y2 = array("d")
+        self._sky_rear = array("d")
+        self._sky_err = array("d")
+        self._sky_lo = array("d")
+        self._sky_hi = array("d")
 
     def __bool__(self):
-        return bool(self.live)
+        return self.count > 0
+
+    def __len__(self):
+        return self.count
+
+    def clear(self):
+        self._x = array("d"); self._y1 = array("d"); self._y2 = array("d")
+        self._h = array("d"); self._rear = array("d"); self._err = array("d")
+        self._free = array("I")
+        self.count = 0
+        self._root = None
+        self._recent_q.clear(); self._recent_s.clear()
+        self._sky_h = array("d"); self._sky_y2 = array("d")
+        self._sky_rear = array("d"); self._sky_err = array("d")
+        self._sky_lo = array("d"); self._sky_hi = array("d")
 
     def _invalidate_skyline(self):
-        self._skyline = self._skyline_h = self._skyline_keys = None
+        self._sky_h = self._sky_y2 = self._sky_rear = self._sky_err = self._sky_lo = self._sky_hi = None
 
-    def _remove(self, uid):
-        b = self.live.pop(uid, None)
-        if b is None:
-            return
-        self.seen.discard((b[0], b[1], b[2], b[3]))
-        key = (b[2], b[3])
-        count = self.group_counts[key]-1
-        if count <= 0:
-            del self.group_counts[key]
-            if self._skyline_keys is not None and key in self._skyline_keys:
-                self._invalidate_skyline()
-        else:
-            self.group_counts[key] = count
-
-    def _compact_heaps(self):
-        if not self.live:
-            self.x_hi.clear(); self.x_lo.clear(); self.y_hi.clear(); self.y_lo.clear()
-            self.dominators.clear()
-            self._skyline = []; self._skyline_h = []; self._skyline_keys = set()
-            return
-        x_hi = []; x_lo = []; y_hi = []; y_lo = []
-        for uid, b in self.live.items():
-            r = OCCLUSION_TOP_DRIFT_HEIGHTS*b[3]
-            x_hi.append((b[0]+r, uid))
-            x_lo.append((-(b[0]-r), uid))
-            y_hi.append((b[1]+r, uid))
-            y_lo.append((-(b[1]-r), uid))
-        heapq.heapify(x_hi); heapq.heapify(x_lo); heapq.heapify(y_hi); heapq.heapify(y_lo)
-        self.x_hi, self.x_lo, self.y_hi, self.y_lo = x_hi, x_lo, y_hi, y_lo
-        self.dominators = [d for d in self.dominators if d in self.live]
-
-    def prune(self, px, y1):
-        if not self.live:
+    def _in_skyline(self, y2, h):
+        sky_h = self._sky_h
+        if sky_h is None:
             return False
-        live = self.live
-        x_hi, x_lo, y_hi, y_lo = self.x_hi, self.x_lo, self.y_hi, self.y_lo
-        neg_px, neg_y1 = -px, -y1
-        while x_hi and x_hi[0][0] < px:
-            uid = heapq.heappop(x_hi)[1]
-            if uid in live:self._remove(uid)
-        while x_lo and x_lo[0][0] < neg_px:
-            uid = heapq.heappop(x_lo)[1]
-            if uid in live:self._remove(uid)
-        while y_hi and y_hi[0][0] < y1:
-            uid = heapq.heappop(y_hi)[1]
-            if uid in live:self._remove(uid)
-        while y_lo and y_lo[0][0] < neg_y1:
-            uid = heapq.heappop(y_lo)[1]
-            if uid in live:self._remove(uid)
-        if not live:
-            self._compact_heaps()
-            return False
-        if max(len(x_hi), len(x_lo), len(y_hi), len(y_lo)) > 4*max(len(live), 64):
-            self._compact_heaps()
-        return True
-
-    def covered(self, b):
-        if (b[0], b[1], b[2], b[3]) in self.seen:
-            return True
-        live = self.live
-        if self.dominators:
-            kept = None
-            for idx, d in enumerate(self.dominators):
-                dom = live.get(d)
-                if dom is None:
-                    if kept is None:kept = self.dominators[:idx]
-                    continue
-                if kept is not None:kept.append(d)
-                if _dominates_baseline(dom, b):
-                    if kept is not None:self.dominators = kept+self.dominators[idx+1:]
-                    return True
-            if kept is not None:
-                self.dominators = kept
+        idx = bisect.bisect_left(sky_h, h)
+        sky_y2 = self._sky_y2
+        n = len(sky_h)
+        while idx < n and sky_h[idx] == h:
+            if sky_y2[idx] == y2:
+                return True
+            idx += 1
         return False
 
-    def _skyline_insert(self, h, y2, rear):
-        sky = self._skyline
-        sky_h = self._skyline_h
-        idx = bisect.bisect_left(sky_h, h)
-        if idx < len(sky) and sky[idx][2] >= rear:
+    def _alloc_slot(self, bx, by1, by2, bh, brear, berr):
+        if self._free:
+            i = self._free.pop()
+            self._x[i] = bx; self._y1[i] = by1; self._y2[i] = by2
+            self._h[i] = bh; self._rear[i] = brear; self._err[i] = berr
+        else:
+            i = len(self._x)
+            self._x.append(bx); self._y1.append(by1); self._y2.append(by2)
+            self._h.append(bh); self._rear.append(brear); self._err.append(berr)
+        self.count += 1
+        return i
+
+    def _free_slot(self, i, check_skyline):
+        if self._recent_s:
+            self._recent_s.discard((self._x[i], self._y1[i], self._y2[i], self._h[i]))
+        if check_skyline and self._sky_h is not None and self._in_skyline(self._y2[i], self._h[i]):
+            self._invalidate_skyline()
+        self._free.append(i)
+        self.count -= 1
+
+    def _compact_slots(self):
+        if self.count == 0:
+            self.clear()
             return
-        hi = idx+1 if (idx < len(sky) and sky_h[idx] == h) else idx
-        lo = idx
-        while lo > 0 and sky[lo-1][2] <= rear:
-            lo -= 1
-        if lo < hi:
-            keys = self._skyline_keys
-            for old_h, old_y2, _ in sky[lo:hi]:
-                keys.discard((old_y2, old_h))
-            del sky[lo:hi]
-            del sky_h[lo:hi]
-        sky.insert(lo, (h, y2, rear))
-        sky_h.insert(lo, h)
-        self._skyline_keys.add((y2, h))
+        idxs = []
+        _collect_idxs(self._root, idxs)
+        nx = array("d"); ny1 = array("d"); ny2 = array("d")
+        nh = array("d"); nrear = array("d"); nerr = array("d")
+        ox, oy1, oy2, oh, orear, oerr = self._x, self._y1, self._y2, self._h, self._rear, self._err
+        for i in idxs:
+            nx.append(ox[i]); ny1.append(oy1[i]); ny2.append(oy2[i])
+            nh.append(oh[i]); nrear.append(orear[i]); nerr.append(oerr[i])
+        self._x, self._y1, self._y2, self._h, self._rear, self._err = nx, ny1, ny2, nh, nrear, nerr
+        self._free = array("I")
+        self.count = len(nx)
+        self._root = _build_kd(range(self.count), nx, ny1, nh, nrear, nerr)
+
+    def _free_subtree(self, node):
+        if node.idxs is not None:
+            for i in node.idxs:
+                self._free_slot(i, True)
+            return
+        self._free_subtree(node.left)
+        self._free_subtree(node.right)
+
+    def _prune_node(self, node, px, y1):
+        if node.min_x_hi >= px and node.max_x_lo <= px and node.min_y_hi >= y1 and node.max_y_lo <= y1:
+            return node, False
+        if node.max_x_hi < px or node.min_x_lo > px or node.max_y_hi < y1 or node.min_y_lo > y1:
+            self._free_subtree(node)
+            return None, True
+        if node.idxs is not None:
+            xs, y1s, hs = self._x, self._y1, self._h
+            kept = array("I")
+            removed = False
+            for i in node.idxs:
+                bx = xs[i]; by1 = y1s[i]; r = OCCLUSION_TOP_DRIFT_HEIGHTS*hs[i]
+                if bx-r <= px <= bx+r and by1-r <= y1 <= by1+r:
+                    kept.append(i)
+                else:
+                    self._free_slot(i, True)
+                    removed = True
+            if not removed:
+                return node, False
+            if not kept:
+                return None, True
+            node.idxs = kept
+            node.refresh_leaf(xs, y1s, hs, self._rear, self._err)
+            return node, True
+        new_left, cl = self._prune_node(node.left, px, y1)
+        new_right, cr = self._prune_node(node.right, px, y1)
+        if not (cl or cr):
+            return node, False
+        if new_left is None:
+            return new_right, True
+        if new_right is None:
+            return new_left, True
+        node.left, node.right = new_left, new_right
+        node.refresh_internal()
+        return node, True
+
+    def prune(self, px, y1):
+        root = self._root
+        if root is None:
+            return False
+        if root.min_x_hi >= px and root.max_x_lo <= px and root.min_y_hi >= y1 and root.max_y_lo <= y1:
+            return True
+        if root.max_x_hi < px or root.min_x_lo > px or root.max_y_hi < y1 or root.min_y_lo > y1:
+            self.clear()
+            return False
+        self._root, _ = self._prune_node(root, px, y1)
+        if self._root is None:
+            self.clear()
+            return False
+        if len(self._x) > 4*max(self.count, 64):
+            self._compact_slots()
+        return True
+
+    def _is_covered(self, node, bx, by1, by2, bh, brear, berr, rb, bx_lo, bx_hi, by_lo, by_hi, brear_hi):
+        if node is None or node.max_h < bh:
+            return False
+        can_dominate = (node.max_rear_lo >= brear_hi and
+                        node.min_x_lo <= bx_lo and node.max_x_hi >= bx_hi and
+                        node.min_y_lo <= by_lo and node.max_y_hi >= by_hi)
+        if can_dominate:
+            reach = OCCLUSION_TOP_DRIFT_HEIGHTS*(node.max_h-bh)+max(1e-9, 16.0*math.ulp(max(abs(bx), abs(by1), node.max_h, 1.0)))
+            if bx+reach < node.min_x or bx-reach > node.max_x or by1+reach < node.min_y or by1-reach > node.max_y:
+                return False
+        else:
+            # No strict dominator exists in this subtree; only an exact duplicate can match.
+            if bx < node.min_x or bx > node.max_x or by1 < node.min_y or by1 > node.max_y or bh < node.min_h:
+                return False
+        if node.idxs is not None:
+            xs, y1s, y2s, hs = self._x, self._y1, self._y2, self._h
+            if not can_dominate:
+                for i in node.idxs:
+                    if xs[i] == bx and y1s[i] == by1 and y2s[i] == by2 and hs[i] == bh:
+                        return True
+                return False
+            rears, errs = self._rear, self._err
+            for i in node.idxs:
+                if _dominates_coords(xs[i], y1s[i], y2s[i], hs[i], rears[i], errs[i],
+                                     bx, by1, by2, bh, brear, berr):
+                    return True
+            return False
+        return (self._is_covered(node.left, bx, by1, by2, bh, brear, berr, rb, bx_lo, bx_hi, by_lo, by_hi, brear_hi) or
+                self._is_covered(node.right, bx, by1, by2, bh, brear, berr, rb, bx_lo, bx_hi, by_lo, by_hi, brear_hi))
+
+    def covered(self, b):
+        bx, by1, by2, bh, brear, berr = b
+        if (bx, by1, by2, bh) in self._recent_s:
+            return True
+        rb = OCCLUSION_TOP_DRIFT_HEIGHTS*bh
+        return self._is_covered(self._root, bx, by1, by2, bh, brear, berr,
+                                rb, bx-rb, bx+rb, by1-rb, by1+rb, brear+berr)
+
+    def _evict_dominated(self, node, ax, ay1, ay2, ah, arear, aerr, ax_lo, ax_hi, ay_lo, ay_hi, arear_lo):
+        # Strict positive rearrangement slack guarantees any b != a dominated by a has b.h < ah.
+        if (node is None or node.min_h >= ah or node.min_rear_hi > arear_lo or
+                node.max_x_lo < ax_lo or node.min_x_hi > ax_hi or
+                node.max_y_lo < ay_lo or node.min_y_hi > ay_hi):
+            return node, False
+        reach = OCCLUSION_TOP_DRIFT_HEIGHTS*(ah-node.min_h)+max(1e-9, 16.0*math.ulp(max(abs(ax), abs(ay1), ah, 1.0)))
+        if ax+reach < node.min_x or ax-reach > node.max_x or ay1+reach < node.min_y or ay1-reach > node.max_y:
+            return node, False
+        if node.idxs is not None:
+            xs, y1s, y2s, hs, rears, errs = self._x, self._y1, self._y2, self._h, self._rear, self._err
+            kept = array("I")
+            removed = False
+            for i in node.idxs:
+                if _dominates_coords(ax, ay1, ay2, ah, arear, aerr,
+                                     xs[i], y1s[i], y2s[i], hs[i], rears[i], errs[i]):
+                    # Dominance is transitive on (h, rear): inserting a immediately supersedes
+                    # any evicted entry on the skyline without uncovering hidden entries.
+                    self._free_slot(i, False)
+                    removed = True
+                else:
+                    kept.append(i)
+            if not removed:
+                return node, False
+            if not kept:
+                return None, True
+            node.idxs = kept
+            node.refresh_leaf(xs, y1s, hs, rears, errs)
+            return node, True
+        new_left, cl = self._evict_dominated(node.left, ax, ay1, ay2, ah, arear, aerr, ax_lo, ax_hi, ay_lo, ay_hi, arear_lo)
+        new_right, cr = self._evict_dominated(node.right, ax, ay1, ay2, ah, arear, aerr, ax_lo, ax_hi, ay_lo, ay_hi, arear_lo)
+        if not (cl or cr):
+            return node, False
+        if new_left is None:
+            return new_right, True
+        if new_right is None:
+            return new_left, True
+        node.left, node.right = new_left, new_right
+        node.refresh_internal()
+        return node, True
+
+    def _kd_insert(self, idx, bx, by1, bh, brear, berr):
+        if self._root is None:
+            node = _KDNode(idxs=array("I", (idx,)))
+            node.include_point(bx, by1, bh, brear, berr)
+            self._root = node
+            return
+        path = []
+        node = self._root
+        while node.idxs is None:
+            node.include_point(bx, by1, bh, brear, berr)
+            go_left = (bx if node.axis == 0 else by1) < node.split
+            path.append((node, go_left))
+            node = node.left if go_left else node.right
+        node.idxs.append(idx)
+        node.include_point(bx, by1, bh, brear, berr)
+        if len(node.idxs) <= _KD_LEAF_MAX:
+            return
+        xs, y1s, hs, rears, errs = self._x, self._y1, self._h, self._rear, self._err
+        split_node = _build_kd(node.idxs, xs, y1s, hs, rears, errs)
+        if not path:
+            self._root = split_node
+            return
+        parent, was_left = path[-1]
+        if was_left: parent.left = split_node
+        else: parent.right = split_node
+        for depth_i, (anc, _) in enumerate(path):
+            if anc.count >= 64 and 4*max(anc.left.count, anc.right.count) > 3*anc.count:
+                sub = []
+                _collect_idxs(anc, sub)
+                rebuilt = _build_kd(sub, xs, y1s, hs, rears, errs)
+                if depth_i == 0:
+                    self._root = rebuilt
+                else:
+                    gp, gp_left = path[depth_i-1]
+                    if gp_left: gp.left = rebuilt
+                    else: gp.right = rebuilt
+                return
+
+    def _skyline_insert(self, h, y2, rear, err):
+        sky_h = self._sky_h; sky_y2 = self._sky_y2
+        sky_rear = self._sky_rear; sky_err = self._sky_err
+        sky_lo = self._sky_lo; sky_hi = self._sky_hi
+        new_lo = rear-err
+        new_hi = rear+err
+        idx = bisect.bisect_left(sky_h, h)
+        n = len(sky_h)
+        if idx < n and sky_lo[idx] >= new_hi:
+            return
+        while idx < n and sky_h[idx] == h:
+            if sky_y2[idx] == y2:
+                return
+            if sky_y2[idx] > y2:
+                break
+            idx += 1
+        del_idx = []
+        stop_k = -1
+        for k in range(idx-1, -1, -1):
+            rk = sky_rear[k]; ek = sky_err[k]
+            if rk+ek <= new_lo:
+                del_idx.append(k)
+            elif rk-ek > new_hi:
+                stop_k = k
+                break
+        if del_idx:
+            for k in del_idx:
+                del sky_h[k]; del sky_y2[k]; del sky_rear[k]
+                del sky_err[k]; del sky_lo[k]; del sky_hi[k]
+            idx -= len(del_idx)
+        sfx_lo = new_lo if idx >= len(sky_h) or new_lo >= sky_lo[idx] else sky_lo[idx]
+        sfx_hi = new_hi if idx >= len(sky_h) or new_hi >= sky_hi[idx] else sky_hi[idx]
+        sky_h.insert(idx, h); sky_y2.insert(idx, y2)
+        sky_rear.insert(idx, rear); sky_err.insert(idx, err)
+        sky_lo.insert(idx, sfx_lo); sky_hi.insert(idx, sfx_hi)
+        for k in range(idx-1, stop_k, -1):
+            changed = False
+            if sfx_lo > sky_lo[k]:
+                sky_lo[k] = sfx_lo; changed = True
+            else:
+                sfx_lo = sky_lo[k]
+            if sfx_hi > sky_hi[k]:
+                sky_hi[k] = sfx_hi; changed = True
+            else:
+                sfx_hi = sky_hi[k]
+            if not changed:
+                break
 
     def add(self, b):
-        if self.covered(b):
+        bx, by1, by2, bh, brear, berr = b
+        key = (bx, by1, by2, bh)
+        if key in self._recent_s:
             return
-        uid = self.next_uid
-        self.next_uid = uid+1
-        self.live[uid] = b
-        self.seen.add((b[0], b[1], b[2], b[3]))
-        key = (b[2], b[3])
-        prev_count = self.group_counts.get(key, 0)
-        self.group_counts[key] = prev_count+1
-        if prev_count == 0 and self._skyline is not None:
-            self._skyline_insert(b[3], b[2], b[4])
-        r = OCCLUSION_TOP_DRIFT_HEIGHTS*b[3]
-        heapq.heappush(self.x_hi, (b[0]+r, uid))
-        heapq.heappush(self.x_lo, (-(b[0]-r), uid))
-        heapq.heappush(self.y_hi, (b[1]+r, uid))
-        heapq.heappush(self.y_lo, (-(b[1]-r), uid))
-        live = self.live
-        doms = [d for d in self.dominators if d in live and not _dominates_baseline(b, live[d])]
-        doms.append(uid)
-        if len(doms) > 8:
-            by_h = max(doms, key=lambda d: (live[d][3], live[d][2]))
-            by_r = max(doms, key=lambda d: (live[d][4], live[d][3]))
-            keep = [by_h]+([by_r] if by_r != by_h else [])
-            for d in reversed(doms):
-                if len(keep) >= 8:break
-                if d not in keep:keep.append(d)
-            doms = keep
-        self.dominators = doms
+        rb = OCCLUSION_TOP_DRIFT_HEIGHTS*bh
+        bx_lo, bx_hi, by_lo, by_hi = bx-rb, bx+rb, by1-rb, by1+rb
+        if self._is_covered(self._root, bx, by1, by2, bh, brear, berr,
+                            rb, bx_lo, bx_hi, by_lo, by_hi, brear+berr):
+            return
+        if self._root is not None:
+            self._root, _ = self._evict_dominated(self._root, bx, by1, by2, bh, brear, berr,
+                                                  bx_lo, bx_hi, by_lo, by_hi, brear-berr)
+        slot = self._alloc_slot(bx, by1, by2, bh, brear, berr)
+        self._recent_s.add(key)
+        self._recent_q.append(key)
+        if len(self._recent_q) > MAX_HISTORY_SAMPLES:
+            self._recent_s.discard(self._recent_q.popleft())
+        if self._sky_h is not None:
+            self._skyline_insert(bh, by2, brear, berr)
+        self._kd_insert(slot, bx, by1, bh, brear, berr)
+        if len(self._x) > 4*max(self.count, 64):
+            self._compact_slots()
 
     def _ensure_skyline(self):
-        if self._skyline is not None:
+        if self._sky_h is not None:
             return
-        pts = sorted(((h, y2, y2-OCCLUSION_BOTTOM_SHARE*h) for y2, h in self.group_counts), reverse=True)
-        sky = []
-        max_rear = -math.inf
-        for h, y2, rear in pts:
-            if rear > max_rear:
-                max_rear = rear
-                sky.append((h, y2, rear))
-        sky.reverse()
-        self._skyline = sky
-        self._skyline_h = [p[0] for p in sky]
-        self._skyline_keys = {(p[1], p[0]) for p in sky}
+        idxs = []
+        _collect_idxs(self._root, idxs)
+        y2s, hs, rears, errs = self._y2, self._h, self._rear, self._err
+        pts = sorted(((hs[i], y2s[i], rears[i], errs[i]) for i in idxs), reverse=True)
+        sky_h = array("d"); sky_y2 = array("d")
+        sky_rear = array("d"); sky_err = array("d")
+        sky_lo = array("d"); sky_hi = array("d")
+        sfx_lo = -math.inf
+        sfx_hi = -math.inf
+        prev_h = prev_y2 = None
+        for h, y2, rear, err in pts:
+            if h == prev_h and y2 == prev_y2:
+                continue
+            prev_h, prev_y2 = h, y2
+            if rear+err <= sfx_lo:
+                continue
+            if rear-err > sfx_lo: sfx_lo = rear-err
+            if rear+err > sfx_hi: sfx_hi = rear+err
+            sky_h.append(h); sky_y2.append(y2)
+            sky_rear.append(rear); sky_err.append(err)
+            sky_lo.append(sfx_lo); sky_hi.append(sfx_hi)
+        sky_h.reverse(); sky_y2.reverse()
+        sky_rear.reverse(); sky_err.reverse()
+        sky_lo.reverse(); sky_hi.reverse()
+        self._sky_h = sky_h; self._sky_y2 = sky_y2
+        self._sky_rear = sky_rear; self._sky_err = sky_err
+        self._sky_lo = sky_lo; self._sky_hi = sky_hi
 
-    def iter_crossing_candidates(self, h_min, rear_min):
-        """Yield live skyline ``(y2_base, h_base)`` pairs eligible for ``(h_min, rear_min)``
-        in descending ``(h_base, y2_base)`` order."""
-        if not self.group_counts:
-            return
+    def crossing_slice(self, h_min, rear_floor):
+        """Return ``(sky_h, sky_y2, lo, hi)`` covering all live skyline entries eligible for
+        ``(h_min, rear_floor)``, ordered ascending by ``(h_base, y2_base)``."""
+        if self.count == 0:
+            return (), (), 0, -1
         self._ensure_skyline()
-        sky = self._skyline
-        lo = bisect.bisect_left(self._skyline_h, h_min-1e-9)
-        if lo >= len(sky):
-            return
-        l, r = lo, len(sky)
+        sky_h = self._sky_h
+        lo = bisect.bisect_left(sky_h, h_min-1e-9)
+        n = len(sky_h)
+        if lo >= n:
+            return sky_h, self._sky_y2, lo, lo-1
+        sky_hi = self._sky_hi
+        l, r = lo, n
         while l < r:
             mid = (l+r)//2
-            if sky[mid][2] >= rear_min:
+            if sky_hi[mid] >= rear_floor:
                 l = mid+1
             else:
                 r = mid
-        for idx in range(l-1, lo-1, -1):
-            p = sky[idx]
-            yield p[1], p[0]
+        return sky_h, self._sky_y2, lo, l-1
 
 
 class VehicleWaits:
@@ -461,8 +824,15 @@ class VehicleWaits:
                     prev["sequence"] == sequence-1 and
                     0 < timestamp-prev["time"] <= self.policy.max_gap_sec+1e-9)
 
-    def _record_history(self, state, prev_obs, observation, timestamp):
+    @staticmethod
+    def _clear_clip_state(state):
+        state["pending_crossing"] = state["clip_baselines"] = None
+        if "clip_history" in state:
+            state["clip_history"].clear()
+
+    def _record_history(self, state, prev_obs, observation, timestamp, consecutive):
         history = state.setdefault("history", deque(maxlen=MAX_HISTORY_SAMPLES))
+        clip_history = state.setdefault("clip_history", deque(maxlen=MAX_HISTORY_SAMPLES))
         recent = (prev_obs is not None and not prev_obs.get("handoff") and
                   0 < timestamp-prev_obs["time"] <= self.policy.max_gap_sec+1e-9)
         height = _height(observation)
@@ -470,10 +840,18 @@ class VehicleWaits:
         except (TypeError, ValueError, IndexError, OverflowError, KeyError):px = py = float("nan")
         valid_sample = height is not None and all(map(math.isfinite, (px, py, py-height)))
         if not recent or not valid_sample:history.clear()
+        if not consecutive or not valid_sample:
+            clip_history.clear()
+            if not valid_sample:
+                state["clip_baselines"] = None
         if valid_sample:
-            history.append((timestamp, px, py, height))
+            sample = (timestamp, px, py, height)
+            history.append(sample)
             while len(history) > HISTORY_SAMPLES and history[-1][0]-history[1][0] >= MIN_FIT_SPAN_SEC-1e-9:
                 history.popleft()
+            clip_history.append(sample)
+            while len(clip_history) > HISTORY_SAMPLES and clip_history[-1][0]-clip_history[1][0] >= MIN_FIT_SPAN_SEC-1e-9:
+                clip_history.popleft()
 
     @staticmethod
     def _corroborated_pairs(earlier):
@@ -481,7 +859,7 @@ class VehicleWaits:
         for a, b in zip(earlier, earlier[1:]):
             y2 = a[2] if a[2] <= b[2] else b[2]
             h = a[3] if a[3] <= b[3] else b[3]
-            out.append((b[1], y2-h, y2, h, y2-OCCLUSION_BOTTOM_SHARE*h))
+            out.append((b[1], y2-h, y2, h, y2-OCCLUSION_BOTTOM_SHARE*h, _rear_err(y2, h)))
         return out
 
     @staticmethod
@@ -491,9 +869,9 @@ class VehicleWaits:
             state["clip_baselines"] = None
 
     def _refresh_clip_baselines(self, state, observation, timestamp, prev_obs):
-        """Record corroborated stationary baselines into the heap-indexed set without
+        """Record corroborated stationary baselines into the indexed set without
         scanning accumulated anchors on stationary frames."""
-        history = state.get("history")
+        history = state.get("clip_history")
         if not history or len(history) < 2 or prev_obs is None or history[-1][0] != prev_obs["time"]:
             return
         geom = self._valid_box_geometry(observation)
@@ -532,7 +910,7 @@ class VehicleWaits:
     def _bottom_clipped_crossing(self, state, observation, timestamp, prev_obs):
         """Return ``(h_base, pair_to_save_or_None)`` when a stop-line crossing is
         explained purely by bottom-edge occlusion on a stationary vehicle, else None."""
-        history = state.get("history")
+        history = state.get("clip_history")
         if not history or len(history) < 2 or prev_obs is None or history[-1][0] != prev_obs["time"]:
             return None
         geom = self._valid_box_geometry(observation)
@@ -550,31 +928,28 @@ class VehicleWaits:
         y1_span = max(y1_vals)-min(y1_vals)
         x_span = max(x_vals)-min(x_vals)
         top_speed = math.hypot(motion[0], motion[2])
-        rear_min = py-OCCLUSION_BOTTOM_SHARE*height-1e-9
         best_key = None
         best_pair = None
-        def consider(y2_base, h_base, pair):
-            nonlocal best_key, best_pair
-            if height > CROSSING_CLIP_SHRINK_RATIO*h_base+1e-9:
-                return
-            if (y2_base-OCCLUSION_BOTTOM_SHARE*h_base) < rear_min:
-                return
-            if (y1_span > OCCLUSION_TOP_DRIFT_HEIGHTS*h_base or
-                    x_span > OCCLUSION_TOP_DRIFT_HEIGHTS*h_base or
-                    top_speed >= OCCLUSION_STATIC_TOP_SPEED*h_base):
-                return
+        def eligible(y2_base, h_base):
+            return (height <= CROSSING_CLIP_SHRINK_RATIO*h_base+1e-9 and
+                    (y2_base-py) >= OCCLUSION_BOTTOM_SHARE*(h_base-height)-1e-9 and
+                    y1_span <= OCCLUSION_TOP_DRIFT_HEIGHTS*h_base and
+                    x_span <= OCCLUSION_TOP_DRIFT_HEIGHTS*h_base and
+                    top_speed < OCCLUSION_STATIC_TOP_SPEED*h_base)
+        for b in self._corroborated_pairs(earlier):
+            y2_base, h_base = b[2], b[3]
+            if not eligible(y2_base, h_base):
+                continue
             unclipped_y2 = y1+h_base
             if not math.isfinite(unclipped_y2):
-                return
+                continue
             # Orientation-agnostic counterfactual: only suppress when restoring the
             # pre-occlusion height places the vehicle's rear back behind the line.
             if self.side((px, unclipped_y2)) < 0:
                 key = (h_base, y2_base)
                 if best_key is None or key > best_key:
                     best_key = key
-                    best_pair = pair
-        for b in self._corroborated_pairs(earlier):
-            consider(b[2], b[3], b)
+                    best_pair = b
         saved = state.get("clip_baselines")
         if saved is not None:
             h_min = max(
@@ -583,12 +958,33 @@ class VehicleWaits:
                 x_span/OCCLUSION_TOP_DRIFT_HEIGHTS,
                 top_speed/OCCLUSION_STATIC_TOP_SPEED,
             )
-            for y2_base, h_base in saved.iter_crossing_candidates(h_min, rear_min):
-                if best_key is not None and (h_base, y2_base) <= best_key:
-                    break
-                consider(y2_base, h_base, None)
-                if best_key == (h_base, y2_base):
-                    break
+            rear_floor = py-OCCLUSION_BOTTOM_SHARE*height-1e-9-_rear_err(py, height)
+            sky_h, sky_y2, lo, hi = saved.crossing_slice(h_min, rear_floor)
+            if hi >= lo:
+                # For a straight calibrated stop line (side(px, py) >= 0 and h_base >= height),
+                # if the tallest skyline baseline in [lo, hi] clears the line, every shorter
+                # baseline in [lo, hi] clears it too.
+                top_h = sky_h[hi]
+                top_y2 = y1+top_h
+                top_behind = self.side((px, top_y2)) < 0 if (top_h >= height and math.isfinite(top_y2)) else None
+                if top_behind is not False:
+                    for idx in range(hi, lo-1, -1):
+                        h_base, y2_base = sky_h[idx], sky_y2[idx]
+                        if best_key is not None and (h_base, y2_base) <= best_key:
+                            break
+                        if not eligible(y2_base, h_base):
+                            continue
+                        if idx == hi and top_behind is not None:
+                            behind = top_behind
+                        else:
+                            unclipped_y2 = y1+h_base
+                            if not math.isfinite(unclipped_y2):
+                                continue
+                            behind = self.side((px, unclipped_y2)) < 0
+                        if behind:
+                            best_key = (h_base, y2_base)
+                            best_pair = None
+                        break
         return (best_key[0], best_pair) if best_key is not None else None
 
     def _pending_crossing_confirmed(self, pending, observation):
@@ -624,7 +1020,7 @@ class VehicleWaits:
             pending["recovered"] = 0
             if self._pending_crossing_confirmed(pending, observation):
                 self._cross(row, dict(pending["from"], phase=prev_obs["phase"]), observation, phase, timestamp, cycle_id)
-                state["pending_crossing"] = state["clip_baselines"] = None
+                self._clear_clip_state(state)
                 return True
             return False
         if self.side(prev_obs["point"]) < 0 <= self.side(observation.point):
@@ -641,7 +1037,7 @@ class VehicleWaits:
                     state["pending_crossing"] = {"from": prev_obs, "h_base": h_base, "recovered": 0}
                 return False
             self._cross(row, prev_obs, observation, phase, timestamp, cycle_id)
-            state["clip_baselines"] = None
+            self._clear_clip_state(state)
             return True
         if continuing:
             self._refresh_clip_baselines(state, observation, timestamp, prev_obs)
@@ -723,11 +1119,11 @@ class VehicleWaits:
                             state, prev_obs, observation, phase, timestamp, sequence, cycle_id,
                             False, continuing, keep_pending=native_exit)
                     else:
-                        state["pending_crossing"] = state["clip_baselines"] = None
+                        self._clear_clip_state(state)
                     if crossed_now:
                         self._clear_native_exit(state)
                     elif not native_exit:
-                        state["pending_crossing"] = state["clip_baselines"] = None
+                        self._clear_clip_state(state)
                         row.update(completed=True,completed_at=timestamp,tracking_state="EXITED",right_censored=False);self.work+=1
                     else:
                         if not (in_native_exit and step_continuous):
@@ -739,11 +1135,11 @@ class VehicleWaits:
                             geom = self._valid_box_geometry(observation)
                             if geom is not None:
                                 state["last_valid_box"] = (timestamp, geom[0], geom[1], geom[2])
-                            self._record_history(state, prev_obs, observation, timestamp)
+                            self._record_history(state, prev_obs, observation, timestamp, step_continuous)
                         state["stop_candidate"] = state["move_candidate"] = None
                         if timestamp-state["exit_candidate"] >= self.policy.exit_persistence_sec-1e-8:
                             row.update(completed=True,completed_at=state["exit_candidate"],tracking_state="EXITED",right_censored=False);self.work+=1
-                            state["pending_crossing"] = state["clip_baselines"] = None
+                            self._clear_clip_state(state)
                             self._clear_native_exit(state)
                         else:
                             row["tracking_state"] = "EXIT_PENDING"
@@ -779,7 +1175,7 @@ class VehicleWaits:
                         state, prev_obs, observation, phase, timestamp, sequence, cycle_id,
                         valid_motion, continuing, keep_pending=True)
                 else:
-                    state["pending_crossing"] = state["clip_baselines"] = None
+                    self._clear_clip_state(state)
             if valid_motion:
                 speed = observation.speed_mps
                 if not state["stopped"]:
@@ -810,7 +1206,7 @@ class VehicleWaits:
                 geom = self._valid_box_geometry(observation)
                 if geom is not None:
                     state["last_valid_box"] = (timestamp, geom[0], geom[1], geom[2])
-                self._record_history(state, prev_obs, observation, timestamp)
+                self._record_history(state, prev_obs, observation, timestamp, crossing_continuous)
             state["previous"] = {"time": timestamp, "sequence": sequence,
                 "phase": str(phase), "cycle": cycle_id, "valid_motion": valid_motion,
                 "point": observation.point}
@@ -821,7 +1217,7 @@ class VehicleWaits:
                 continue
             if identity not in present and not row["completed"]:
                 row["tracking_state"] = "LOST"
-                state["pending_crossing"] = state["clip_baselines"] = None
+                self._clear_clip_state(state)
                 exit_last = state.get("exit_last") if native_exit else None
                 last_observed = max(row["last_seen"], exit_last["time"]) if exit_last is not None else row["last_seen"]
                 if timestamp-last_observed > self.policy.association_gap_sec:
@@ -1095,7 +1491,8 @@ class VehicleWaits:
         state["previous"] = dict(state["previous"], handoff=True)
         state["history"].clear()
         state["stopped"] = False; state["stop_candidate"] = state["move_candidate"] = None
-        state["pending_crossing"] = state["clip_baselines"] = state["last_valid_box"] = None
+        self._clear_clip_state(state)
+        state["last_valid_box"] = None
         self._clear_native_exit(state)
         native = {"epoch": new[0], "local_id": new[1]}
         # Added on the first link only, so rows of unchanged runs keep their schema.
@@ -1114,7 +1511,8 @@ class VehicleWaits:
                 self._flag(row, reason)
                 state["previous"] = None
                 state["stop_candidate"] = state["move_candidate"] = None
-                state["pending_crossing"] = state["clip_baselines"] = state["last_valid_box"] = None
+                self._clear_clip_state(state)
+                state["last_valid_box"] = None
                 self._clear_native_exit(state)
                 if "history" in state:state["history"].clear()
                 row["tracking_state"] = "UNKNOWN"

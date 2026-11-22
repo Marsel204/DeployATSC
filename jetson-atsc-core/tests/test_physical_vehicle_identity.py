@@ -1447,9 +1447,10 @@ def test_sustained_bottom_clip_requires_geometric_recovery_before_clearing_ancho
 
 
 def test_sustained_stationary_jitter_per_frame_cost_stays_bounded():
-    """Sol S12: 6 stopped vehicles jittering < 1 px (1D horizontal and 3D x/y2/h) for
-    60 s (1800 frames at 30 FPS) keep per-frame and crossing wait processing bounded,
-    while slow unidirectional drift compacts all four boundary heaps."""
+    """Sol S12/S13: 6 stopped vehicles jittering < 1 px (1D, 3D, Pareto) for 60 s
+    keep stationary, clipped, and genuine-departure crossing times bounded with O(1)
+    skyline stop-line checks; slow drift compacts column arrays; growing height evicts
+    dominated entries from live indexes."""
     waits = book(side=lambda p: 270.-p[1])
     tail_ms = []
     for f in range(1800):
@@ -1491,14 +1492,106 @@ def test_sustained_stationary_jitter_per_frame_cost_stays_bounded():
     assert cross_3d_ms < 10.0, f'3D jitter crossing frame time {cross_3d_ms:.2f} ms exceeds budget'
     assert all(not r['crossed_stop_line'] for r in waits_3d.records.values())
 
-    # Slow unidirectional drift: all four boundary heaps stay compacted relative to live entries.
+    # Sol S12: genuine departure after 60 s of Pareto skyline accumulation (900 skyline points/track)
+    # must check only the tallest eligible baseline on the straight stop line, not scan all 900.
+    side_calls = [0]
+    def counted_side(p):
+        side_calls[0] += 1
+        return 275.-p[1]
+    waits_dep = book(side=counted_side)
+    for f in range(1800):
+        step = f//2
+        h = 60.-0.001*step
+        y2 = 276.-0.0004*step
+        obs = [car(1+k, y2, x=100.+80.*k, height=h, speed=0.) for k in range(6)]
+        waits_dep.observe(obs, 'RED', f/FPS, f+1, 1, unassigned=())
+    assert len(waits_dep.active[(0, 1)]['clip_baselines']._sky_h) >= 850
+    side_calls[0] = 0
+    started = time.perf_counter()
+    # y1=214 stays within drift gate of all 900 baselines while unclipped y1+60=274 clears y=275.
+    waits_dep.observe([car(1+k, 262., x=100.+80.*k, height=48., speed=1.) for k in range(6)],
+                      'GREEN', 1800/FPS, 1801, 1, unassigned=())
+    depart_ms = (time.perf_counter()-started)*1000.
+    assert depart_ms < 15.0, f'genuine departure took {depart_ms:.2f} ms'
+    assert side_calls[0] <= 120, f'genuine departure scanned skyline ({side_calls[0]} side calls)'
+    assert all(r['tracking_state'] == 'SERVED' and r['crossed_stop_line'] for r in waits_dep.records.values())
+
+    # Sol S13: growing height with fixed top/center evicts dominated live baselines (retaining 1/track).
+    waits_grow = book(side=lambda p: 270.-p[1])
+    for f in range(1800):
+        h = 60.+0.88*(f/1799.)
+        y2 = 220.+h
+        obs = [car(1+k, y2, x=100.+80.*k, height=h, speed=0.) for k in range(6)]
+        waits_grow.observe(obs, 'RED', f/FPS, f+1, 1, unassigned=())
+    for k in range(6):
+        saved = waits_grow.active[(0, 1+k)]['clip_baselines']
+        assert len(saved) == 1 and len(saved._x) == 1
+
+    # Sol S13: taller baseline also evicts previously accumulated spatially-spread dominated entries.
+    waits_spread = book(side=lambda p: 270.-p[1])
+    seq_spread = ([obs for i in range(40) for obs in [[car(1, 280., x=150.+0.02*i, height=60., speed=0.)]]*2]
+                  + [[car(1, 290., x=150.4, height=70., speed=0.)] for _ in range(12)])
+    play(waits_spread, seq_spread, phase='RED')
+    saved_spread = waits_spread.active[(0, 1)]['clip_baselines']
+    assert len(saved_spread) == 1 and saved_spread._sky_h[0] == 70.
+    assert saved_spread._h[saved_spread._root.idxs[0]] == 70.
+
+    # Slow unidirectional drift: column arrays stay compacted relative to live count.
     waits_creep = book(side=lambda p: 270.-p[1])
     for f in range(1850):
         waits_creep.observe([car(1, 280., x=100.+0.02*f, height=60., speed=0.)],
                             'RED', f/FPS, f+1, 1, unassigned=())
-    saved = waits_creep.active[(0, 1)].get('clip_baselines')
-    assert saved is not None and len(saved.live) > 0
-    assert max(len(saved.x_hi), len(saved.x_lo), len(saved.y_hi), len(saved.y_lo)) <= 4*max(len(saved.live), 64)
+    saved_creep = waits_creep.active[(0, 1)].get('clip_baselines')
+    assert saved_creep is not None and len(saved_creep) > 0
+    assert saved_creep._root.count == len(saved_creep)
+    assert len(saved_creep._x) <= 4*max(len(saved_creep), 64)
+
+
+def test_missed_frame_clears_crossing_clip_evidence_but_preserves_fragment_history():
+    """Sol S14: a missed frame clears saved clip baselines AND crossing clip history so
+    pre-gap boxes cannot suppress a post-gap crossing, while gap-tolerant motion history
+    is still preserved for fragment continuation."""
+    waits = book(side=lambda p: 270.-p[1])
+    for f in range(5):
+        waits.observe([car(1, 280., x=150., height=60., speed=0.)], 'RED', f/FPS, f+1, 1, unassigned=())
+    waits.observe([], 'RED', 5/FPS, 6, 1, unassigned=())  # one missed frame
+    waits.observe([car(1, 274., x=150., height=54., speed=0.)], 'RED', 6/FPS, 7, 1, unassigned=())
+    waits.observe([car(1, 268., x=150., height=48., speed=0.)], 'RED', 7/FPS, 8, 1, unassigned=())
+    row = only_row(waits)
+    assert row['tracking_state'] == 'SERVED' and row['crossed_stop_line']
+
+    # Fragment matching across a brief missed frame still retains gap-tolerant motion history.
+    waits_link = book(side=lambda p: -1.)
+    for f in range(5):
+        waits_link.observe([car(1, 200.+3.*f, x=150., height=60., speed=3.)], 'GREEN', f/FPS, f+1, 1, unassigned=())
+    waits_link.observe([], 'GREEN', 5/FPS, 6, 1, unassigned=())  # missed frame inside max_gap_sec
+    waits_link.observe([car(1, 200.+3.*6, x=150., height=60., speed=3.)], 'GREEN', 6/FPS, 7, 1, unassigned=())
+    assert len(waits_link.active[(0, 1)]['history']) == 6
+    waits_link.observe([], 'GREEN', 7/FPS, 8, 1, unassigned=())
+    waits_link.observe([car(2, 200.+3.*8, x=150., height=60., speed=3.)], 'GREEN', 8/FPS, 9, 1, unassigned=())
+    assert len(waits_link.records) == 1 and only_row(waits_link).get('identity_links')
+
+
+def test_bottom_clip_rear_share_cutoff_uses_original_float_comparison():
+    """Sol S15: conservative skyline bounds must retain boundary candidates and apply the
+    exact original ``(y2_base - py) >= 0.7 * (h_base - height) - 1e-9`` comparison."""
+    import struct
+    f32 = lambda v: struct.unpack('f', struct.pack('f', v))[0]
+    y2_base, h_base = 275.0, f32(61.1)
+    py_cross, h_cross = 265.8860023508535, f32(48.08)
+    # Confirm this coordinate set distinguishes original vs rearranged float evaluation.
+    assert (y2_base-py_cross) >= 0.7*(h_base-h_cross)-1e-9
+    assert not ((y2_base-0.7*h_base) >= (py_cross-0.7*h_cross)-1e-9)
+    waits = book(side=lambda p: 270.-p[1])
+    y1_mid = py_cross-h_cross
+    # Establish baseline (y2_base, h_base), then age it out of clip_history into _ClipBaselines.
+    seq = ([[car(1, y2_base, x=150., height=h_base, speed=0.)] for _ in range(10)]
+           + [[car(1, y1_mid+55., x=150., height=55., speed=0.)] for _ in range(12)]
+           + [[car(1, py_cross, x=150., height=h_cross, speed=0.)]])
+    play(waits, seq, phase='RED')
+    row = only_row(waits)
+    assert not row['completed'] and not row['crossed_stop_line']
+    assert waits.active[(0, 1)].get('pending_crossing') is not None
 
 
 def test_pending_crossing_confirms_across_consecutive_exit_pending_outside_frames():
