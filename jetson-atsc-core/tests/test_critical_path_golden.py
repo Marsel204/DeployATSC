@@ -12,15 +12,23 @@ def without_tracking_profile(value):
     return value
 
 
-# The baseline predates RunPolicy.fragment_continuation. Only its default
-# (off) value is dropped, from the policy object and from JSON embedded in
-# CSV cells; an enabled switch would still differ. The scripted clip's tracks
-# are compared in full, so the default must leave every row unchanged.
+# The baseline predates RunPolicy.fragment_continuation and
+# RunPolicy.exit_persistence_sec. Only their default (off) values are dropped,
+# from the policy object and from JSON embedded in CSV cells; an enabled switch
+# would still differ. The scripted clip's tracks are compared in full, so the
+# defaults must leave every row unchanged.
 def without_default_continuation(value):
     if isinstance(value,dict):
-        return {k:without_default_continuation(v) for k,v in value.items() if not (k=='fragment_continuation' and v is False)}
+        return {k:without_default_continuation(v) for k,v in value.items()
+                if not (k=='fragment_continuation' and v is False)
+                and not (k=='exit_persistence_sec' and type(v) in (int,float) and v==0)}
     if isinstance(value,list):return [without_default_continuation(v) for v in value]
-    if isinstance(value,str):return value.replace(', ""fragment_continuation"": false','').replace(', "fragment_continuation": false','')
+    if isinstance(value,str):
+        for token in (', ""fragment_continuation"": false', ', "fragment_continuation": false',
+                      ', ""exit_persistence_sec"": 0.0', ', "exit_persistence_sec": 0.0',
+                      ', ""exit_persistence_sec"": 0', ', "exit_persistence_sec": 0'):
+            value=value.replace(token,'')
+        return value
     return value
 
 

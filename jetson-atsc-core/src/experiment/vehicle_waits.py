@@ -32,6 +32,9 @@ OCCLUSION_MAX_GAP_SEC = .35
 OCCLUSION_TOP_GATE_HEIGHTS = .25
 OCCLUSION_BOTTOM_MARGIN_HEIGHTS = .15
 OCCLUSION_MAX_RECOVERY_RATIO = 1.2
+# A stationary vehicle whose bottom edge is clipped upward by a foreground
+# occluder can cross the stop line while its unclipped rear stays behind it.
+CROSSING_CLIP_SHRINK_RATIO = .85
 # Another observed box (any class, size or ID state) covering this much of the
 # smaller of it and the newborn, with footpoints this close (in smaller-box
 # heights), may be the same body or its neighbour: the link is ambiguous.
@@ -228,6 +231,64 @@ class VehicleWaits:
         self.active[identity] = state
         return state
 
+    def _bottom_clipped_crossing(self, state, observation, timestamp):
+        """Return pre-occlusion baseline height when a stop-line crossing is explained
+        purely by bottom-edge occlusion on a stationary vehicle, else None."""
+        history = state.get("history")
+        previous = state["previous"]
+        if not history or len(history) < 2 or previous is None or history[-1][0] != previous["time"]:
+            return None
+        if observation.bbox is not None and _raw_box(observation.bbox) is None:
+            return None
+        height = _height(observation)
+        if height is None:
+            return None
+        try:px, py = float(observation.point[0]), float(observation.point[1])
+        except (TypeError, ValueError, IndexError, OverflowError, KeyError):return None
+        if not all(map(math.isfinite, (px, py, py-height))):
+            return None
+        earlier = list(history)
+        # Require two consecutive prior sightings supporting the taller baseline.
+        baseline = max((a if a[3] <= b[3] else b for a, b in zip(earlier, earlier[1:])),
+                       key=lambda sample: sample[3])
+        _, _, y2_base, h_base = baseline
+        if height > CROSSING_CLIP_SHRINK_RATIO*h_base:
+            return None
+        y1 = py-height
+        unclipped_y2 = y1+h_base
+        if not math.isfinite(unclipped_y2):
+            return None
+        # Orientation-agnostic counterfactual: only suppress when restoring the
+        # pre-occlusion height places the vehicle's rear back behind the line.
+        if not (self.side((px, unclipped_y2)) < 0):
+            return None
+        if (y2_base-py) < OCCLUSION_BOTTOM_SHARE*(h_base-height):
+            return None
+        samples = earlier+[(timestamp, px, py, height)]
+        y1_vals = [s[2]-s[3] for s in samples]
+        x_vals = [s[1] for s in samples]
+        if (max(y1_vals)-min(y1_vals) > OCCLUSION_TOP_DRIFT_HEIGHTS*h_base or
+                max(x_vals)-min(x_vals) > OCCLUSION_TOP_DRIFT_HEIGHTS*h_base):
+            return None
+        motion = _fit(samples)
+        if motion is None or math.hypot(motion[0], motion[2]) >= OCCLUSION_STATIC_TOP_SPEED*h_base:
+            return None
+        return h_base
+
+    def _pending_crossing_confirmed(self, pending, observation):
+        """True once a clipped track's unclipped rear also clears the stop line."""
+        if observation.bbox is not None and _raw_box(observation.bbox) is None:
+            return False
+        height = _height(observation)
+        if height is None:
+            return False
+        try:px, py = float(observation.point[0]), float(observation.point[1])
+        except (TypeError, ValueError, IndexError, OverflowError, KeyError):return False
+        unclipped_y2 = py-height+pending["h_base"]
+        if not all(map(math.isfinite, (px, py, py-height, unclipped_y2))):
+            return False
+        return bool(self.side(observation.point) >= 0 and self.side((px, unclipped_y2)) >= 0)
+
     def _cross(self, row, previous, observation, phase, timestamp, cycle_id):
         crossing_phase = str(phase) if previous["phase"] != "UNKNOWN" else "UNKNOWN"
         attributed = cycle_id if crossing_phase != "UNKNOWN" else None
@@ -288,20 +349,49 @@ class VehicleWaits:
                 if state is None and continuing:self.outside_seen[identity] = timestamp
                 if state and not state["row"]["completed"]:
                     row=state["row"];previous=state["previous"]
-                    crossing=bool(previous and not previous.get("handoff") and previous["sequence"]==sequence-1 and
-                        0<timestamp-previous["time"]<=self.policy.max_gap_sec and
-                        self.side(previous["point"])<0<=self.side(observation.point))
-                    if crossing:self._cross(row,previous,observation,phase,timestamp,cycle_id)
-                    else:
-                        row.update(completed=True,completed_at=timestamp,tracking_state="EXITED",right_censored=False);self.work+=1
+                    exiting_continuous = bool(state.get("exit_candidate") is None and previous and
+                        not previous.get("handoff") and previous["sequence"]==sequence-1 and
+                        0<timestamp-previous["time"]<=self.policy.max_gap_sec)
+                    crossed_now = False
+                    if exiting_continuous:
+                        pending = state.get("pending_crossing")
+                        if pending is not None:
+                            if self._pending_crossing_confirmed(pending, observation):
+                                self._cross(row, dict(pending["from"], phase=previous["phase"]), observation, phase, timestamp, cycle_id)
+                                crossed_now = True
+                        elif self.side(previous["point"])<0<=self.side(observation.point):
+                            if not (continuing and self._bottom_clipped_crossing(state, observation, timestamp) is not None):
+                                self._cross(row,previous,observation,phase,timestamp,cycle_id)
+                                crossed_now = True
+                    state["pending_crossing"] = None
+                    if not crossed_now:
+                        if self.policy.exit_persistence_sec <= 0:
+                            row.update(completed=True,completed_at=timestamp,tracking_state="EXITED",right_censored=False);self.work+=1
+                        else:
+                            if (state.get("exit_candidate") is None or
+                                    state.get("exit_last_seq") != sequence-1 or
+                                    not 0 < timestamp-state.get("exit_last_time", timestamp) <= self.policy.max_gap_sec+1e-9):
+                                state["exit_candidate"] = timestamp
+                            state["exit_last_seq"] = sequence
+                            state["exit_last_time"] = timestamp
+                            state["stop_candidate"] = state["move_candidate"] = None
+                            if timestamp-state["exit_candidate"] >= self.policy.exit_persistence_sec-1e-8:
+                                row.update(completed=True,completed_at=state["exit_candidate"],tracking_state="EXITED",right_censored=False);self.work+=1
+                                state["exit_candidate"] = state["exit_last_seq"] = state["exit_last_time"] = None
+                            else:
+                                row["tracking_state"] = "EXIT_PENDING"
                 continue
             if state is None:
                 state = self._new(observation, timestamp, sequence, segment)
                 if seen_before:state["row"]["left_censored"] = True
+            was_exit_pending = state.get("exit_candidate") is not None
+            if was_exit_pending:
+                state["exit_candidate"] = state["exit_last_seq"] = state["exit_last_time"] = None
             row = state["row"]; previous = state["previous"]
             valid_motion = observation.velocity_valid and observation.speed_mps is not None
-            # A heuristic ID handoff is never continuous, even on adjacent frames.
-            continuous = previous is not None and not previous.get("handoff") and previous["sequence"] == sequence-1 and 0 < timestamp-previous["time"] <= self.policy.max_gap_sec
+            # A heuristic ID handoff or outside-ROI dip is never continuous, even on adjacent frames.
+            continuous = (not was_exit_pending and previous is not None and not previous.get("handoff") and
+                          previous["sequence"] == sequence-1 and 0 < timestamp-previous["time"] <= self.policy.max_gap_sec)
             if previous is not None:
                 interval = {"start": previous["time"], "end": timestamp,
                             "phase": previous["phase"] if continuous else "UNKNOWN",
@@ -313,9 +403,21 @@ class VehicleWaits:
                 row["intervals"].append(interval); self.work+=1; self._account(row, interval)
                 if not continuous:
                     self._flag(row, "observation_gap")
-                    state["stop_candidate"] = state["move_candidate"] = None
-                if continuous and self.side(previous["point"]) < 0 <= self.side(observation.point):
-                    self._cross(row,previous,observation,phase,timestamp,cycle_id)
+                    state["stop_candidate"] = state["move_candidate"] = state["pending_crossing"] = None
+                else:
+                    pending = state.get("pending_crossing")
+                    if pending is not None:
+                        if self.side(observation.point) < 0:
+                            state["pending_crossing"] = None
+                        elif self._pending_crossing_confirmed(pending, observation):
+                            self._cross(row, dict(pending["from"], phase=previous["phase"]), observation, phase, timestamp, cycle_id)
+                            state["pending_crossing"] = None
+                    elif self.side(previous["point"]) < 0 <= self.side(observation.point):
+                        clipped_base = self._bottom_clipped_crossing(state, observation, timestamp) if continuing else None
+                        if clipped_base is not None:
+                            state["pending_crossing"] = {"from": previous, "h_base": clipped_base}
+                        else:
+                            self._cross(row,previous,observation,phase,timestamp,cycle_id)
             if valid_motion:
                 speed = observation.speed_mps
                 if not state["stopped"]:
@@ -344,10 +446,11 @@ class VehicleWaits:
             row["last_seen"] = timestamp
             if continuing:
                 history = state.setdefault("history", deque(maxlen=HISTORY_SAMPLES))
-                recent = (previous is not None and not previous.get("handoff") and
+                recent = (not was_exit_pending and previous is not None and not previous.get("handoff") and
                           0 < timestamp-previous["time"] <= self.policy.max_gap_sec+1e-9)
                 height = _height(observation)
-                px, py = float(observation.point[0]), float(observation.point[1])
+                try:px, py = float(observation.point[0]), float(observation.point[1])
+                except (TypeError, ValueError, IndexError, OverflowError, KeyError):px = py = float("nan")
                 valid_sample = height is not None and all(map(math.isfinite, (px, py, py-height)))
                 if not recent or not valid_sample:history.clear()
                 if valid_sample:
@@ -365,6 +468,7 @@ class VehicleWaits:
                 if timestamp-row["last_seen"] > self.policy.association_gap_sec:
                     row.update(completed=True, completed_at=timestamp);self.work+=1
                     self._flag(row, "tracking_lost")
+                    state["pending_crossing"] = state["exit_candidate"] = state["exit_last_seq"] = state["exit_last_time"] = None
 
     def _own_segments(self, identity, state):
         """Rows this raw ID itself started; an alias of another row started none."""
@@ -427,10 +531,11 @@ class VehicleWaits:
             last_time, x, y, height = history[-1]
             if last_time != previous["time"]:continue
             y1_last = y-height
-            # A fragment seen in fewer than MIN_FIT_SAMPLES frames has no position or
-            # size consistency to continue (junction f475: a one-frame edge sliver),
-            # but its last box still vetoes extended occlusion-tail links.
-            if len(history) < MIN_FIT_SAMPLES or len(row.get("identity_links", ())) >= MAX_LINKS_PER_ROW:
+            # A fragment seen in fewer than MIN_FIT_SAMPLES frames, a link-capped row, or
+            # a vehicle already observed stepping outside the ROI (exit_pending) cannot
+            # continue onto a newborn inside the ROI, but still vetoes occlusion-tail links.
+            if (len(history) < MIN_FIT_SAMPLES or len(row.get("identity_links", ())) >= MAX_LINKS_PER_ROW or
+                    state.get("exit_candidate") is not None):
                 if dt <= OCCLUSION_MAX_GAP_SEC+1e-9:
                     static_vetoes.append((identity, x, y, y1_last, height))
                 continue
@@ -624,6 +729,7 @@ class VehicleWaits:
         state["previous"] = dict(state["previous"], handoff=True)
         state["history"].clear()
         state["stopped"] = False; state["stop_candidate"] = state["move_candidate"] = None
+        state["pending_crossing"] = state["exit_candidate"] = state["exit_last_seq"] = state["exit_last_time"] = None
         native = {"epoch": new[0], "local_id": new[1]}
         # Added on the first link only, so rows of unchanged runs keep their schema.
         row.setdefault("native_ids", [{"epoch": own[0], "local_id": own[1]}]).append(native)
@@ -641,6 +747,7 @@ class VehicleWaits:
                 self._flag(row, reason)
                 state["previous"] = None
                 state["stop_candidate"] = state["move_candidate"] = None
+                state["pending_crossing"] = state["exit_candidate"] = state["exit_last_seq"] = state["exit_last_time"] = None
                 if "history" in state:state["history"].clear()
                 row["tracking_state"] = "UNKNOWN"
 

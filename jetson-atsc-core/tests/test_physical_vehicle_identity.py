@@ -1078,3 +1078,197 @@ def test_sol_s5_s7_stationary_flicker_pairs_are_not_overcharged_in_pair_budget(w
                   'RED', 10/FPS, 11, 1, unassigned=())
     assert waits.continuation_skipped_frames == 0
     assert len(_links(waits)) == 46
+
+
+# --- bottom-edge occlusion stop-line crossing resilience ----------------------------
+
+def test_bottom_clipped_stationary_car_does_not_falsely_cross_and_links_occlusion_tail():
+    """#407->#733 / #300->#755 pattern: bottom-edge occlusion clipping a stationary car
+    upward past the stop line must not prematurely complete it as SERVED; the open row
+    then continues via A1's occlusion-tail gate and crosses once it genuinely departs."""
+    stop_y = 270.
+    waits = book(side=lambda p: stop_y-p[1])
+    # Stationary car at y1=237, baseline h=55 (y2=292, behind stop_y=270), clipped upward to y2=264.
+    frames = [[car(407, 292., x=185., height=55., speed=0.)] for _ in range(4)]
+    for h in (48., 41., 36., 31., 28., 26.):  # y2 crosses 270 when h=31 (y2=268 < 270)
+        frames.append([car(407, 237.+h, x=185.5, height=h, speed=0.)])
+    end = play(waits, frames, phase='RED')
+    row = only_row(waits)
+    assert not row['completed'] and not row['crossed_stop_line']
+    assert row['tracking_state'] != 'SERVED'
+
+    # Car vanishes behind occluder for 6 frames (dt=0.233 s), reappears as #733 still clipped,
+    # then recovers to full height behind the stop line and genuinely departs upward.
+    recovery = [[]]*6
+    recovery += [[car(733, 266., x=183., height=29., speed=0.)]]
+    recovery += [[car(733, 295., x=183., height=58., speed=0.)] for _ in range(5)]
+    for i in range(1, 12):
+        recovery.append([car(733, 295.-4.*i, x=183., height=58., speed=2.)])  # genuine upward move
+    play(waits, recovery, start=end, phase='GREEN')
+    row = only_row(waits)
+    assert _links(waits) == [(407, 733)]
+    assert row['identity_links'][0]['rule'] == 'mutually_unique_uncontested_occlusion_tail_gate'
+    assert row['crossed_stop_line'] and row['tracking_state'] == 'SERVED'
+    assert row['crossing_phase'] == 'GREEN'
+    assert row['crossing_at'] > (end+11)/FPS
+
+
+def test_bottom_clipped_stationary_car_recovers_behind_line_and_keeps_accruing_wait():
+    """#232 (f134) pattern: temporary bottom-edge clip past the stop line cancels cleanly
+    when the occlusion clears and the footpoint returns behind the line, preserving RED wait."""
+    stop_y = 270.
+    waits = book(side=lambda p: stop_y-p[1])
+    frames = [[car(232, 278., x=162., height=63., speed=0.)] for _ in range(5)]
+    for h in (60., 56., 52., 48., 51., 56.):  # y1=215 -> y2 dips to 263 (< 270) then recovers to 271 (> 270)
+        frames.append([car(232, 215.+h, x=162., height=h, speed=0.)])
+    # Remains stopped behind the line on RED for 1.0 s (30 frames), then departs on GREEN.
+    frames += [[car(232, 278., x=162., height=63., speed=0.)] for _ in range(30)]
+    end_red = play(waits, frames, phase='RED')
+    row = only_row(waits)
+    assert not row['completed'] and not row['crossed_stop_line']
+    assert row['red_wait_sec'] >= 1.0
+
+    depart = [[car(232, 278.-4.*i, x=162., height=63., speed=2.)] for i in range(1, 6)]
+    play(waits, depart, start=end_red, phase='GREEN')
+    assert row['crossed_stop_line'] and row['crossing_phase'] == 'GREEN'
+    assert row['crossing_at'] >= end_red/FPS
+
+
+def test_genuine_departures_still_cross_including_clipped_acceleration_and_downward_orientation():
+    """Genuine departures must never be dropped: slow unclipped upward moves, downward
+    crossings, isolated tall outliers, and clipped cars whose unclipped rear later clears."""
+    # 1. Slow genuine upward departure (both y1 and y2 advance across y=270).
+    waits_slow = book(side=lambda p: 270.-p[1])
+    slow = [[car(1, 286.-3.*i, x=150., height=55., speed=1.5)] for i in range(10)]
+    play(waits_slow, slow, phase='GREEN')
+    assert only_row(waits_slow)['crossed_stop_line']
+
+    # 2. Downward crossing (side = y - 200) with mild shrinkage is never suppressed.
+    waits_down = book(side=lambda p: p[1]-200.)
+    down = [[car(1, 190.+2.*i, x=150., height=60.-2.*i, speed=1.)] for i in range(8)]
+    play(waits_down, down, phase='GREEN')
+    assert only_row(waits_down)['crossed_stop_line']
+
+    # 3. Initially bottom-clipped stationary car that then drives forward while still
+    #    partially clipped confirms once its unclipped rear (y1 + h_base) clears the line.
+    waits_confirm = book(side=lambda p: 270.-p[1])
+    frames = [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(5)]
+    frames += [[car(1, 220.+45., x=150., height=45., speed=0.)]]  # clipped y2=265 (<270), y1+60=280 (>270)
+    end_clip = play(waits_confirm, frames, phase='RED')
+    row = only_row(waits_confirm)
+    assert not row['crossed_stop_line']
+    # Now car genuinely drives upward while height stays clipped at 45: y1 moves 220 -> 205 (y1+60=265 < 270).
+    drive = [[car(1, (220.-5.*i)+45., x=150., height=45., speed=2.)] for i in range(1, 5)]
+    play(waits_confirm, drive, start=end_clip, phase='GREEN')
+    assert row['crossed_stop_line'] and row['crossing_phase'] == 'GREEN'
+    assert row['crossing_evidence']['from_side'] < 0 <= row['crossing_evidence']['to_side']
+
+    # 4. Single isolated tall outlier frame cannot fabricate h_base to suppress a real crossing.
+    waits_outlier = book(side=lambda p: 270.-p[1])
+    heights = [50., 50., 80., 50., 50., 50.]
+    ys = [275., 274., 274., 273., 272., 269.]
+    outlier = [[car(1, y, x=150., height=h, speed=0.5)] for y, h in zip(ys, heights)]
+    play(waits_outlier, outlier, phase='GREEN')
+    assert only_row(waits_outlier)['crossed_stop_line']
+
+    # 5. Pending crossing clears on an observation gap (never synthesized across a gap).
+    waits_gap = book(side=lambda p: 270.-p[1])
+    end_gap = play(waits_gap, frames, phase='RED')
+    play(waits_gap, [[]] + [[car(1, 250., x=150., height=45., speed=2.)]], start=end_gap, phase='GREEN')
+    assert not only_row(waits_gap)['crossed_stop_line']
+
+
+# --- opt-in ROI boundary exit hysteresis (Idea C) -----------------------------------
+
+def test_exit_persistence_validation_default_off_and_persistent_isolation():
+    assert RunPolicy().exit_persistence_sec == 0.0
+    for bad in (True, False, -0.1, 5.1, float('nan'), float('inf'), '0.3'):
+        with pytest.raises(ValueError):
+            RunPolicy(exit_persistence_sec=bad)
+    assert RunPolicy(exit_persistence_sec=0.3).exit_persistence_sec == pytest.approx(0.3)
+
+    # PersistentVehicleWaits zeroes RunPolicy.exit_persistence_sec (uses IdentityPolicy only).
+    from src.experiment.identity_contracts import IdentityPolicy
+    from src.experiment.persistent_vehicle_waits import PersistentVehicleWaits
+    pwaits = PersistentVehicleWaits('run', RunPolicy(exit_persistence_sec=0.5), lambda p: -1., IdentityPolicy(mode='persistent_v1'))
+    assert pwaits.policy.exit_persistence_sec == 0.0
+
+
+def test_roi_exit_persistence_bridges_border_dips_without_splitting_or_accruing_wait():
+    """#350/#1429/#1468/#1924 pattern: brief border dips keep one vehicle row without
+    accruing outside wait; default-off (0 s) still splits immediately."""
+    def run_dip(exit_sec):
+        waits = VehicleWaits('run', RunPolicy(stop_persistence_sec=0, exit_persistence_sec=exit_sec), side=lambda p: -1.)
+        for i in range(5):
+            waits.observe([car(1, 120., speed=0.)], 'RED', i/FPS, i+1, 1)
+        # Dip outside ROI for 3 frames (0.10 s) while stopped on RED.
+        mid_states = []
+        for i in range(5, 8):
+            waits.observe([car(1, 120., speed=0., in_region=False)], 'RED', i/FPS, i+1, 1)
+            mid_states.append((waits.records['run:acquisition:0:1']['tracking_state'],
+                               waits.records['run:acquisition:0:1']['completed'],
+                               waits.active[(0, 1)].get('exit_candidate')))
+        # Return inside ROI for 5 more frames.
+        for i in range(8, 13):
+            waits.observe([car(1, 120., speed=0.)], 'RED', i/FPS, i+1, 1)
+        return waits, mid_states
+
+    off_waits, _ = run_dip(0.0)
+    assert set(off_waits.records) == {'run:acquisition:0:1', 'run:acquisition:0:1:segment-1'}
+    assert off_waits.records['run:acquisition:0:1']['tracking_state'] == 'EXITED'
+
+    on_waits, mid = run_dip(0.3)
+    assert list(on_waits.records) == ['run:acquisition:0:1']
+    assert all(state == 'EXIT_PENDING' and not done and cand == pytest.approx(5/FPS) for state, done, cand in mid)
+    row = only_row(on_waits)
+    assert not row['completed'] and row['tracking_state'] == 'STOPPED'
+    assert 'observation_gap' in row['quality_flags']
+    # Outside dip [4/FPS, 8/FPS] = 4/FPS s is unknown_sec, never fabricated red wait.
+    assert row['unknown_sec'] == pytest.approx(4/FPS)
+    assert row['red_wait_sec'] == pytest.approx(8/FPS)  # 4 intervals before + 4 intervals after
+
+
+def test_roi_exit_persistence_confirms_real_exits_preserves_exit_crossings_and_handles_gaps():
+    # 1. Real consecutive exit >= 0.30 s completes at exact first-outside timestamp; later return starts segment-1.
+    waits = VehicleWaits('run', RunPolicy(stop_persistence_sec=0, exit_persistence_sec=0.3), side=lambda p: -1.)
+    for i in range(3):
+        waits.observe([car(1, 120., speed=0.)], 'RED', i/FPS, i+1, 1)
+    for i in range(3, 12):  # 3..11 -> dt = 8/30 = 0.267 s < 0.30 s
+        waits.observe([car(1, 120., speed=0., in_region=False)], 'RED', i/FPS, i+1, 1)
+        assert not waits.records['run:acquisition:0:1']['completed']
+    waits.observe([car(1, 120., speed=0., in_region=False)], 'RED', 12/FPS, 13, 1)  # dt = 9/30 = 0.300 s
+    row = waits.records['run:acquisition:0:1']
+    assert row['completed'] and row['tracking_state'] == 'EXITED' and not row['right_censored']
+    assert row['completed_at'] == pytest.approx(3/FPS)
+    assert row['last_seen'] == pytest.approx(2/FPS)
+    # Re-entry after confirmed exit starts a new segment.
+    waits.observe([car(1, 120., speed=0., in_region=True)], 'RED', 20/FPS, 21, 1)
+    assert set(waits.records) == {'run:acquisition:0:1', 'run:acquisition:0:1:segment-1'}
+
+    # 2. Genuine stop-line crossing on the exit frame still completes immediately as SERVED.
+    waits_cross = VehicleWaits('run', RunPolicy(stop_persistence_sec=0, exit_persistence_sec=0.3), side=lambda p: p[1]-150.)
+    waits_cross.observe([car(1, 145., speed=2.)], 'GREEN', 0., 1, 1)
+    waits_cross.observe([car(1, 155., speed=2., in_region=False)], 'GREEN', 1/FPS, 2, 1)
+    assert only_row(waits_cross)['crossed_stop_line'] and only_row(waits_cross)['tracking_state'] == 'SERVED'
+
+    # 3. Missing-frame gap while outside restarts exit timer (requires consecutive outside evidence),
+    #    and vanishing before confirmation closes honestly as tracking_lost after association_gap_sec.
+    waits_gap = VehicleWaits('run', RunPolicy(stop_persistence_sec=0, exit_persistence_sec=0.3, association_gap_sec=0.5),
+                             side=lambda p: -1.)
+    waits_gap.observe([car(1, 120., speed=0.)], 'RED', 0., 1, 1)
+    waits_gap.observe([car(1, 120., speed=0., in_region=False)], 'RED', 1/FPS, 2, 1)
+    waits_gap.observe([], 'RED', 2/FPS, 3, 1)  # dropout while outside
+    waits_gap.observe([car(1, 120., speed=0., in_region=False)], 'RED', 10/FPS, 11, 1)  # gap > 0: restarts timer!
+    assert not only_row(waits_gap)['completed']
+    waits_gap.observe([], 'RED', 1.0, 31, 1)  # vanishes > association_gap_sec without confirming exit
+    row_gap = only_row(waits_gap)
+    assert row_gap['completed'] and 'tracking_lost' in row_gap['quality_flags']
+    assert row_gap['tracking_state'] == 'LOST'
+
+    # 4. An EXIT_PENDING track that vanishes does not link to a newborn inside the ROI.
+    waits_cont = book(exit_persistence_sec=0.3, side=lambda p: -1.)
+    end = play(waits_cont, [[car(1, 120., x=100., height=40., speed=0.)] for _ in range(5)])
+    waits_cont.observe([car(1, 120., x=100., height=40., speed=0., in_region=False)], 'RED', end/FPS, end+1, 1, unassigned=())
+    waits_cont.observe([car(2, 120., x=100., height=40., speed=0., in_region=True)], 'RED', (end+1)/FPS, end+2, 1, unassigned=())
+    assert _links(waits_cont) == []
+    assert len(waits_cont.records) == 2

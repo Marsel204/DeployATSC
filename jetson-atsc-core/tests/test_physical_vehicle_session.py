@@ -283,3 +283,40 @@ def test_default_off_and_persistent_sessions_skip_continuation_box_parsing(
     assert bool(obs_calls) is expect_obs
     assert bool(box_calls) is expect_box_parses
     assert bool(source_calls) is expect_box_parses
+
+
+def test_session_exit_persistence_bridges_border_dip_and_leaves_persistent_mode_unchanged(video_factory, tmp_path):
+    """RunPolicy.exit_persistence_sec reaches ObservationSession telemetry, keeps a
+    briefly dipping native vehicle on one row, and leaves persistent_v1 identical."""
+    class DippingDetector(ScriptedDetector):
+        def track(self, frames, timestamp=None):
+            index = round(timestamp*FPS)
+            # In run_payload, left polygon edge runs (20,30)->(10,220), so at y=60 edge is x~18.4:
+            # x=15 dips ~3.4 px outside while keeping an in-frame positive bbox [1,30,29,60].
+            x = 15 if index in (5, 6) else 25
+            vehicles = [scripted_vehicle(1, x, 60, timestamp, self.epoch)] if index < 12 else []
+            return [TrackedFrame(vehicles, withheld=(), epoch=self.epoch) for _ in frames]
+
+    def run_with(mode, exit_sec):
+        settings = run_payload(video_factory)
+        settings['policy'] = {'debounce_frames': 1, 'stop_persistence_sec': .1, 'exit_persistence_sec': exit_sec}
+        if mode == 'persistent_v1':
+            settings['vehicle_identity'] = {'mode': 'persistent_v1'}
+        class Manual(ObservationSession):
+            def _worker(self):self.ready.set()
+        session = Manual(settings, tmp_path/f'{mode}-{exit_sec}', detector_factory=DippingDetector, anfis_factory=FakeANFIS)
+        try:
+            assert session.telemetry()['policy']['exit_persistence_sec'] == pytest.approx(exit_sec)
+            for _ in range(14):session._process_batch()
+            snap = session.engine.snapshot(limit=100, evidence=True)
+            return {r['vehicle_id'].split(':', 1)[1]: {**r, 'vehicle_id': r['vehicle_id'].split(':', 1)[1]} for r in snap['vehicles']}
+        finally:
+            session.state = session.applied_state = 'stopped';session._cleanup()
+
+    native_off = run_with('native', 0.0)
+    native_on = run_with('native', 0.3)
+    assert set(native_off) == {'acquisition:0:1', 'acquisition:0:1:segment-1'}
+    assert set(native_on) == {'acquisition:0:1'}
+
+    # persistent_v1 rows must be identical regardless of RunPolicy.exit_persistence_sec.
+    assert run_with('persistent_v1', 0.0) == run_with('persistent_v1', 0.3)
