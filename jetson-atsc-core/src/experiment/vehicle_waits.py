@@ -12,6 +12,7 @@ from src.experiment.contracts import RunPolicy, vehicle_key
 # Opt-in native fragment continuation (RunPolicy.fragment_continuation).
 # Image-motion evidence is in pixels scaled by the vehicle's own box height.
 HISTORY_SAMPLES = 8          # recent observations of one raw ID, gaps <= max_gap_sec
+MAX_HISTORY_SAMPLES = 32     # cap when high FPS needs >8 samples to span MIN_FIT_SPAN_SEC
 MIN_FIT_SAMPLES = 3
 MIN_FIT_SPAN_SEC = .1
 MIN_MOVING_HEIGHTS_PER_SEC = .5     # image speed that counts as motion evidence
@@ -35,6 +36,7 @@ OCCLUSION_MAX_RECOVERY_RATIO = 1.2
 # A stationary vehicle whose bottom edge is clipped upward by a foreground
 # occluder can cross the stop line while its unclipped rear stays behind it.
 CROSSING_CLIP_SHRINK_RATIO = .85
+CROSSING_RECOVERY_RATIO = .95
 # Another observed box (any class, size or ID state) covering this much of the
 # smaller of it and the newborn, with footpoints this close (in smaller-box
 # heights), may be the same body or its neighbour: the link is ambiguous.
@@ -301,12 +303,17 @@ class VehicleWaits:
                    completed=True,completed_at=timestamp,right_censored=False,tracking_state="SERVED")
         if attributed is None:self._flag(row,"crossing_phase_unknown")
 
+    def _clear_native_exit(self, state):
+        if self.policy.exit_persistence_sec > 0:
+            state["exit_candidate"] = state["exit_last_seq"] = state["exit_last_time"] = state["exit_last_phase"] = None
+
     def observe(self, observations, phase, timestamp, sequence, cycle_id, unassigned=None):
         if sequence == self.last_sequence or (self.last_time is not None and timestamp <= self.last_time): return
         if self.first_sequence is None: self.first_sequence = sequence
         self.last_sequence = sequence; self.last_time = timestamp
         if phase == "UNKNOWN":cycle_id = None
         continuing = self.fragment_continuation and self.policy.fragment_continuation
+        native_exit = self.policy.exit_persistence_sec > 0
         if continuing:
             # Read more than once (prepasses, accounting): a one-shot iterator is materialized once.
             observations = observations if isinstance(observations, (list, tuple)) else list(observations)
@@ -349,23 +356,39 @@ class VehicleWaits:
                 if state is None and continuing:self.outside_seen[identity] = timestamp
                 if state and not state["row"]["completed"]:
                     row=state["row"];previous=state["previous"]
-                    exiting_continuous = bool(state.get("exit_candidate") is None and previous and
+                    in_native_exit = native_exit and state.get("exit_candidate") is not None
+                    exiting_continuous = bool(not in_native_exit and previous and
                         not previous.get("handoff") and previous["sequence"]==sequence-1 and
                         0<timestamp-previous["time"]<=self.policy.max_gap_sec)
+                    outside_continuous = bool(in_native_exit and state.get("exit_last_seq")==sequence-1 and
+                        0<timestamp-state.get("exit_last_time",timestamp)<=self.policy.max_gap_sec)
+                    step_continuous = exiting_continuous or outside_continuous
                     crossed_now = False
-                    if exiting_continuous:
+                    if step_continuous:
+                        prev_phase = state.get("exit_last_phase", "UNKNOWN") if in_native_exit else previous["phase"]
                         pending = state.get("pending_crossing")
                         if pending is not None:
                             if self._pending_crossing_confirmed(pending, observation):
-                                self._cross(row, dict(pending["from"], phase=previous["phase"]), observation, phase, timestamp, cycle_id)
+                                self._cross(row, dict(pending["from"], phase=prev_phase), observation, phase, timestamp, cycle_id)
                                 crossed_now = True
-                        elif self.side(previous["point"])<0<=self.side(observation.point):
-                            if not (continuing and self._bottom_clipped_crossing(state, observation, timestamp) is not None):
+                            else:
+                                pending["recovered"] = 0
+                        elif exiting_continuous and self.side(previous["point"])<0<=self.side(observation.point):
+                            clipped_base = self._bottom_clipped_crossing(state, observation, timestamp) if continuing else None
+                            if clipped_base is not None:
+                                if native_exit:
+                                    state["pending_crossing"] = {"from": previous, "h_base": clipped_base, "recovered": 0}
+                            else:
                                 self._cross(row,previous,observation,phase,timestamp,cycle_id)
                                 crossed_now = True
-                    state["pending_crossing"] = None
-                    if not crossed_now:
-                        if self.policy.exit_persistence_sec <= 0:
+                    else:
+                        state["pending_crossing"] = None
+                    if crossed_now:
+                        state["pending_crossing"] = None
+                        self._clear_native_exit(state)
+                    else:
+                        if not native_exit:
+                            state["pending_crossing"] = None
                             row.update(completed=True,completed_at=timestamp,tracking_state="EXITED",right_censored=False);self.work+=1
                         else:
                             if (state.get("exit_candidate") is None or
@@ -374,19 +397,21 @@ class VehicleWaits:
                                 state["exit_candidate"] = timestamp
                             state["exit_last_seq"] = sequence
                             state["exit_last_time"] = timestamp
+                            state["exit_last_phase"] = str(phase)
                             state["stop_candidate"] = state["move_candidate"] = None
                             if timestamp-state["exit_candidate"] >= self.policy.exit_persistence_sec-1e-8:
                                 row.update(completed=True,completed_at=state["exit_candidate"],tracking_state="EXITED",right_censored=False);self.work+=1
-                                state["exit_candidate"] = state["exit_last_seq"] = state["exit_last_time"] = None
+                                state["pending_crossing"] = None
+                                self._clear_native_exit(state)
                             else:
                                 row["tracking_state"] = "EXIT_PENDING"
                 continue
             if state is None:
                 state = self._new(observation, timestamp, sequence, segment)
                 if seen_before:state["row"]["left_censored"] = True
-            was_exit_pending = state.get("exit_candidate") is not None
+            was_exit_pending = native_exit and state.get("exit_candidate") is not None
             if was_exit_pending:
-                state["exit_candidate"] = state["exit_last_seq"] = state["exit_last_time"] = None
+                self._clear_native_exit(state)
             row = state["row"]; previous = state["previous"]
             valid_motion = observation.velocity_valid and observation.speed_mps is not None
             # A heuristic ID handoff or outside-ROI dip is never continuous, even on adjacent frames.
@@ -408,14 +433,25 @@ class VehicleWaits:
                     pending = state.get("pending_crossing")
                     if pending is not None:
                         if self.side(observation.point) < 0:
-                            state["pending_crossing"] = None
-                        elif self._pending_crossing_confirmed(pending, observation):
-                            self._cross(row, dict(pending["from"], phase=previous["phase"]), observation, phase, timestamp, cycle_id)
-                            state["pending_crossing"] = None
+                            pending["from"] = {"time": timestamp, "sequence": sequence,
+                                "phase": str(phase), "cycle": cycle_id, "valid_motion": valid_motion,
+                                "point": observation.point}
+                            height = _height(observation) if (observation.bbox is None or _raw_box(observation.bbox) is not None) else None
+                            if height is not None and height >= CROSSING_RECOVERY_RATIO*pending["h_base"]:
+                                pending["recovered"] = pending.get("recovered", 0)+1
+                                if pending["recovered"] >= 2:
+                                    state["pending_crossing"] = None
+                            else:
+                                pending["recovered"] = 0
+                        else:
+                            pending["recovered"] = 0
+                            if self._pending_crossing_confirmed(pending, observation):
+                                self._cross(row, dict(pending["from"], phase=previous["phase"]), observation, phase, timestamp, cycle_id)
+                                state["pending_crossing"] = None
                     elif self.side(previous["point"]) < 0 <= self.side(observation.point):
                         clipped_base = self._bottom_clipped_crossing(state, observation, timestamp) if continuing else None
                         if clipped_base is not None:
-                            state["pending_crossing"] = {"from": previous, "h_base": clipped_base}
+                            state["pending_crossing"] = {"from": previous, "h_base": clipped_base, "recovered": 0}
                         else:
                             self._cross(row,previous,observation,phase,timestamp,cycle_id)
             if valid_motion:
@@ -445,7 +481,7 @@ class VehicleWaits:
             if cycle_id is not None and cycle_id not in row["cycles"]: row["cycles"].append(cycle_id)
             row["last_seen"] = timestamp
             if continuing:
-                history = state.setdefault("history", deque(maxlen=HISTORY_SAMPLES))
+                history = state.setdefault("history", deque(maxlen=MAX_HISTORY_SAMPLES))
                 recent = (not was_exit_pending and previous is not None and not previous.get("handoff") and
                           0 < timestamp-previous["time"] <= self.policy.max_gap_sec+1e-9)
                 height = _height(observation)
@@ -455,6 +491,8 @@ class VehicleWaits:
                 if not recent or not valid_sample:history.clear()
                 if valid_sample:
                     history.append((timestamp, px, py, height))
+                    while len(history) > HISTORY_SAMPLES and history[-1][0]-history[1][0] >= MIN_FIT_SPAN_SEC-1e-9:
+                        history.popleft()
             state["previous"] = {"time": timestamp, "sequence": sequence,
                 "phase": str(phase), "cycle": cycle_id, "valid_motion": valid_motion,
                 "point": observation.point}
@@ -465,10 +503,13 @@ class VehicleWaits:
                 continue
             if identity not in present and not row["completed"]:
                 row["tracking_state"] = "LOST"
-                if timestamp-row["last_seen"] > self.policy.association_gap_sec:
+                state["pending_crossing"] = None
+                last_observed = (max(row["last_seen"], state["exit_last_time"])
+                                 if native_exit and state.get("exit_last_time") is not None else row["last_seen"])
+                if timestamp-last_observed > self.policy.association_gap_sec:
                     row.update(completed=True, completed_at=timestamp);self.work+=1
                     self._flag(row, "tracking_lost")
-                    state["pending_crossing"] = state["exit_candidate"] = state["exit_last_seq"] = state["exit_last_time"] = None
+                    self._clear_native_exit(state)
 
     def _own_segments(self, identity, state):
         """Rows this raw ID itself started; an alias of another row started none."""
@@ -535,7 +576,7 @@ class VehicleWaits:
             # a vehicle already observed stepping outside the ROI (exit_pending) cannot
             # continue onto a newborn inside the ROI, but still vetoes occlusion-tail links.
             if (len(history) < MIN_FIT_SAMPLES or len(row.get("identity_links", ())) >= MAX_LINKS_PER_ROW or
-                    state.get("exit_candidate") is not None):
+                    (self.policy.exit_persistence_sec > 0 and state.get("exit_candidate") is not None)):
                 if dt <= OCCLUSION_MAX_GAP_SEC+1e-9:
                     static_vetoes.append((identity, x, y, y1_last, height))
                 continue
@@ -729,7 +770,8 @@ class VehicleWaits:
         state["previous"] = dict(state["previous"], handoff=True)
         state["history"].clear()
         state["stopped"] = False; state["stop_candidate"] = state["move_candidate"] = None
-        state["pending_crossing"] = state["exit_candidate"] = state["exit_last_seq"] = state["exit_last_time"] = None
+        state["pending_crossing"] = None
+        self._clear_native_exit(state)
         native = {"epoch": new[0], "local_id": new[1]}
         # Added on the first link only, so rows of unchanged runs keep their schema.
         row.setdefault("native_ids", [{"epoch": own[0], "local_id": own[1]}]).append(native)
@@ -747,7 +789,8 @@ class VehicleWaits:
                 self._flag(row, reason)
                 state["previous"] = None
                 state["stop_candidate"] = state["move_candidate"] = None
-                state["pending_crossing"] = state["exit_candidate"] = state["exit_last_seq"] = state["exit_last_time"] = None
+                state["pending_crossing"] = None
+                self._clear_native_exit(state)
                 if "history" in state:state["history"].clear()
                 row["tracking_state"] = "UNKNOWN"
 

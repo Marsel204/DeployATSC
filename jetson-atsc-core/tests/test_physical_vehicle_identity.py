@@ -1272,3 +1272,141 @@ def test_roi_exit_persistence_confirms_real_exits_preserves_exit_crossings_and_h
     waits_cont.observe([car(2, 120., x=100., height=40., speed=0., in_region=True)], 'RED', (end+1)/FPS, end+2, 1, unassigned=())
     assert _links(waits_cont) == []
     assert len(waits_cont.records) == 2
+
+
+def test_sustained_bottom_clip_requires_geometric_recovery_before_clearing_anchor():
+    """Sol S2: sustained clipping that ages full-height samples out of history must not
+    lose its anchor on a partial (45->51) or single-frame recovery behind the line."""
+    stop_y = 270.
+    waits = book(side=lambda p: stop_y-p[1])
+    # 5 frames full height (y1=220, h=60 -> y2=280), then 10 clipped frames (h=45 -> y2=265).
+    frames = [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(5)]
+    frames += [[car(1, 265., x=150., height=45., speed=0.)] for _ in range(10)]
+    # Partial recovery behind line (h=51 -> y2=271, side=-1) then back to clipped h=45.
+    frames += [[car(1, 271., x=150., height=51., speed=0.)],
+               [car(1, 265., x=150., height=45., speed=0.)]]
+    # Repeated partial recovery (h=54, 90% < 95%) then back to clipped h=45.
+    frames += [[car(1, 274., x=150., height=54., speed=0.)] for _ in range(3)]
+    frames += [[car(1, 265., x=150., height=45., speed=0.)]]
+    # Single-frame full recovery bounce (h=60 for 1 frame) then back to clipped h=45.
+    frames += [[car(1, 280., x=150., height=60., speed=0.)],
+               [car(1, 265., x=150., height=45., speed=0.)]]
+    end = play(waits, frames, phase='RED')
+    row = only_row(waits)
+    assert not row['completed'] and not row['crossed_stop_line']
+    assert waits.active[(0, 1)].get('pending_crossing') is not None
+
+    # Two consecutive full-height behind-line frames clear the anchor cleanly, and
+    # populate history so a subsequent clip is still caught while genuine motion crosses.
+    end = play(waits, [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(2)], start=end, phase='RED')
+    assert waits.active[(0, 1)].get('pending_crossing') is None
+    end = play(waits, [[car(1, 265., x=150., height=45., speed=0.)]], start=end, phase='RED')
+    assert not row['crossed_stop_line']
+    # Genuine forward motion while clipped confirms once y1 + 60 clears stop_y=270.
+    depart = [[car(1, (220.-5.*i)+45., x=150., height=45., speed=2.)] for i in range(1, 5)]
+    play(waits, depart, start=end, phase='GREEN')
+    assert row['crossed_stop_line'] and row['tracking_state'] == 'SERVED'
+    assert row['crossing_phase'] == 'GREEN'
+
+
+def test_pending_crossing_confirms_across_consecutive_exit_pending_outside_frames():
+    """Sol S3: an active crossing anchor is retained across consecutive outside frames
+    while EXIT_PENDING, and confirms SERVED once the reconstructed rear clears the line."""
+    stop_y = 270.
+    # 1. Clip starts inside ROI, vehicle steps outside (EXIT_PENDING), clears rear next frame.
+    waits = book(exit_persistence_sec=0.3, side=lambda p: stop_y-p[1])
+    frames = [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(5)]
+    frames += [[car(1, 265., x=150., height=45., speed=0.)]]  # clipped inside ROI -> pending set
+    end = play(waits, frames, phase='GREEN')
+    waits.observe([car(1, 260., x=150., height=45., speed=2., in_region=False)], 'GREEN', end/FPS, end+1, 1, unassigned=())
+    row = only_row(waits)
+    assert not row['completed'] and row['tracking_state'] == 'EXIT_PENDING'
+    waits.observe([car(1, 253., x=150., height=45., speed=2., in_region=False)], 'GREEN', (end+1)/FPS, end+2, 1, unassigned=())
+    assert row['crossed_stop_line'] and row['tracking_state'] == 'SERVED'
+    assert row['crossing_phase'] == 'GREEN'
+    assert row['crossing_evidence']['from_side'] < 0 <= row['crossing_evidence']['to_side']
+
+    # 2. Clip starts on the first outside frame, then clears rear on the next consecutive outside frame.
+    waits_first = book(exit_persistence_sec=0.3, side=lambda p: stop_y-p[1])
+    end2 = play(waits_first, [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(5)], phase='GREEN')
+    waits_first.observe([car(1, 265., x=150., height=45., speed=0., in_region=False)], 'GREEN', end2/FPS, end2+1, 1, unassigned=())
+    row2 = only_row(waits_first)
+    assert not row2['completed'] and row2['tracking_state'] == 'EXIT_PENDING'
+    waits_first.observe([car(1, 253., x=150., height=45., speed=2., in_region=False)], 'GREEN', (end2+1)/FPS, end2+2, 1, unassigned=())
+    assert row2['crossed_stop_line'] and row2['tracking_state'] == 'SERVED'
+
+    # 3. Dropped frame while EXIT_PENDING discards pending crossing (no crossing across a gap).
+    waits_gap = book(exit_persistence_sec=0.3, side=lambda p: stop_y-p[1])
+    end3 = play(waits_gap, frames, phase='GREEN')
+    waits_gap.observe([car(1, 260., x=150., height=45., speed=2., in_region=False)], 'GREEN', end3/FPS, end3+1, 1, unassigned=())
+    waits_gap.observe([], 'GREEN', (end3+1)/FPS, end3+2, 1, unassigned=())
+    waits_gap.observe([car(1, 253., x=150., height=45., speed=2., in_region=False)], 'GREEN', (end3+2)/FPS, end3+3, 1, unassigned=())
+    assert not only_row(waits_gap)['crossed_stop_line']
+
+    # 4. Preceding outside frame with UNKNOWN phase yields crossing_phase == UNKNOWN.
+    waits_unk = book(exit_persistence_sec=0.3, side=lambda p: stop_y-p[1])
+    end4 = play(waits_unk, frames, phase='GREEN')
+    waits_unk.observe([car(1, 260., x=150., height=45., speed=2., in_region=False)], 'UNKNOWN', end4/FPS, end4+1, None, unassigned=())
+    waits_unk.observe([car(1, 253., x=150., height=45., speed=2., in_region=False)], 'GREEN', (end4+1)/FPS, end4+2, 1, unassigned=())
+    row4 = only_row(waits_unk)
+    assert row4['crossed_stop_line'] and row4['crossing_phase'] == 'UNKNOWN'
+    assert 'crossing_phase_unknown' in row4['quality_flags']
+
+
+def test_roi_exit_persistence_longer_than_association_gap_uses_outside_sighting_for_expiry():
+    """Sol S4: when exit_persistence_sec > association_gap_sec, a single dropped frame after
+    > association_gap_sec of tracked outside sightings must not close the row or split a return."""
+    waits = VehicleWaits('run', RunPolicy(stop_persistence_sec=0, exit_persistence_sec=1.5, association_gap_sec=1.0),
+                         side=lambda p: -1.)
+    for i in range(3):
+        waits.observe([car(1, 120., speed=0.)], 'RED', i/FPS, i+1, 1)
+    # Tracked outside continuously for 32 frames (1.067 s > 1.0 s association gap, < 1.5 s exit).
+    for i in range(3, 35):
+        waits.observe([car(1, 120., speed=0., in_region=False)], 'RED', i/FPS, i+1, 1)
+    row = only_row(waits)
+    assert not row['completed'] and row['tracking_state'] == 'EXIT_PENDING'
+    assert row['last_seen'] == pytest.approx(2/FPS)
+    # Single dropped frame at 35/FPS (1.10 s since last in-ROI, 0.033 s since last outside sighting).
+    waits.observe([], 'RED', 35/FPS, 36, 1)
+    assert not row['completed'] and row['last_seen'] == pytest.approx(2/FPS)
+    # Returns inside ROI at 36/FPS: stays on the same single row (no :segment-1).
+    waits.observe([car(1, 120., speed=0., in_region=True)], 'RED', 36/FPS, 37, 1)
+    assert list(waits.records) == ['run:acquisition:0:1']
+    assert row['unknown_sec'] == pytest.approx(34/FPS)
+
+    # Vanishing permanently after outside sightings still expires after association_gap_sec from last outside sighting.
+    waits_lost = VehicleWaits('run', RunPolicy(stop_persistence_sec=0, exit_persistence_sec=1.5, association_gap_sec=1.0),
+                              side=lambda p: -1.)
+    for i in range(3):
+        waits_lost.observe([car(1, 120., speed=0.)], 'RED', i/FPS, i+1, 1)
+    for i in range(3, 35):
+        waits_lost.observe([car(1, 120., speed=0., in_region=False)], 'RED', i/FPS, i+1, 1)
+    waits_lost.observe([], 'RED', 64/FPS, 65, 1)  # 30/30 = 1.000 s after last outside sighting (not yet > 1.0)
+    assert not only_row(waits_lost)['completed']
+    waits_lost.observe([], 'RED', 65/FPS, 66, 1)  # 31/30 = 1.033 s > 1.0 s -> tracking_lost
+    lost = only_row(waits_lost)
+    assert lost['completed'] and 'tracking_lost' in lost['quality_flags']
+    assert lost['last_seen'] == pytest.approx(2/FPS)
+
+
+@pytest.mark.parametrize('fps', [30., 60., 120., 240.])
+def test_bottom_clipped_stationary_car_does_not_falsely_cross_at_high_fps(fps):
+    """Sol S6: motion history retains enough samples to span MIN_FIT_SPAN_SEC at high FPS
+    so bottom-edge occlusion clipping stays open at 120/240 fps just as at 30 fps."""
+    stop_y = 270.
+    waits = book(side=lambda p: stop_y-p[1])
+    pre_frames = int(round(0.15*fps))
+    seq = 0
+    for _ in range(pre_frames):
+        waits.observe([car(1, 280., x=150., height=60., speed=0.)], 'RED', seq/fps, seq+1, 1, unassigned=())
+        seq += 1
+    for _ in range(5):
+        waits.observe([car(1, 265., x=150., height=45., speed=0.)], 'RED', seq/fps, seq+1, 1, unassigned=())
+        seq += 1
+    row = only_row(waits)
+    assert not row['completed'] and not row['crossed_stop_line']
+    # Genuine forward motion clears the reconstructed rear and completes SERVED.
+    for i in range(1, 5):
+        waits.observe([car(1, (220.-5.*i)+45., x=150., height=45., speed=2.)], 'GREEN', seq/fps, seq+1, 1, unassigned=())
+        seq += 1
+    assert row['crossed_stop_line'] and row['tracking_state'] == 'SERVED'
