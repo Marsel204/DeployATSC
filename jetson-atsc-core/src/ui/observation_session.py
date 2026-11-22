@@ -64,7 +64,7 @@ def source_identity(value):
 def _finite_box(values):
     if isinstance(values,(str,bytes)):return None
     try:box=tuple(float(value) for value in values[:4])
-    except (TypeError,IndexError,ValueError):return None
+    except (TypeError,IndexError,ValueError,OverflowError):return None
     return box if len(box)==4 and all(map(math.isfinite,box)) and box[3]>box[1] and box[2]>box[0] else None
 
 
@@ -86,7 +86,7 @@ def _withheld_boxes(tracks,epoch):
     box whose raw source detection is unattributed yields None (unavailable)."""
     withheld=getattr(tracks,"withheld",None)
     if withheld is None or isinstance(withheld,(str,bytes)) or getattr(tracks,"epoch",None)!=epoch:return None
-    if any(_source_box(track) is None for track in tracks):return None
+    if any(_box(track) is None or _source_box(track) is None for track in tracks):return None
     try:boxes=tuple(_finite_box(item[0]) for item in withheld)
     except (TypeError,IndexError,KeyError):return None
     return None if None in boxes else boxes

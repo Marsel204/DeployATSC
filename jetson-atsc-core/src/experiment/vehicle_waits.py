@@ -34,9 +34,10 @@ MAX_PAIR_CHECKS = 4096
 def _height(observation):
     height = observation.height
     if height is None and observation.bbox is not None:
-        height = observation.bbox[3]-observation.bbox[1]
+        box = _raw_box(observation.bbox)
+        return None if box is None else box[3]-box[1]
     try:height = float(height)
-    except (TypeError, ValueError):return None
+    except (TypeError, ValueError, OverflowError):return None
     return height if math.isfinite(height) and height > 0 else None
 
 
@@ -59,7 +60,7 @@ def _fit(history):
 def _raw_box(box):
     if isinstance(box, (str, bytes)):return None
     try:x1, y1, x2, y2 = (float(v) for v in box[:4])
-    except (TypeError, ValueError, IndexError):return None
+    except (TypeError, ValueError, IndexError, OverflowError):return None
     return (x1, y1, x2, y2) if all(map(math.isfinite, (x1, y1, x2, y2))) and x2 > x1 and y2 > y1 else None
 
 

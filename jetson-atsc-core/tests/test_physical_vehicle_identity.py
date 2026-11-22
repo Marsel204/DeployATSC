@@ -719,9 +719,11 @@ def test_malformed_newborn_source_box_fails_closed(source):
 
 
 @pytest.mark.parametrize('case', ['truncated_competitor_source', 'truncated_competitor_bbox',
+                                  'truncated_competitor_bbox_default_height', 'overflow_competitor_bbox',
                                   'truncated_unassigned', 'nonfinite_unassigned'])
 def test_malformed_competitor_or_unassigned_box_makes_frame_evidence_unavailable(case):
-    """Sol S2: unreadable competitor or unassigned boxes must fail closed for the frame."""
+    """Sol S2: unreadable competitor or unassigned boxes must fail closed for the frame,
+    including default height=None and float-overflow coordinates."""
     frames = lost_one()
     other = VehicleObservation(3, 'car', 2., (100., NEWBORN_Y), height=40., bbox=narrow(100.),
                                source_bbox=narrow(68.))
@@ -731,6 +733,12 @@ def test_malformed_competitor_or_unassigned_box_makes_frame_evidence_unavailable
                                    source_bbox=(65., NEWBORN_Y-40.))
     elif case == 'truncated_competitor_bbox':
         other = VehicleObservation(3, 'car', 2., (100., NEWBORN_Y), height=40., bbox=(97., NEWBORN_Y-40.),
+                                   source_bbox=narrow(68.))
+    elif case == 'truncated_competitor_bbox_default_height':
+        other = VehicleObservation(3, 'car', 2., (100., NEWBORN_Y), bbox=(97., NEWBORN_Y-40.),
+                                   source_bbox=narrow(68.))
+    elif case == 'overflow_competitor_bbox':
+        other = VehicleObservation(3, 'car', 2., (100., NEWBORN_Y), bbox=(97., NEWBORN_Y-40., 10**400, NEWBORN_Y),
                                    source_bbox=narrow(68.))
     elif case == 'truncated_unassigned':
         other = None

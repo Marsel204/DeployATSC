@@ -183,24 +183,49 @@ def test_default_off_session_keeps_the_historical_observe_acquisition_contract(v
         session.state = session.applied_state = 'stopped';session._cleanup()
 
 
-def test_malformed_withheld_entries_degrade_to_unavailable_evidence_without_crashing(video_factory, tmp_path):
-    """Sol S3: malformed entries in TrackedFrame.withheld yield unavailable evidence (None)
-    and never crash ObservationSession."""
+@pytest.mark.parametrize('bad_withheld', [[()], [((0, 0, 10**400, 4), 'car', .9)]])
+def test_malformed_withheld_entries_degrade_to_unavailable_evidence_without_crashing(video_factory, tmp_path, bad_withheld):
+    """Sol S3: malformed entries (including integer overflow) in TrackedFrame.withheld yield
+    unavailable evidence (None) and never crash ObservationSession."""
     from src.ui.observation_session import _withheld_boxes
     clean_frame = TrackedFrame([scripted_vehicle(1, 100., 60., 0., 0)], withheld=(), epoch=0)
     assert _withheld_boxes(clean_frame, 0) == ()
-    for bad in ([()], [None], [123], [('', 'car', .9)], 42, ''):
+    for bad in ([()], [None], [123], [('', 'car', .9)], [((0, 0, 10**400, 4), 'car', .9)], 42, ''):
         bad_frame = TrackedFrame([scripted_vehicle(1, 100., 60., 0., 0)], withheld=bad, epoch=0)
         assert _withheld_boxes(bad_frame, 0) is None
 
     class MalformedWithheldDetector(ScriptedDetector):
         def track(self, frames, timestamp=None):
             index = round(timestamp*FPS)
-            withheld = [()] if index == 14 else ()
+            withheld = bad_withheld if index == 14 else ()
             return [TrackedFrame([scripted_vehicle(track_id, x, y, timestamp, self.epoch)
                      for track_id, y, x in script(index)], withheld=withheld, epoch=self.epoch) for _ in frames]
 
     rows, unavailable = run_session(video_factory, tmp_path, MalformedWithheldDetector, 20)
+    assert not any(r.get('identity_links') for r in rows.values())
+    assert {'acquisition:0:1', 'acquisition:0:2'} <= set(rows)
+    assert unavailable >= 1
+
+
+def test_zero_width_emitted_box_makes_frame_evidence_unavailable(video_factory, tmp_path):
+    """Sol S6: an emitted track with a degenerate bbox must mark frame evidence unavailable
+    even when its source_bbox is valid."""
+    from src.ui.observation_session import _withheld_boxes
+    bad = TrackedVehicle(3, 2, 'car', [200., 100., 200., 140.], .9, 14/FPS, obs_count=6, epoch=0)
+    bad.source_bbox = (186., 100., 214., 130.)
+    assert _withheld_boxes(TrackedFrame([bad], withheld=(), epoch=0), 0) is None
+
+    class DegenerateEmittedDetector(ScriptedDetector):
+        def track(self, frames, timestamp=None):
+            index = round(timestamp*FPS)
+            vehicles = [scripted_vehicle(track_id, x, y, timestamp, self.epoch) for track_id, y, x in script(index)]
+            if index == 14:
+                other = TrackedVehicle(3, 2, 'car', [200., 100., 200., 130.], .9, timestamp, obs_count=6, epoch=self.epoch)
+                other.source_bbox = (186., 100., 214., 130.)
+                vehicles.append(other)
+            return [TrackedFrame(vehicles, withheld=(), epoch=self.epoch) for _ in frames]
+
+    rows, unavailable = run_session(video_factory, tmp_path, DegenerateEmittedDetector, 20)
     assert not any(r.get('identity_links') for r in rows.values())
     assert {'acquisition:0:1', 'acquisition:0:2'} <= set(rows)
     assert unavailable >= 1
