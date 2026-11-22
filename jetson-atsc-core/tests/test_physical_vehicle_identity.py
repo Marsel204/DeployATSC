@@ -31,9 +31,9 @@ def car(local_id, y, x=50., height=40., kind='car', epoch=0, in_region=True, spe
                               in_region=in_region, epoch=epoch, height=height, bbox=box)
 
 
-def book(**policy):
+def book(side=None, **policy):
     policy = {'stop_persistence_sec': 0, 'fragment_continuation': True, **policy}
-    return VehicleWaits('run', RunPolicy(**policy), side=lambda p: p[1]-LINE)
+    return VehicleWaits('run', RunPolicy(**policy), side=(lambda p: p[1]-LINE) if side is None else side)
 
 
 def play(waits, frames, start=0, phase='RED'):
@@ -792,3 +792,289 @@ def test_huge_finite_endpoints_overflowing_height_fail_closed():
     assert [(l['from']['local_id'], l['to']['local_id'])
             for r in waits_explicit.records.values() for l in r.get('identity_links', ())] == []
     assert waits_explicit.continuation_unavailable_frames == 1
+
+
+# --- Idea A1: occlusion-tail velocity de-biasing and stationary reappearance (> 0.10 s) ---
+
+def _occluded_tail(local_id=1, x=150., y1=100., h_peak=100., h_end=55., frames=8):
+    """A stationary car whose bottom edge y2 is clipped upward while y1 stays pinned."""
+    out = []
+    for i in range(frames):
+        frac = i/(frames-1)
+        h = h_peak-(h_peak-h_end)*frac
+        out.append([car(local_id, y1+h, x=x, height=h, speed=0.)])
+    return out
+
+
+def _links(waits):
+    return [(l['from']['local_id'], l['to']['local_id'])
+            for r in waits.records.values() for l in r.get('identity_links', ())]
+
+
+@pytest.mark.parametrize('gap_frames', [4, 6, 10])
+def test_adversarial_queue_pull_up_attack_never_links_past_flicker(gap_frames):
+    """Stopped car A disappears without an occlusion tail and car B behind it pulls
+    into A's exact vacated spot after > 0.10 s: must never link A -> B."""
+    waits = book(side=lambda p: -1.)
+    # Car A stationary at y1=100, y2=200 (h=100), then vanishes; newborn B fills exact spot.
+    frames = [[car(1, 200., x=150., height=100., speed=0.)] for _ in range(8)]
+    frames += [[]]*gap_frames
+    frames += [[car(2, 200., x=150., height=100., speed=0.)]]
+    play(waits, frames)
+    assert _links(waits) == []
+    assert len(waits.records) == 2
+
+
+def test_adversarial_queue_pull_up_with_mild_jitter_or_departure_foreshortening_never_links():
+    """Neither minor detector height jitter (<25%) nor a departing car foreshortening
+    upward may trigger occlusion-tail continuation onto a car pulling into the vacated spot."""
+    # Case 1: 12% height jitter on a stopped car before disappearing, gap 0.20 s.
+    waits_jitter = book(side=lambda p: -1.)
+    jitter_frames = [[car(1, 200.-1.5*i, x=150., height=100.-1.5*i, speed=0.)] for i in range(8)]
+    jitter_frames += [[]]*5 + [[car(2, 200., x=150., height=100., speed=0.)]]
+    play(waits_jitter, jitter_frames)
+    assert _links(waits_jitter) == []
+
+    # Case 2: Car A drives away upward (both y1 and y2 move up, h foreshortens 100 -> 70),
+    # and newborn B pulls into A's vacated spot 0.20 s later.
+    waits_depart = book(side=lambda p: -1.)
+    depart_frames = [[car(1, 200.-10.*i, x=150., height=100.-4.*i, speed=3.)] for i in range(8)]
+    depart_frames += [[]]*5 + [[car(2, 200., x=150., height=100., speed=1.)]]
+    play(waits_depart, depart_frames)
+    assert _links(waits_depart) == []
+
+
+def test_adversarial_shrinking_occlusion_tail_never_fabricates_upward_velocity():
+    """Bottom-edge shrinkage on a stationary car must not extrapolate upward onto
+    an upstream vehicle or widen distance gates."""
+    waits = book(side=lambda p: -1.)
+    # Stationary car at y1=100 shrinks y2: 200 -> 150 over 7/30 s (apparent vy2 ~ -214 px/s).
+    # 0.30 s later, phantom extrapolation lands at y2 ~ 86: an upstream car C appears there.
+    frames = _occluded_tail(1, x=150., y1=100., h_peak=100., h_end=50., frames=8)
+    frames += [[]]*8
+    frames += [[car(2, 86., x=150., height=50., speed=0.)]]
+    play(waits, frames)
+    assert _links(waits) == []
+
+    # Horizontal motion with sudden bottom-edge collapse must not extrapolate upward either.
+    waits_horiz = book(side=lambda p: -1.)
+    horiz = [[car(1, 200.-7.*i, x=100.+4.*i, height=100.-7.*i, speed=2.)] for i in range(8)]
+    horiz += [[]]*5 + [[car(2, 151.-42., x=128.+24., height=51., speed=2.)]]
+    play(waits_horiz, horiz)
+    assert _links(waits_horiz) == []
+
+
+@pytest.mark.parametrize('scenario', [
+    'active_occluder_duplicate_on_body',
+    'occluder_reborn_in_front',
+    'larger_foreground_occluder_newborn',
+    'active_competitor_at_peak_footpoint',
+    'withheld_competitor_at_top_gate',
+])
+def test_adversarial_same_class_occluder_never_links_or_swaps(scenario):
+    """A same-class vehicle crossing in front of a bottom-occluded stationary car
+    must never be linked to the occluded car or cause an ID swap."""
+    waits = book(side=lambda p: -1.)
+    if scenario == 'active_occluder_duplicate_on_body':
+        # Active same-class car #9 crosses right across car #1's box; a duplicate newborn
+        # #2 appears sharing #9's box at car #1's top-center.
+        frames = _occluded_tail(1, x=150., y1=100., h_peak=100., h_end=55., frames=8)
+        for i, f in enumerate(frames):
+            f.append(car(9, 210., x=90.+8.*i, height=95., speed=3.))
+        frames += [[car(9, 205., x=150., height=95., speed=2.)] for _ in range(5)]
+        frames += [[car(9, 205., x=150., height=95., speed=2.),
+                    car(2, 165., x=150., height=65., speed=0.)]]
+        play(waits, frames)
+    elif scenario == 'occluder_reborn_in_front':
+        # Same-class occluder #9 crosses directly over #1, both vanish, then #9 returns as
+        # newborn #2 right inside BOTH #1's occlusion top-gate and #9's moving gate: ambiguous!
+        frames = _occluded_tail(1, x=150., y1=100., h_peak=100., h_end=55., frames=8)
+        for i, f in enumerate(frames):
+            f.append(car(9, 208., x=106.+4.*i, height=105., speed=2.))
+        frames += [[]]*5
+        frames += [[car(2, 208., x=158., height=105., speed=2.)]]
+        play(waits, frames)
+    elif scenario == 'larger_foreground_occluder_newborn':
+        # Unseen larger/closer same-class car appears with matching top-center y1=100
+        # but foreground bottom y2=230 (> y2_peak + 0.15*h_peak and h=130 > 1.2*h_peak).
+        frames = _occluded_tail(1, x=150., y1=100., h_peak=100., h_end=55., frames=8)
+        frames += [[]]*5 + [[car(2, 230., x=150., height=130., speed=2.)]]
+        play(waits, frames)
+    elif scenario == 'active_competitor_at_peak_footpoint':
+        # Another car sits right at car #1's pre-occlusion footpoint (150, 200) at reappearance.
+        frames = _occluded_tail(1, x=150., y1=100., h_peak=100., h_end=55., frames=8)
+        for f in frames:
+            f.append(car(9, 210., x=300., height=80., speed=0.))
+        frames += [[car(9, 210., x=200., height=80., speed=1.)]]*5
+        frames += [[car(9, 205., x=152., height=80., speed=0.),
+                    car(2, 160., x=150., height=60., speed=0.)]]
+        play(waits, frames)
+    else:
+        # Withheld detection sitting at car #1's pinned top-center vetoes the occlusion-tail link.
+        frames = _occluded_tail(1, x=150., y1=100., h_peak=100., h_end=55., frames=8) + [[]]*5
+        end = play(waits, frames)
+        waits.observe([car(2, 160., x=150., height=60., speed=0.)], 'RED', end/FPS, end+1, 1,
+                      unassigned=[(120., 102., 180., 162.)])
+    assert _links(waits) == [], scenario
+
+
+@pytest.mark.parametrize('gap_frames,new_h,expect_link', [
+    (5, 60., True),    # dt=0.200 s, still partially clipped (746->966 pattern)
+    (9, 95., True),    # dt=0.333 s, recovered back near h_peak (8.3.0 pattern)
+    (11, 60., False),  # dt=0.400 s > OCCLUSION_MAX_GAP_SEC (0.35 s)
+])
+def test_stationary_bottom_occlusion_tail_reappearance_links_within_gap_bound(gap_frames, new_h, expect_link):
+    waits = book(side=lambda p: -1.)
+    frames = _occluded_tail(1, x=150., y1=100., h_peak=100., h_end=55., frames=8)
+    frames += [[]]*gap_frames
+    frames += [[car(2, 100.+new_h, x=151., height=new_h, speed=0.)]]
+    play(waits, frames)
+    if not expect_link:
+        assert _links(waits) == []
+        return
+    assert _links(waits) == [(1, 2)]
+    link, = only_row(waits)['identity_links']
+    assert link['moving_fit'] is False
+    assert link['rule'] == 'mutually_unique_uncontested_occlusion_tail_gate'
+    assert link['predicted_point'] == pytest.approx([150., 100.])
+    assert link['observed_point'] == pytest.approx([151., 100.])
+    assert link['error_heights'] <= link['gate_heights']
+
+
+def test_occlusion_tail_respects_policy_max_gap_and_source_box_ambiguity():
+    # Policy max_gap_sec=0.20 caps OCCLUSION_MAX_GAP_SEC=0.35.
+    waits_cap = book(max_gap_sec=.20, side=lambda p: -1.)
+    frames = _occluded_tail(1, x=150., y1=100., h_peak=100., h_end=55., frames=8) + [[]]*7
+    frames += [[car(2, 160., x=150., height=60., speed=0.)]]   # dt=0.267 s > 0.20 s
+    play(waits_cap, frames)
+    assert _links(waits_cap) == []
+
+    # Raw source_bbox widens ambiguity (second newborn's raw top-center inside gate vetoes),
+    # and raw source_bbox alone never creates a link.
+    base = _occluded_tail(1, x=150., y1=100., h_peak=100., h_end=55., frames=8) + [[]]*5
+    nb_ok = VehicleObservation(2, 'car', 0., (150., 160.), height=60., bbox=(120., 100., 180., 160.),
+                               source_bbox=(120., 100., 180., 160.))
+    nb_raw_rival = VehicleObservation(3, 'car', 0., (260., 160.), height=60., bbox=(230., 100., 290., 160.),
+                                      source_bbox=(125., 102., 185., 162.))
+    waits_ambig = book(side=lambda p: -1.)
+    end = play(waits_ambig, base)
+    waits_ambig.observe([nb_ok, nb_raw_rival], 'RED', end/FPS, end+1, 1, unassigned=())
+    assert _links(waits_ambig) == []
+
+    nb_raw_only = VehicleObservation(2, 'car', 0., (220., 160.), height=60., bbox=(190., 100., 250., 160.),
+                                     source_bbox=(120., 100., 180., 160.))
+    waits_raw = book(side=lambda p: -1.)
+    end = play(waits_raw, base)
+    waits_raw.observe([nb_raw_only], 'RED', end/FPS, end+1, 1, unassigned=())
+    assert _links(waits_raw) == []
+
+    # Non-finite point on a competitor fails closed and increments continuation_unavailable_frames.
+    waits_nan = book(side=lambda p: -1.)
+    end = play(waits_nan, base)
+    bad = VehicleObservation(9, 'car', 0., (float('nan'), 160.), height=60.)
+    waits_nan.observe([nb_ok, bad], 'RED', end/FPS, end+1, 1, unassigned=())
+    assert _links(waits_nan) == [] and waits_nan.continuation_unavailable_frames == 1
+
+
+def test_sol_s1_mild_bottom_clip_with_horizontal_motion_preserves_vx_without_upward_lift():
+    """Sol S1: horizontal motion with pinned top edge and mild 10 px bottom clip must not
+    extrapolate upward onto an upstream vehicle, while preserving horizontal tracking."""
+    # Moving horizontally at +120 px/s (+4 px/frame) with pinned y1=100; bottom clips 200 -> 190.
+    frames = [[car(1, 200.-10.*i/7, x=100.+4.*i, height=100.-10.*i/7, speed=3.)] for i in range(8)]
+    # Gap of 14 frames (dt=0.50 s, gate=0.50*90=45 px): unlifted prediction is (188, 190);
+    # phantom upward lift would land at y=168.6 and falsely capture an upstream car at y=135.
+    waits_upstream = book(side=lambda p: -1.)
+    play(waits_upstream, frames + [[]]*14 + [[car(2, 135., x=188., height=90., speed=3.)]])
+    assert _links(waits_upstream) == []
+
+    # Positive control: newborn continuing horizontally at (188, 190) links with zero upward lift.
+    waits_horiz = book(side=lambda p: -1.)
+    play(waits_horiz, frames + [[]]*14 + [[car(2, 190., x=188., height=90., speed=3.)]])
+    assert _links(waits_horiz) == [(1, 2)]
+    assert only_row(waits_horiz)['identity_links'][0]['predicted_point'] == pytest.approx([188., 190.])
+
+    # Sol S1 Round 2: 20 px height drop with 11 px upward top-edge drift must not qualify as moving.
+    waits_drift = book(side=lambda p: -1.)
+    drift = [[car(1, 200.-31.*i/7, x=150., height=100.-20.*i/7, speed=0.)] for i in range(8)]
+    play(waits_drift, drift + [[]]*5 + [[car(2, 145., x=150., height=80., speed=0.)]])
+    assert _links(waits_drift) == []
+
+    # Sol S8: 8 px upward top-edge drift + 7 px height loss must not qualify as moving either.
+    waits_s8 = book(side=lambda p: -1.)
+    drift_s8 = [[car(1, 200.-15.*i/7, x=150., height=100.-7.*i/7, speed=0.)] for i in range(8)]
+    play(waits_s8, drift_s8 + [[]]*5 + [[car(2, 185., x=150., height=93., speed=0.)]])
+    assert _links(waits_s8) == []
+
+    # Sol S10: alternating tall/clipped heights with minor horizontal drift must scale motion
+    # qualification against max history height (100 px), not the clipped height (35 px).
+    waits_s10 = book(side=lambda p: -1.)
+    heights_s10 = [100., 35., 100., 35., 35., 35., 35., 35.]
+    drift_s10 = [[car(1, 100.+h, x=150.+5.*i/7, height=h, speed=0.)] for i, h in enumerate(heights_s10)]
+    play(waits_s10, drift_s10 + [[]]*5 + [[car(2, 135., x=155., height=35., speed=0.)]])
+    assert _links(waits_s10) == []
+
+
+def test_sol_s9_tiny_positive_height_at_large_y_does_not_raise_zero_division():
+    """Sol S9: carrying validated h_last directly avoids ZeroDivisionError when y - (y - h_last)
+    would round to 0.0 in IEEE 754 float arithmetic."""
+    waits = book(side=lambda p: -1.)
+    # Stationary top pinned at y1=100; baseline height=100 (2+ frames), ending at tiny h=1e-15.
+    heights = [100., 100., 100., 100., 50., 25., 10., 1e-15]
+    frames = [[VehicleObservation(1, 'car', 0., (150., 100.+h), height=h)] for h in heights]
+    frames += [[]]*5
+    end = play(waits, frames)
+    nb = VehicleObservation(2, 'car', 0., (150., 150.), height=50., bbox=(125., 100., 175., 150.))
+    competitor = VehicleObservation(9, 'car', 0., (300., 300.), height=50., bbox=(275., 250., 325., 300.))
+    waits.observe([nb, competitor], 'RED', end/FPS, end+1, 1, unassigned=())
+    assert _links(waits) == [(1, 2)]
+
+
+@pytest.mark.parametrize('neighbour_sightings', [8, 2])
+def test_sol_s2_lost_stationary_neighbour_still_vetoes_extended_occlusion_link_after_0_10s(neighbour_sightings):
+    """Sol S2: a plain stationary car (even with only 2 sightings) lost 0.20 s earlier cannot
+    link past 0.10 s, but must still veto a nearby occluded car from stealing its spot."""
+    waits = book(side=lambda p: -1.)
+    frames = _occluded_tail(1, x=150., y1=100., h_peak=100., h_end=55., frames=8)
+    for i, f in enumerate(frames):
+        if i >= len(frames)-neighbour_sightings:
+            # Plain stationary neighbour #5 parked 20 px right (within #1's 25 px top gate).
+            f.append(car(5, 160., x=170., height=60., speed=0.))
+    frames += [[]]*5
+    # Newborn #2 appears at #5's exact vacated box (170, 160, h=60 -> top 170, 100).
+    frames += [[car(2, 160., x=170., height=60., speed=0.)]]
+    play(waits, frames)
+    assert _links(waits) == []
+
+
+@pytest.mark.parametrize('heights', [
+    [60., 60., 60., 100., 60., 60., 60., 60.],
+    [60., 100., 60., 100., 60., 60., 60., 60.],
+])
+def test_sol_s3_s6_isolated_tall_outlier_frames_never_create_an_occlusion_tail(heights):
+    """Sol S3/S6: one or two isolated tall outlier frames in a plain stationary track
+    must not qualify as an occlusion tail or allow a replacement link after 0.20 s."""
+    waits = book(side=lambda p: -1.)
+    frames = [[car(1, 100.+h, x=150., height=h, speed=0.)] for h in heights]
+    frames += [[]]*5 + [[car(2, 160., x=150., height=60., speed=0.)]]
+    play(waits, frames)
+    assert _links(waits) == []
+
+
+@pytest.mark.parametrize('with_distant_occlusion', [False, True])
+def test_sol_s5_s7_stationary_flicker_pairs_are_not_overcharged_in_pair_budget(with_distant_occlusion):
+    """Sol S5/S7: 46 stationary flicker pairs stay inside MAX_PAIR_CHECKS both with zero
+    occlusion candidates and with one distant unmatched occlusion candidate."""
+    waits = book(side=lambda p: -1.)
+    grid = [(50.+80.*(k % 8), 80.+90.*(k // 8)) for k in range(46)]
+    for f in range(8):
+        obs = []
+        if with_distant_occlusion:
+            h = 100.-45.*f/7
+            obs.append(car(999, 900.+h, x=900., height=h, speed=0.))
+        if f >= 4:
+            obs += [car(1+k, y, x=x, height=40., speed=0.) for k, (x, y) in enumerate(grid)]
+        waits.observe(obs, 'RED', f/FPS, f+1, 1, unassigned=())
+    waits.observe([car(1000+k, y, x=x, height=40., speed=0.) for k, (x, y) in enumerate(grid)],
+                  'RED', 10/FPS, 11, 1, unassigned=())
+    assert waits.continuation_skipped_frames == 0
+    assert len(_links(waits)) == 46
