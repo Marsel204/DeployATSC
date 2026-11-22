@@ -33,12 +33,20 @@ continues a row whose last observation was at most `max_gap_sec` earlier, when:
 1. on position alone, the newborn and the lost row are each other's only
    candidate within the motion gate (0.35 box heights, plus 0.3 per second of
    gap when at least three samples show image motion; without motion only a
-   gap of up to 0.1 s is bridged);
+   gap of up to 0.1 s is bridged). A newborn counts as a candidate of every
+   lost row whose gate holds either its emitted footpoint or its raw
+   detection's (`source_bbox`), but it links only through its emitted
+   footpoint: the raw box widens ambiguity, never acceptance. A supplied
+   `source_bbox` that is unreadable, non-finite or degenerate fails closed:
+   that newborn can still make others ambiguous but never links;
 2. the class matches and the box heights differ by at most 1.5x;
 3. no other box of the same frame, of any vehicle class, size or ID state,
    has its footpoint in the gate, or covers at least half of the smaller box
    with footpoints within half a box height of the newborn's (the f66 case in
-   the 0SgQn95Q07U replay). "Other boxes" are:
+   the 0SgQn95Q07U replay). The overlap test runs for both the newborn's
+   emitted box and its raw detection, against each other box (review probe:
+   a newborn's Kalman box covered under half of a withheld detection its raw
+   box covered most of). "Other boxes" are:
    - every other observation's emitted (Kalman-smoothed) box, **and** its raw
      post-NMS detection (`source_bbox`) when the tracker emitted it from one.
      Smoothing can move an emitted box out of the gate while its detection is
@@ -89,7 +97,15 @@ When `track` fails (for example a tracker exception), the detection-only
 restored afterwards: 8.3.x would otherwise run `tracker.update` in predict
 mode, returning tracker IDs after a one-shot failure or raising again after a
 repeated one. Fallback frames have no stable IDs and no evidence; the next
-`track` continues the same trackers.
+`track` continues the same trackers. When the tracker was never built (for
+example `BYTETracker.__init__` raised on the first frame, or left an empty
+`trackers` placeholder) the callbacks stay detached and the placeholder is
+removed, on the model's and the predictor's callback lists alike, so the
+retry registers exactly one pair on 8.3.0 and 8.4.x. If trackers are rebuilt
+after the epoch has emitted stable IDs (8.3.0's `BYTETracker.__init__`
+restarts the ID counter), the detector starts a new epoch first, so
+`(epoch, local_id)` never names two vehicles; a first-frame failure before
+any stable ID keeps epoch 0.
 
 A handed-off native ID seen again contests the link before any row of that
 frame is completed, so a return on the frame where the continuing ID crosses
@@ -120,3 +136,14 @@ motorcycle box on the same motorcycle, and the rule cannot tell a duplicate
 box from a neighbour. On the 660-frame junction clip the one link
 (#626 -> #648) is unchanged. None of this validates physical identity in
 general.
+
+## Known limits
+
+- An ROI that reaches the image border limits witnessed entries: vehicles
+  entering there are first seen already inside the region.
+- Occlusion tails: a box clipped while the vehicle is hidden corrupts the
+  tail velocity and misses same-car splits (`746→966`, `407→733`,
+  `300→755`). Deferred to a dedicated follow-up with adversarial tests.
+- Single-ID wobble across the ROI boundary and ByteTrack's internal body
+  switches (one native ID moving to another vehicle) are separate
+  follow-ups; continuation neither causes nor repairs them.

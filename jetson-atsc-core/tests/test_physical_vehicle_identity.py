@@ -628,3 +628,91 @@ def test_three_nonconsecutive_sightings_within_max_gap_are_enough_history(gap_fr
     frames += [[]]+[[car(2, 40+80*(t0+i)/FPS)] for i in range(3)]
     play(waits, frames)
     assert [n['local_id'] for n in only_row(waits)['native_ids']] == [1, 2]
+
+
+# --- review follow-ups: the newborn's own raw source box ----------------------------------
+# fragment(gap=3): ID 1 lost at x=50 moving down; the predicted point is (50, NEWBORN_Y) and the
+# gate .39 heights = 15.6 px. Boxes are 6 px wide (no incidental overlap) and 40 px tall.
+
+NEWBORN_Y = 40+80*13/FPS
+
+
+def narrow(x, y=NEWBORN_Y, height=40.):
+    return (x-3., y-height, x+3., y)
+
+
+def newborn(local_id=2, x=50., source=None, bbox=True, y=NEWBORN_Y):
+    return VehicleObservation(local_id, 'car', 2., (x, y), height=40., bbox=narrow(x, y) if bbox else None,
+                              source_bbox=source)
+
+
+def observe_newborn_frame(frames, last, unassigned=()):
+    waits = book()
+    end = play(waits, frames)
+    waits.observe(last, 'RED', end/FPS, end+1, 1, unassigned=unassigned)
+    return [(l['from']['local_id'], l['to']['local_id']) for r in waits.records.values() for l in r.get('identity_links', ())]
+
+
+def lost_one():
+    return fragment(gap=3)[:13]
+
+
+@pytest.mark.parametrize('competitor', ['withheld', 'tracked_source'])
+def test_newborn_source_box_overlap_vetoes_when_its_smoothed_box_does_not(competitor):
+    # Competitor at x=68: 18 px from the predicted point (outside the gate). The newborn's Kalman
+    # box (x=50) misses it; its raw detection (x=66) covers 4/6 of it, footpoints 2 px apart.
+    frames = lost_one()
+    if competitor == 'tracked_source':
+        # An existing track whose own Kalman box is far away while its raw detection is at x=68.
+        for i in range(13):frames[i] = frames[i]+[car(3, NEWBORN_Y, x=300., width=6.)]
+        other = VehicleObservation(3, 'car', 2., (100., NEWBORN_Y), height=40., bbox=narrow(100.),
+                                   source_bbox=narrow(68.))
+        run = lambda last:observe_newborn_frame(frames, last+[other])
+    else:
+        run = lambda last, withheld=(narrow(68.),):observe_newborn_frame(frames, last, unassigned=withheld)
+    source = narrow(66.)
+    assert vw._overlap_of_smaller(source, narrow(68.)) > .5 > vw._overlap_of_smaller(narrow(50.), narrow(68.))
+    assert run([newborn(source=source)]) == []
+    # Without the raw box the smoothed box alone does not compete: the link is made.
+    assert run([newborn()]) == [(1, 2)]
+    # No emitted box at all: the raw box still competes.
+    assert run([newborn(source=source, bbox=False)]) == []
+    if competitor == 'withheld':
+        # Positive control: no competitor, the same newborn (raw box included) links.
+        assert run([newborn(source=source)], withheld=()) == [(1, 2)]
+        assert run([newborn(source=source, bbox=False)], withheld=()) == [(1, 2)]
+
+
+def test_newborn_source_footpoint_in_another_lost_gate_makes_the_pair_ambiguous():
+    # Lost A (ID 1, x=50) and B (ID 5, x=80): the newborn's smoothed point is in A's gate only,
+    # its raw detection's footpoint (x=78) in B's gate only.
+    with_b = [[car(1, 40+80*i/FPS), car(5, 40+80*i/FPS, x=80.)] for i in range(10)]+[[]]*3
+    raw_near_b = newborn(source=narrow(78.))
+    assert observe_newborn_frame(with_b, [raw_near_b]) == []
+    # Positive control: without B the same newborn continues A.
+    assert observe_newborn_frame(lost_one(), [raw_near_b]) == [(1, 2)]
+
+
+def test_second_newborn_source_footpoint_in_the_gate_makes_the_pair_ambiguous():
+    # Newborn 2's smoothed point is in the gate; newborn 3's Kalman point is 40 px off but its
+    # raw detection's footpoint is 10 px from the predicted point.
+    assert observe_newborn_frame(lost_one(), [newborn(), newborn(3, x=90., source=narrow(60.))]) == []
+    assert observe_newborn_frame(lost_one(), [newborn(), newborn(3, x=90., source=narrow(110.))]) == [(1, 2)]
+
+
+def test_raw_source_footpoint_alone_never_links():
+    # The raw detection is 2 px from the predicted point, the emitted (smoothed) point 20 px.
+    assert observe_newborn_frame(lost_one(), [newborn(x=70., source=narrow(52.))]) == []
+    assert observe_newborn_frame(lost_one(), [newborn(x=52., source=narrow(52.))]) == [(1, 2)]
+
+
+@pytest.mark.parametrize('source', [
+    (47., NEWBORN_Y-40, float('nan'), NEWBORN_Y),      # non-finite
+    (53., NEWBORN_Y-40, 47., NEWBORN_Y),               # x2 <= x1
+    (47., NEWBORN_Y, 53., NEWBORN_Y),                  # zero height
+    (47., NEWBORN_Y-40),                               # too short
+    'unreadable',
+])
+def test_malformed_newborn_source_box_fails_closed(source):
+    assert observe_newborn_frame(lost_one(), [newborn(source=source)]) == []
+    assert observe_newborn_frame(lost_one(), [newborn(source=narrow(50.))]) == [(1, 2)]

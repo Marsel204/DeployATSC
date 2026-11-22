@@ -556,3 +556,174 @@ def test_real_predictor_tracker_failure_falls_back_to_detection_only(monkeypatch
     detector.reset_tracking()
     frame = step(len(frames)-1)
     assert frame.epoch == 1 and frame.withheld is not None
+
+
+# --- review follow-ups: newborn raw/smoothed overlap, tracker initialization failures ---------
+
+def native_start_callbacks(model):
+    from ultralytics.trackers.track import on_predict_start
+    return [cb for cb in model.callbacks['on_predict_start'] if getattr(cb, 'func', None) is on_predict_start]
+
+
+@pytest.mark.parametrize('competitor_x', [None, 118.8])
+def test_real_predictor_newborn_overlap_uses_raw_and_smoothed_boxes(monkeypatch, competitor_x):
+    """The newborn's Kalman box misses a withheld detection its own raw detection overlaps:
+    the raw box competes too (positive control: no competitor, the link is made)."""
+    from src.experiment.vehicle_waits import _overlap_of_smaller
+    frames = [[box(100, width=10)]]*5+[[box(112, width=10)]]
+    final = [box(113.9, width=10)]
+    if competitor_x is not None:
+        final.append(box(competitor_x, width=10))
+    frames.append(final)
+    detector, step, _ = real_detector(monkeypatch, frames)
+    waits = VehicleWaits('run', RunPolicy(fragment_continuation=True), lambda point:-1)
+    for f in range(len(frames)):
+        frame = step(f)
+        waits.observe(observations(frame), 'RED', f/FPS, f+1, 1, unassigned=_withheld_boxes(frame, detector.epoch))
+    if competitor_x is None:
+        assert links(waits) == [(1, 2)]
+    else:
+        newborn, = frame
+        competitor, _, _ = frame.withheld[0]
+        assert _overlap_of_smaller(newborn.source_bbox, competitor) > .5
+        assert _overlap_of_smaller(newborn.bbox, competitor) < .5
+        assert links(waits) == []
+
+
+def failing_initialization(monkeypatch, failing_attempts):
+    """BYTETracker.__init__ raises on the listed (1-based) construction attempts."""
+    from ultralytics.trackers.byte_tracker import BYTETracker
+    original = BYTETracker.__init__
+    attempts = []
+
+    def initialize(self, *args, **kwargs):
+        attempts.append(self)
+        if len(attempts) in failing_attempts:
+            raise RuntimeError('injected initialization failure')
+        original(self, *args, **kwargs)
+    monkeypatch.setattr(BYTETracker, '__init__', initialize)
+    return attempts
+
+
+def test_real_predictor_retries_first_tracker_initialization_without_duplicate_callbacks(monkeypatch):
+    attempts = failing_initialization(monkeypatch, {1})
+    detector, step, updates = real_detector(monkeypatch, [[box(80)]]*4)
+    first = step(0)
+    assert len(first) == 1 and not first[0].stable_id and first.withheld is None
+    for f in range(1, 4):
+        frame = step(f)
+        assert len(tracker_postprocess_callbacks(detector.model)) == 1
+        assert frame.withheld == () and len(frame) == 1 and frame[0].stable_id
+    assert len(attempts) == 2
+    assert updates == [1, 2, 3]
+
+
+def test_real_predictor_repeated_first_initialization_failures_and_failure_after_reset(monkeypatch):
+    """Frames 0 and 1 fail to build the tracker, frame 2 builds it; after a reset the first
+    build fails again. Every retry registers exactly one tracker pair and runs one update."""
+    attempts = failing_initialization(monkeypatch, {1, 2, 4})
+    detector, step, updates = real_detector(monkeypatch, [[box(80)]]*8)
+    model = detector.model
+    seen = []
+    for f in range(8):
+        if f == 5:detector.reset_tracking()
+        frame = step(f)
+        seen.append(frame)
+        failed = f in (0, 1, 5)
+        # A failed build leaves no native registration behind; a built tracker keeps exactly one.
+        assert len(tracker_postprocess_callbacks(model)) == len(native_start_callbacks(model)) == (0 if failed else 1)
+        assert detector._provenance in model.callbacks['on_predict_batch_start']
+        if failed:
+            assert len(frame) == 1 and not frame[0].stable_id and frame.withheld is None
+        else:
+            assert frame.withheld is not None and [v.stable_id for v in frame] == [True]
+    assert len(attempts) == 5
+    assert updates == [2, 3, 4, 6, 7]
+    # No stable ID was emitted before either successful build: no extra epoch.
+    assert [frame.epoch for frame in seen] == [0]*5+[1]*3
+
+
+def test_real_predictor_update_failure_on_the_first_frame_keeps_the_built_tracker(monkeypatch):
+    """Initialization succeeds but the first update raises: the frame is detection-only and the
+    registrations are restored for the tracker that exists."""
+    attempts = failing_initialization(monkeypatch, set())
+    detector, step, updates = real_detector(monkeypatch, [[box(80)]]*4, fail=lambda f:f == 0)
+    model = detector.model
+    first = step(0)
+    assert len(first) == 1 and not first[0].stable_id and first.withheld is None
+    assert len(tracker_postprocess_callbacks(model)) == len(native_start_callbacks(model)) == 1
+    tracked = []
+    for f in range(1, 4):
+        frame = step(f)
+        assert len(tracker_postprocess_callbacks(model)) == len(native_start_callbacks(model)) == 1
+        assert frame.withheld is not None
+        tracked.append(frame)
+    assert len(attempts) == 1 and updates == [0, 1, 2, 3]
+    assert tracked[-1][0].stable_id and {frame.epoch for frame in tracked} == {0}
+
+
+def test_uninitialized_tracker_cleanup_handles_empty_placeholders_and_copied_callback_dicts():
+    from functools import partial
+    from types import SimpleNamespace
+    from ultralytics.trackers.track import on_predict_postprocess_end, on_predict_start
+    from src.perception import detector_tracker as dt
+    other = lambda predictor:None
+    provenance = dt._TrackerProvenance()
+    start, end = partial(on_predict_start, persist=True), partial(on_predict_postprocess_end, persist=True)
+
+    def registrations():       # fresh lists of the same callback objects
+        return {'on_predict_start': [start, other], 'on_predict_postprocess_end': [other, end],
+                'on_predict_batch_start': [provenance]}
+    stripped = {'on_predict_start': [other], 'on_predict_postprocess_end': [other], 'on_predict_batch_start': [provenance]}
+
+    def model(trackers, shared):
+        callbacks = registrations()
+        predictor = SimpleNamespace(callbacks=callbacks if shared else registrations())
+        if trackers is not None:predictor.trackers = trackers
+        return SimpleNamespace(callbacks=callbacks, predictor=predictor)
+    for shared in (True, False):
+        # An empty placeholder is removed (8.3.x would skip initialization and index trackers[0]).
+        empty = model([], shared)
+        dt._clear_uninitialized_tracker_state(empty)
+        assert not hasattr(empty.predictor, 'trackers')
+        assert empty.callbacks == empty.predictor.callbacks == stripped
+        # Initialized trackers are left alone.
+        built = model([object()], shared)
+        dt._clear_uninitialized_tracker_state(built)
+        assert built.callbacks == built.predictor.callbacks == registrations()
+        # The fallback guard restores both dicts in full when trackers exist ...
+        with dt._WithoutTrackerCallbacks(built):
+            assert built.callbacks == built.predictor.callbacks == stripped
+        assert built.callbacks == built.predictor.callbacks == registrations()
+        # ... and leaves them stripped when none were built, even if the fallback raises.
+        missing = model(None, shared)
+        with pytest.raises(RuntimeError):
+            with dt._WithoutTrackerCallbacks(missing):
+                raise RuntimeError('fallback predict failed')
+        assert missing.callbacks == missing.predictor.callbacks == stripped
+        placeholder = model([], shared)
+        with dt._WithoutTrackerCallbacks(placeholder):
+            pass
+        assert not hasattr(placeholder.predictor, 'trackers')
+        assert placeholder.callbacks == placeholder.predictor.callbacks == stripped
+
+
+@pytest.mark.parametrize('lose', ['delete', 'empty'])
+def test_real_predictor_tracker_rebuilt_after_stable_ids_starts_a_new_epoch(monkeypatch, lose):
+    """A tracker rebuilt mid-run may restart native IDs at 1 (8.3.0's BYTETracker.__init__ resets
+    the counter): the rebuild opens a new epoch, so (epoch, local_id) never names two vehicles."""
+    detector, step, updates = real_detector(monkeypatch, [[box(80)]]*4+[[box(200)]]*4)
+    model = detector.model
+    seen = [step(f) for f in range(4)]
+    assert seen[-1][0].stable_id and detector.epoch == 0
+    if lose == 'delete':
+        del model.predictor.trackers
+    else:
+        model.predictor.trackers = []
+    seen += [step(f) for f in range(4, 8)]
+    assert len(tracker_postprocess_callbacks(model)) == len(native_start_callbacks(model)) == 1
+    assert updates == list(range(8))
+    before = {(v.epoch, v.track_id) for frame in seen[:4] for v in frame if v.stable_id}
+    after = {(v.epoch, v.track_id) for frame in seen[4:] for v in frame if v.stable_id}
+    assert before and after and not before & after
+    assert {epoch for epoch, _ in after} == {1} and detector.track_obs_counts.keys() <= {t for _, t in after}

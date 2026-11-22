@@ -374,6 +374,15 @@ class VehicleWaits:
             identity = (o.epoch, o.local_id)
             height = _height(o)
             if height is not None and self._fresh(identity):newborns.append((identity, o, height))
+        # The raw detection a newborn was emitted from (``source_bbox``) is the same
+        # vehicle seen before smoothing: it widens ambiguity, never acceptance. A
+        # supplied but unreadable source fails closed (the newborn may compete, not link).
+        sources = []
+        for _, o, _ in newborns:
+            raw = getattr(o, "source_bbox", None)
+            source = None if raw is None else _raw_box(raw)
+            sources.append((raw is None or source is not None,
+                            None if source is None else ((source[0]+source[2])/2, source[3])))
         if not newborns:return
         present = {(o.epoch, o.local_id) for o in observations if o.local_id is not None and o.stable_id}
         lost = []
@@ -407,11 +416,16 @@ class VehicleWaits:
         new_degree = [0]*len(newborns); lost_degree = [0]*len(lost); edge = {}
         for i, (new, o, _) in enumerate(newborns):
             px, py = o.point
+            source_valid, source_point = sources[i]
             for j, (old, _, _, predicted, height, gate, _) in enumerate(lost):
                 if old[0] != new[0]:continue
                 error = math.hypot(predicted[0]-px, predicted[1]-py)/height
-                if error <= gate:
-                    new_degree[i] += 1; lost_degree[j] += 1; edge[i] = (j, error)
+                in_emitted = error <= gate
+                in_source = source_point is not None and math.hypot(
+                    predicted[0]-source_point[0], predicted[1]-source_point[1])/height <= gate
+                if in_emitted or in_source:
+                    new_degree[i] += 1; lost_degree[j] += 1
+                    if in_emitted and source_valid:edge[i] = (j, error)
         competitors = None
         for i, (j, error) in edge.items():
             if new_degree[i] != 1 or lost_degree[j] != 1:continue
@@ -425,13 +439,24 @@ class VehicleWaits:
 
     @staticmethod
     def _competed(newborn, new_height, predicted, height, gate, competitors):
+        # The newborn's emitted box and its raw source box each compete with every
+        # other box (and its raw source): a smoothed box can drift off a neighbour
+        # its detection overlaps.
+        newborn_boxes = []
+        box = None if newborn.bbox is None else _raw_box(newborn.bbox)
+        if box is not None:newborn_boxes.append((newborn.point, new_height, box))
+        source = getattr(newborn, "source_bbox", None)
+        source = None if source is None else _raw_box(source)
+        if source is not None and source != box:
+            newborn_boxes.append((((source[0]+source[2])/2, source[3]), source[3]-source[1], source))
         for other, point, other_height, bbox in competitors:
             if other is newborn:continue
             if math.dist(predicted, point)/height <= gate:return True
-            if newborn.bbox is None or bbox is None or other_height is None:continue
-            if (_overlap_of_smaller(newborn.bbox, bbox) >= COMPETITOR_OVERLAP and
-                    math.dist(newborn.point, point)/min(new_height, other_height) <= COMPETITOR_FOOTPOINT_HEIGHTS):
-                return True
+            if not newborn_boxes or bbox is None or other_height is None:continue
+            for own_point, own_height, own_box in newborn_boxes:
+                if (_overlap_of_smaller(own_box, bbox) >= COMPETITOR_OVERLAP and
+                        math.dist(own_point, point)/min(own_height, other_height) <= COMPETITOR_FOOTPOINT_HEIGHTS):
+                    return True
         return False
 
     def _link(self, old, new, state, observation, timestamp, dt, error, gate, predicted, fitted):

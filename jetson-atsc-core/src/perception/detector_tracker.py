@@ -187,33 +187,68 @@ def _native_tracker_callbacks():
     return {getattr(installed, "on_predict_start", None), getattr(installed, "on_predict_postprocess_end", None)} - {None}
 
 
+def _tracker_callback_lists(model) -> List[list]:
+    """Each distinct registration list of the tracker events, on the model and its predictor.
+
+    The predictor normally shares the model's callback dict; a copied dict (or
+    copied lists) is handled too, and a shared list only once."""
+    found: Dict[int, list] = {}
+    for owner in (model, getattr(model, "predictor", None)):
+        callbacks = getattr(owner, "callbacks", None)
+        if not isinstance(callbacks, dict):
+            continue
+        for event in _TRACKER_EVENTS:
+            registered = callbacks.get(event)
+            if isinstance(registered, list):
+                found.setdefault(id(registered), registered)
+    return list(found.values())
+
+
+def _has_initialized_trackers(model) -> bool:
+    return bool(getattr(getattr(model, "predictor", None), "trackers", None))
+
+
+def _clear_uninitialized_tracker_state(model) -> None:
+    """Undo a tracker initialization that did not complete (e.g. ``BYTETracker.__init__`` raised).
+
+    An empty ``trackers`` placeholder would make 8.3.x skip registration and
+    initialization while its update callback indexes ``trackers[0]``; leftover
+    callbacks would stack with the pair 8.3.x registers on the retry."""
+    predictor = getattr(model, "predictor", None)
+    if predictor is not None and hasattr(predictor, "trackers") and not predictor.trackers:
+        delattr(predictor, "trackers")
+    if not _has_initialized_trackers(model):
+        _drop_tracker_callbacks(model)
+
+
 class _WithoutTrackerCallbacks:
     """Detach the installed tracker callbacks for one untracked ``predict``.
 
     Ultralytics 8.3.x runs ``tracker.update`` from ``on_predict_postprocess_end``
     in predict mode too, so a detection-only fallback after a tracker error
     would otherwise return tracker IDs (one-shot failure) or raise again
-    (repeated failure). The registrations are restored in place afterwards, so
-    the next ``track`` continues the same trackers."""
+    (repeated failure). When trackers exist the registrations are restored in
+    place afterwards, so the next ``track`` continues the same trackers; when
+    initialization never completed they stay removed (the retry registers one
+    fresh pair), even if the fallback itself raises."""
 
     def __init__(self, model) -> None:
-        self.saved = {}
-        callbacks = getattr(model, "callbacks", None)
-        if not isinstance(callbacks, dict):
-            return
+        self.model = model
+        self.saved = []
         native = _native_tracker_callbacks()
-        for event in _TRACKER_EVENTS:
-            registered = callbacks.get(event)
-            if isinstance(registered, list):
-                self.saved[event] = (registered, list(registered))
-                registered[:] = [cb for cb in registered if getattr(cb, "func", cb) not in native]
+        for registered in _tracker_callback_lists(model):
+            self.saved.append((registered, list(registered)))
+            registered[:] = [cb for cb in registered if getattr(cb, "func", cb) not in native]
 
     def __enter__(self):
         return self
 
     def __exit__(self, *exc) -> None:
-        for registered, original in self.saved.values():
-            registered[:] = original
+        if _has_initialized_trackers(self.model):
+            for registered, original in self.saved:
+                registered[:] = original
+        else:
+            _clear_uninitialized_tracker_state(self.model)
 
 
 def _drop_tracker_callbacks(model) -> None:
@@ -223,16 +258,11 @@ def _drop_tracker_callbacks(model) -> None:
     no trackers and appends rather than replaces, so after a reset each frame
     would run ``tracker.update`` once per stacked registration. The next
     ``track`` call registers exactly one fresh pair (on every version)."""
-    callbacks = getattr(model, "callbacks", None)
-    if not isinstance(callbacks, dict):
-        return
     native = _native_tracker_callbacks()
     if not native:
         return
-    for event in _TRACKER_EVENTS:
-        registered = callbacks.get(event)
-        if isinstance(registered, list):
-            registered[:] = [cb for cb in registered if getattr(cb, "func", cb) not in native]
+    for registered in _tracker_callback_lists(model):
+        registered[:] = [cb for cb in registered if getattr(cb, "func", cb) not in native]
 
 
 class DetectorTracker:
@@ -277,6 +307,8 @@ class DetectorTracker:
         self.min_stopped_observations = 5
         self.last_seen_timestamp: float = 0.0
         self.epoch = 0
+        # Whether a stable tracker ID was emitted since this epoch's trackers were built.
+        self._emitted_stable_in_epoch = False
 
         self._load_model()
 
@@ -373,6 +405,7 @@ class DetectorTracker:
     def reset_tracking(self) -> None:
         """Start a new identity epoch without reloading the model weights."""
         self.epoch += 1
+        self._emitted_stable_in_epoch = False
         self.track_trajectories.clear()
         self.track_obs_counts.clear()
         self.last_seen_timestamp = 0.0
@@ -450,6 +483,15 @@ class DetectorTracker:
         if provenance is not None:
             provenance.calls = []
             provenance.armed = True
+        # A failed first initialization leaves no trackers: retry it with one fresh registration.
+        _clear_uninitialized_tracker_state(self.model)
+        if not _has_initialized_trackers(self.model) and getattr(self, "_emitted_stable_in_epoch", False):
+            # Trackers are rebuilt after this epoch emitted IDs (8.3.0's BYTETracker.__init__
+            # restarts the ID counter): a new epoch, so (epoch, local_id) never repeats.
+            self.epoch += 1
+            self.track_trajectories.clear()
+            self.track_obs_counts.clear()
+            self._emitted_stable_in_epoch = False
         # Batched inference via Ultralytics track
         try:
             results = self.model.track(
@@ -531,6 +573,8 @@ class DetectorTracker:
                     if sources is not None:
                         v.source_bbox = sources[i]
                     frame_vehicles.append(v)
+                    if boxes.id is not None:
+                        self._emitted_stable_in_epoch = True
 
             batch_outputs.append(frame_vehicles)
 
