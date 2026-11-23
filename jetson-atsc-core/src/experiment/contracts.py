@@ -50,8 +50,13 @@ class RunPolicy:
         if not isinstance(self.fragment_continuation,bool):
             raise ValueError("fragment_continuation must be true or false")
         for key, value in vars(self).items():
-            if isinstance(value, (int, float)) and not math.isfinite(value):
-                raise ValueError(f"{key} must be finite")
+            if isinstance(value, (int, float)):
+                try:
+                    finite = math.isfinite(value)
+                except OverflowError:
+                    finite = False
+                if not finite:
+                    raise ValueError(f"{key} must be finite")
         if self.operation != "observation":
             raise ValueError("This runtime supports observation only")
         if not self.movement_id.strip():

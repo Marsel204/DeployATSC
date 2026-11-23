@@ -461,3 +461,34 @@ def test_session_nan_footpoint_does_not_corrupt_detector_velocity_or_red_wait(vi
         assert count_bad == 1 and crossed_bad is False
         assert state_bad == state_missing
         assert wait_bad == pytest.approx(wait_missing, abs=1e-6)
+
+
+def test_observation_start_rejects_overflowing_exit_persistence_int_with_422(video_factory, tmp_path, monkeypatch):
+    """Sol Round 28: out-of-range JSON integers (e.g. 10**309) in policy.exit_persistence_sec
+    must raise ValueError in RunPolicy and return HTTP 422 (never HTTP 500 OverflowError)."""
+    from functools import partial
+    from fastapi.testclient import TestClient
+    from src.experiment.contracts import RunPolicy
+    from src.ui.app import app
+    import src.ui.observation_api as api
+    from src.ui.observation_session import ObservationManager
+
+    for bad in (10**309, -(10**309)):
+        with pytest.raises(ValueError, match='finite'):
+            RunPolicy(exit_persistence_sec=bad)
+
+    manager = ObservationManager(
+        tmp_path/'runs', tmp_path/'profiles',
+        partial(ObservationSession, detector_factory=ScriptedDetector, anfis_factory=FakeANFIS),
+    )
+    monkeypatch.setattr(api, 'observations', manager)
+    with TestClient(app) as client:
+        for bad in (10**309, -(10**309)):
+            payload = run_payload(video_factory)
+            payload['policy']['exit_persistence_sec'] = bad
+            response = client.post('/api/observation/start',
+                                   content=json.dumps(payload),
+                                   headers={'content-type': 'application/json'})
+            assert response.status_code == 422, response.text
+    if manager.current:
+        manager.current.stop()
