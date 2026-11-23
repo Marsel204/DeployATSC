@@ -2277,9 +2277,13 @@ class VehicleWaits:
             prev_obs = exit_last if was_exit_pending else previous
             valid_motion = observation.velocity_valid and observation.speed_mps is not None
             # Wait accounting is continuous only across consecutive in-ROI frames (never across handoffs or outside dips).
-            continuous = (not was_exit_pending and previous is not None and not previous.get("handoff") and
-                          previous["sequence"] == sequence-1 and 0 < timestamp-previous["time"] <= self.policy.max_gap_sec)
-            crossing_continuous = self._step_continuous(prev_obs, timestamp, sequence) if (continuing or native_exit) else continuous
+            if continuing or native_exit:
+                continuous = not was_exit_pending and self._step_continuous(previous, timestamp, sequence)
+                crossing_continuous = self._step_continuous(prev_obs, timestamp, sequence)
+            else:
+                continuous = (not was_exit_pending and previous is not None and not previous.get("handoff") and
+                              previous["sequence"] == sequence-1 and 0 < timestamp-previous["time"] <= self.policy.max_gap_sec)
+                crossing_continuous = continuous
             geom = self._valid_box_geometry(observation) if continuing else None
             crossing_broken = bool(continuing and (self._invalid_crossing_geometry(observation) or
                                                    (geom is None and state.get("pending_crossing") is not None)))
@@ -2412,7 +2416,8 @@ class VehicleWaits:
         static_vetoes = []
         occlusion_count = 0
         native_exit = self.policy.exit_persistence_sec > 0
-        veto_window = min(self.policy.max_gap_sec, OCCLUSION_MAX_GAP_SEC)+min(1e-9, 1e-6*self.policy.max_gap_sec)
+        gap_tol = min(1e-9, 1e-6*self.policy.max_gap_sec)
+        veto_window = min(self.policy.max_gap_sec, OCCLUSION_MAX_GAP_SEC)+gap_tol
         for identity, state in self.active.items():
             row, previous, history = state["row"], state["previous"], state.get("history")
             if identity in present or row["completed"] or row["vehicle_id"] not in self.records:continue
@@ -2424,7 +2429,7 @@ class VehicleWaits:
                 continue
             if previous is None or not history:continue
             dt = timestamp-previous["time"]
-            if not 0 < dt <= self.policy.max_gap_sec+1e-9:continue
+            if not 0 < dt <= self.policy.max_gap_sec+gap_tol:continue
             last_time, x, y, height = history[-1]
             if last_time != previous["time"]:continue
             y1_last = y-height

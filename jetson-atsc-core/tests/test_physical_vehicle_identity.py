@@ -2877,3 +2877,41 @@ def test_crossing_at_exact_max_gap_and_sub_tolerance_exit_persistence():
     waits_tiny.observe([car(1, 200., x=150., height=60., speed=0., in_region=False)], 'RED', 4/FPS, 5, 1)
     assert only_row(waits_tiny)['completed'] and only_row(waits_tiny)['tracking_state'] == 'EXITED'
     assert only_row(waits_tiny)['completed_at'] == pytest.approx(3/FPS)
+
+    # Sol Round 30:
+    # 1. Exact-gap crossing through ObservationEngine preserves a single GREEN cycle,
+    #    crossing_cycle=1, n_served=1, and full red wait at dt == max_gap_sec (0.4 - 0.3).
+    eng = ObservationEngine(
+        'gap-engine',
+        RunPolicy(max_gap_sec=0.1, fragment_continuation=True, exit_persistence_sec=0.3),
+        {'xmin': 0, 'ymin': 0, 'xmax': 8, 'ymax': 8},
+        lambda p: 270.-p[1],
+        lambda *_: None,
+    )
+    for seq, (t, y, h) in enumerate([(0.0, 280., 60.), (0.1, 280., 60.), (0.2, 280., 60.),
+                                     (0.3, 265., 45.), (0.4, 253., 45.)], start=1):
+        eng.observe_acquisition(GREEN, t, seq, [car(1, y, x=150., height=h, speed=0.)], unassigned_boxes=())
+    for seq, t in enumerate([0.45, 0.50, 0.55], start=6):
+        eng.observe_acquisition(GREEN, t, seq, [], unassigned_boxes=())
+    eng_row = next(iter(eng.waits.records.values()))
+    assert eng_row['tracking_state'] == 'SERVED' and eng_row['crossing_cycle'] == 1
+    comps = eng.snapshot()['comparisons']
+    assert len(comps) == 1 and comps[0]['n_served'] == 1
+
+    waits_red = VehicleWaits(
+        'gap-red',
+        RunPolicy(max_gap_sec=0.1, stop_persistence_sec=0, fragment_continuation=True, exit_persistence_sec=0.3),
+        side=lambda p: 270.-p[1],
+    )
+    for seq, t in enumerate([0.2, 0.3, 0.4], start=1):
+        waits_red.observe([car(1, 280., x=150., height=60., speed=0.)], 'RED', t, seq, 1, unassigned=())
+    red_row = only_row(waits_red)
+    assert red_row['red_wait_sec'] == pytest.approx(0.2, abs=1e-9)
+    assert 'observation_gap' not in red_row['quality_flags']
+
+    # 2. Small configured max_gap_sec (1e-9) must not allow handoffs exceeding it (dt=1.5e-9).
+    waits_sm = VehicleWaits('small-gap', RunPolicy(max_gap_sec=1e-9, fragment_continuation=True), side=lambda p: -1.)
+    for seq, t in enumerate([0.0, 5e-10, 1e-9], start=1):
+        waits_sm.observe([car(1, 200., x=150., height=60., speed=0.)], 'RED', t, seq, 1, unassigned=())
+    waits_sm.observe([car(2, 200., x=150., height=60., speed=0.)], 'RED', 2.5e-9, 4, 1, unassigned=())
+    assert len(waits_sm.records) == 2 and not any(r.get('identity_links') for r in waits_sm.records.values())
