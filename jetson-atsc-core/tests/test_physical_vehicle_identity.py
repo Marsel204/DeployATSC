@@ -1078,3 +1078,2470 @@ def test_sol_s5_s7_stationary_flicker_pairs_are_not_overcharged_in_pair_budget(w
                   'RED', 10/FPS, 11, 1, unassigned=())
     assert waits.continuation_skipped_frames == 0
     assert len(_links(waits)) == 46
+
+
+# --- bottom-edge occlusion stop-line crossing resilience ----------------------------
+
+def test_bottom_clipped_stationary_car_does_not_falsely_cross_and_links_occlusion_tail():
+    """#407->#733 / #300->#755 pattern: bottom-edge occlusion clipping a stationary car
+    upward past the stop line must not prematurely complete it as SERVED; the open row
+    then continues via A1's occlusion-tail gate and crosses once it genuinely departs."""
+    stop_y = 270.
+    waits = book(side=lambda p: stop_y-p[1])
+    # Stationary car at y1=237, baseline h=55 (y2=292, behind stop_y=270), clipped upward to y2=264.
+    frames = [[car(407, 292., x=185., height=55., speed=0.)] for _ in range(4)]
+    for h in (48., 41., 36., 31., 28., 26.):  # y2 crosses 270 when h=31 (y2=268 < 270)
+        frames.append([car(407, 237.+h, x=185.5, height=h, speed=0.)])
+    end = play(waits, frames, phase='RED')
+    row = only_row(waits)
+    assert not row['completed'] and not row['crossed_stop_line']
+    assert row['tracking_state'] != 'SERVED'
+
+    # Car vanishes behind occluder for 6 frames (dt=0.233 s), reappears as #733 still clipped,
+    # then recovers to full height behind the stop line and genuinely departs upward.
+    recovery = [[]]*6
+    recovery += [[car(733, 266., x=183., height=29., speed=0.)]]
+    recovery += [[car(733, 295., x=183., height=58., speed=0.)] for _ in range(5)]
+    for i in range(1, 12):
+        recovery.append([car(733, 295.-4.*i, x=183., height=58., speed=2.)])  # genuine upward move
+    play(waits, recovery, start=end, phase='GREEN')
+    row = only_row(waits)
+    assert _links(waits) == [(407, 733)]
+    assert row['identity_links'][0]['rule'] == 'mutually_unique_uncontested_occlusion_tail_gate'
+    assert row['crossed_stop_line'] and row['tracking_state'] == 'SERVED'
+    assert row['crossing_phase'] == 'GREEN'
+    assert row['crossing_at'] > (end+11)/FPS
+
+
+def test_bottom_clipped_stationary_car_recovers_behind_line_and_keeps_accruing_wait():
+    """#232 (f134) pattern: temporary bottom-edge clip past the stop line cancels cleanly
+    when the occlusion clears and the footpoint returns behind the line, preserving RED wait."""
+    stop_y = 270.
+    waits = book(side=lambda p: stop_y-p[1])
+    frames = [[car(232, 278., x=162., height=63., speed=0.)] for _ in range(5)]
+    for h in (60., 56., 52., 48., 51., 56.):  # y1=215 -> y2 dips to 263 (< 270) then recovers to 271 (> 270)
+        frames.append([car(232, 215.+h, x=162., height=h, speed=0.)])
+    # Remains stopped behind the line on RED for 1.0 s (30 frames), then departs on GREEN.
+    frames += [[car(232, 278., x=162., height=63., speed=0.)] for _ in range(30)]
+    end_red = play(waits, frames, phase='RED')
+    row = only_row(waits)
+    assert not row['completed'] and not row['crossed_stop_line']
+    assert row['red_wait_sec'] >= 1.0
+
+    depart = [[car(232, 278.-4.*i, x=162., height=63., speed=2.)] for i in range(1, 6)]
+    play(waits, depart, start=end_red, phase='GREEN')
+    assert row['crossed_stop_line'] and row['crossing_phase'] == 'GREEN'
+    assert row['crossing_at'] >= end_red/FPS
+
+
+def test_genuine_departures_still_cross_including_clipped_acceleration_and_downward_orientation():
+    """Genuine departures must never be dropped: slow unclipped upward moves, downward
+    crossings, isolated tall outliers, and clipped cars whose unclipped rear later clears."""
+    # 1. Slow genuine upward departure (both y1 and y2 advance across y=270).
+    waits_slow = book(side=lambda p: 270.-p[1])
+    slow = [[car(1, 286.-3.*i, x=150., height=55., speed=1.5)] for i in range(10)]
+    play(waits_slow, slow, phase='GREEN')
+    assert only_row(waits_slow)['crossed_stop_line']
+
+    # 2. Downward crossing (side = y - 200) with mild shrinkage is never suppressed.
+    waits_down = book(side=lambda p: p[1]-200.)
+    down = [[car(1, 190.+2.*i, x=150., height=60.-2.*i, speed=1.)] for i in range(8)]
+    play(waits_down, down, phase='GREEN')
+    assert only_row(waits_down)['crossed_stop_line']
+
+    # 3. Initially bottom-clipped stationary car that then drives forward while still
+    #    partially clipped confirms once its unclipped rear (y1 + h_base) clears the line.
+    waits_confirm = book(side=lambda p: 270.-p[1])
+    frames = [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(5)]
+    frames += [[car(1, 220.+45., x=150., height=45., speed=0.)]]  # clipped y2=265 (<270), y1+60=280 (>270)
+    end_clip = play(waits_confirm, frames, phase='RED')
+    row = only_row(waits_confirm)
+    assert not row['crossed_stop_line']
+    # Now car genuinely drives upward while height stays clipped at 45: y1 moves 220 -> 205 (y1+60=265 < 270).
+    drive = [[car(1, (220.-5.*i)+45., x=150., height=45., speed=2.)] for i in range(1, 5)]
+    play(waits_confirm, drive, start=end_clip, phase='GREEN')
+    assert row['crossed_stop_line'] and row['crossing_phase'] == 'GREEN'
+    assert row['crossing_evidence']['from_side'] < 0 <= row['crossing_evidence']['to_side']
+
+    # 4. Single isolated tall outlier frame cannot fabricate h_base to suppress a real crossing.
+    waits_outlier = book(side=lambda p: 270.-p[1])
+    heights = [50., 50., 80., 50., 50., 50.]
+    ys = [275., 274., 274., 273., 272., 269.]
+    outlier = [[car(1, y, x=150., height=h, speed=0.5)] for y, h in zip(ys, heights)]
+    play(waits_outlier, outlier, phase='GREEN')
+    assert only_row(waits_outlier)['crossed_stop_line']
+
+    # 5. Pending crossing clears on an observation gap (never synthesized across a gap).
+    waits_gap = book(side=lambda p: 270.-p[1])
+    end_gap = play(waits_gap, frames, phase='RED')
+    play(waits_gap, [[]] + [[car(1, 250., x=150., height=45., speed=2.)]], start=end_gap, phase='GREEN')
+    assert not only_row(waits_gap)['crossed_stop_line']
+
+
+# --- opt-in ROI boundary exit hysteresis (Idea C) -----------------------------------
+
+def test_exit_persistence_validation_default_off_and_persistent_isolation():
+    assert RunPolicy().exit_persistence_sec == 0.0
+    for bad in (True, False, -0.1, 5.1, float('nan'), float('inf'), '0.3'):
+        with pytest.raises(ValueError):
+            RunPolicy(exit_persistence_sec=bad)
+    assert RunPolicy(exit_persistence_sec=0.3).exit_persistence_sec == pytest.approx(0.3)
+
+    # PersistentVehicleWaits zeroes RunPolicy.exit_persistence_sec (uses IdentityPolicy only).
+    pwaits = PersistentVehicleWaits('run', RunPolicy(exit_persistence_sec=0.5), lambda p: -1., IdentityPolicy(mode='persistent_v1'))
+    assert pwaits.policy.exit_persistence_sec == 0.0
+
+
+def test_roi_exit_persistence_bridges_border_dips_without_splitting_or_accruing_wait():
+    """#350/#1429/#1468/#1924 pattern: brief border dips keep one vehicle row without
+    accruing outside wait; default-off (0 s) still splits immediately."""
+    def run_dip(exit_sec):
+        waits = VehicleWaits('run', RunPolicy(stop_persistence_sec=0, exit_persistence_sec=exit_sec), side=lambda p: -1.)
+        for i in range(5):
+            waits.observe([car(1, 120., speed=0.)], 'RED', i/FPS, i+1, 1)
+        # Dip outside ROI for 3 frames (0.10 s) while stopped on RED.
+        mid_states = []
+        for i in range(5, 8):
+            waits.observe([car(1, 120., speed=0., in_region=False)], 'RED', i/FPS, i+1, 1)
+            mid_states.append((waits.records['run:acquisition:0:1']['tracking_state'],
+                               waits.records['run:acquisition:0:1']['completed'],
+                               waits.active[(0, 1)].get('exit_candidate')))
+        # Return inside ROI for 5 more frames.
+        for i in range(8, 13):
+            waits.observe([car(1, 120., speed=0.)], 'RED', i/FPS, i+1, 1)
+        return waits, mid_states
+
+    off_waits, _ = run_dip(0.0)
+    assert set(off_waits.records) == {'run:acquisition:0:1', 'run:acquisition:0:1:segment-1'}
+    assert off_waits.records['run:acquisition:0:1']['tracking_state'] == 'EXITED'
+
+    on_waits, mid = run_dip(0.3)
+    assert list(on_waits.records) == ['run:acquisition:0:1']
+    assert all(state == 'EXIT_PENDING' and not done and cand == pytest.approx(5/FPS) for state, done, cand in mid)
+    row = only_row(on_waits)
+    assert not row['completed'] and row['tracking_state'] == 'STOPPED'
+    assert 'observation_gap' in row['quality_flags']
+    # Outside dip [4/FPS, 8/FPS] = 4/FPS s is unknown_sec, never fabricated red wait.
+    assert row['unknown_sec'] == pytest.approx(4/FPS)
+    assert row['red_wait_sec'] == pytest.approx(8/FPS)  # 4 intervals before + 4 intervals after
+
+
+def test_roi_exit_persistence_confirms_real_exits_preserves_exit_crossings_and_handles_gaps():
+    # 1. Real consecutive exit >= 0.30 s completes at exact first-outside timestamp; later return starts segment-1.
+    waits = VehicleWaits('run', RunPolicy(stop_persistence_sec=0, exit_persistence_sec=0.3), side=lambda p: -1.)
+    for i in range(3):
+        waits.observe([car(1, 120., speed=0.)], 'RED', i/FPS, i+1, 1)
+    for i in range(3, 12):  # 3..11 -> dt = 8/30 = 0.267 s < 0.30 s
+        waits.observe([car(1, 120., speed=0., in_region=False)], 'RED', i/FPS, i+1, 1)
+        assert not waits.records['run:acquisition:0:1']['completed']
+    waits.observe([car(1, 120., speed=0., in_region=False)], 'RED', 12/FPS, 13, 1)  # dt = 9/30 = 0.300 s
+    row = waits.records['run:acquisition:0:1']
+    assert row['completed'] and row['tracking_state'] == 'EXITED' and not row['right_censored']
+    assert row['completed_at'] == pytest.approx(3/FPS)
+    assert row['last_seen'] == pytest.approx(2/FPS)
+    # Re-entry after confirmed exit starts a new segment.
+    waits.observe([car(1, 120., speed=0., in_region=True)], 'RED', 20/FPS, 21, 1)
+    assert set(waits.records) == {'run:acquisition:0:1', 'run:acquisition:0:1:segment-1'}
+
+    # 2. Genuine stop-line crossing on the exit frame still completes immediately as SERVED.
+    waits_cross = VehicleWaits('run', RunPolicy(stop_persistence_sec=0, exit_persistence_sec=0.3), side=lambda p: p[1]-150.)
+    waits_cross.observe([car(1, 145., speed=2.)], 'GREEN', 0., 1, 1)
+    waits_cross.observe([car(1, 155., speed=2., in_region=False)], 'GREEN', 1/FPS, 2, 1)
+    assert only_row(waits_cross)['crossed_stop_line'] and only_row(waits_cross)['tracking_state'] == 'SERVED'
+
+    # 3. Missing-frame gap while outside restarts exit timer (requires consecutive outside evidence),
+    #    and vanishing before confirmation closes honestly as tracking_lost after association_gap_sec.
+    waits_gap = VehicleWaits('run', RunPolicy(stop_persistence_sec=0, exit_persistence_sec=0.3, association_gap_sec=0.5),
+                             side=lambda p: -1.)
+    waits_gap.observe([car(1, 120., speed=0.)], 'RED', 0., 1, 1)
+    waits_gap.observe([car(1, 120., speed=0., in_region=False)], 'RED', 1/FPS, 2, 1)
+    waits_gap.observe([], 'RED', 2/FPS, 3, 1)  # dropout while outside
+    waits_gap.observe([car(1, 120., speed=0., in_region=False)], 'RED', 10/FPS, 11, 1)  # gap > 0: restarts timer!
+    assert not only_row(waits_gap)['completed']
+    waits_gap.observe([], 'RED', 1.0, 31, 1)  # vanishes > association_gap_sec without confirming exit
+    row_gap = only_row(waits_gap)
+    assert row_gap['completed'] and 'tracking_lost' in row_gap['quality_flags']
+    assert row_gap['tracking_state'] == 'LOST'
+
+    # 4. An EXIT_PENDING track that vanishes does not link to a newborn inside the ROI.
+    waits_cont = book(exit_persistence_sec=0.3, side=lambda p: -1.)
+    end = play(waits_cont, [[car(1, 120., x=100., height=40., speed=0.)] for _ in range(5)])
+    waits_cont.observe([car(1, 120., x=100., height=40., speed=0., in_region=False)], 'RED', end/FPS, end+1, 1, unassigned=())
+    waits_cont.observe([car(2, 120., x=100., height=40., speed=0., in_region=True)], 'RED', (end+1)/FPS, end+2, 1, unassigned=())
+    assert _links(waits_cont) == []
+    assert len(waits_cont.records) == 2
+
+
+def test_sustained_bottom_clip_requires_geometric_recovery_before_clearing_anchor():
+    """Sol S2: sustained clipping that ages full-height samples out of history must not
+    lose its anchor on a partial (45->51) or single-frame recovery behind the line."""
+    stop_y = 270.
+    waits = book(side=lambda p: stop_y-p[1])
+    # 5 frames full height (y1=220, h=60 -> y2=280), then 10 clipped frames (h=45 -> y2=265).
+    frames = [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(5)]
+    frames += [[car(1, 265., x=150., height=45., speed=0.)] for _ in range(10)]
+    # Partial recovery behind line (h=51 -> y2=271, side=-1) then back to clipped h=45.
+    frames += [[car(1, 271., x=150., height=51., speed=0.)],
+               [car(1, 265., x=150., height=45., speed=0.)]]
+    # Repeated partial recovery (h=54, 90% < 95%) then back to clipped h=45.
+    frames += [[car(1, 274., x=150., height=54., speed=0.)] for _ in range(3)]
+    frames += [[car(1, 265., x=150., height=45., speed=0.)]]
+    # Single-frame full recovery bounce (h=60 for 1 frame) then back to clipped h=45.
+    frames += [[car(1, 280., x=150., height=60., speed=0.)],
+               [car(1, 265., x=150., height=45., speed=0.)]]
+    end = play(waits, frames, phase='RED')
+    row = only_row(waits)
+    assert not row['completed'] and not row['crossed_stop_line']
+    assert waits.active[(0, 1)].get('pending_crossing') is not None
+
+    # Two consecutive full-height behind-line frames clear the anchor cleanly, and
+    # populate history so a subsequent clip is still caught while genuine motion crosses.
+    end = play(waits, [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(2)], start=end, phase='RED')
+    assert waits.active[(0, 1)].get('pending_crossing') is None
+    end = play(waits, [[car(1, 265., x=150., height=45., speed=0.)]], start=end, phase='RED')
+    assert not row['crossed_stop_line']
+    # Genuine forward motion while clipped confirms once y1 + 60 clears stop_y=270.
+    depart = [[car(1, (220.-5.*i)+45., x=150., height=45., speed=2.)] for i in range(1, 5)]
+    play(waits, depart, start=end, phase='GREEN')
+    assert row['crossed_stop_line'] and row['tracking_state'] == 'SERVED'
+    assert row['crossing_phase'] == 'GREEN'
+
+    # Sol S2 Round 2: stationary 60 px box clips to 45 px (aging 60 px out of history),
+    # recovers to 57 px for two frames (clearing pending_crossing), then re-clips to 51 px
+    # past stop_y=272 while top stays fixed at y1=220 -> must NOT falsely become SERVED.
+    waits_r2 = book(side=lambda p: 272.-p[1])
+    seq_r2 = [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(5)]
+    seq_r2 += [[car(1, 265., x=150., height=45., speed=0.)] for _ in range(10)]
+    seq_r2 += [[car(1, 277., x=150., height=57., speed=0.)] for _ in range(2)]
+    seq_r2 += [[car(1, 271., x=150., height=51., speed=0.)]]
+    play(waits_r2, seq_r2, phase='RED')
+    row_r2 = only_row(waits_r2)
+    assert not row_r2['completed'] and not row_r2['crossed_stop_line']
+    assert waits_r2.active[(0, 1)].get('pending_crossing') is not None
+
+    # Positive control: after two 57 px behind-line frames, a genuine full-height 57 px
+    # departure (top moves upward to y1=214, y2=271 past stop_y=272) confirms SERVED immediately.
+    waits_dep = book(side=lambda p: 272.-p[1])
+    seq_dep = seq_r2[:-1] + [[car(1, 271., x=150., height=57., speed=2.)]]
+    play(waits_dep, seq_dep, phase='GREEN')
+    assert only_row(waits_dep)['crossed_stop_line'] and only_row(waits_dep)['tracking_state'] == 'SERVED'
+
+    # Sol S2 Round 3: stationary clip starting behind the line (60 -> 51 x10 -> 45 at y1=220,
+    # stop_y=270) must save the 60 px baseline at 51 px before 60 px ages out of history.
+    waits_r3 = book(side=lambda p: 270.-p[1])
+    seq_r3 = [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(5)]
+    seq_r3 += [[car(1, 271., x=150., height=51., speed=0.)] for _ in range(10)]
+    seq_r3 += [[car(1, 265., x=150., height=45., speed=0.)]]
+    play(waits_r3, seq_r3, phase='RED')
+    row_r3 = only_row(waits_r3)
+    assert not row_r3['completed'] and not row_r3['crossed_stop_line']
+    assert waits_r3.active[(0, 1)].get('pending_crossing') is not None
+
+    # Sol S2 Round 4: gradual staircase shrinkage behind the line (60 x5 -> 54 x10 -> 48
+    # at y1=220, stop_y=270) where neither step alone reaches 15% must still preserve the
+    # 60 px baseline while pinned and catch the cumulative 20% shrink at the crossing.
+    waits_r4 = book(side=lambda p: 270.-p[1])
+    seq_r4 = [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(5)]
+    seq_r4 += [[car(1, 274., x=150., height=54., speed=0.)] for _ in range(10)]
+    seq_r4 += [[car(1, 268., x=150., height=48., speed=0.)]]
+    play(waits_r4, seq_r4, phase='RED')
+    row_r4 = only_row(waits_r4)
+    assert not row_r4['completed'] and not row_r4['crossed_stop_line']
+    assert waits_r4.active[(0, 1)].get('pending_crossing') is not None
+
+    # Sol S2 Round 5: equal-height newer stationary geometry (y1=216, h=60 x6 -> y1=220, h=60 x12
+    # -> y1=220, h=48 at stop_y=270) must refresh the saved baseline's rear to y2=280 rather than
+    # retaining the stale y2=276 rear (which puts bottom share at 8/12 < 0.70 and falsely crosses).
+    waits_r5 = book(side=lambda p: 270.-p[1])
+    seq_r5 = [[car(1, 276., x=150., height=60., speed=0.)] for _ in range(6)]
+    seq_r5 += [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(12)]
+    seq_r5 += [[car(1, 268., x=150., height=48., speed=0.)]]
+    play(waits_r5, seq_r5, phase='RED')
+    row_r5 = only_row(waits_r5)
+    assert not row_r5['completed'] and not row_r5['crossed_stop_line']
+    assert waits_r5.active[(0, 1)].get('pending_crossing') is not None
+
+    # Sol S2 Round 6: corroborated recent baselines AND saved baselines are all evaluated so
+    # neither an equal-height tie-break nor a 1 px taller saved baseline hides a qualifying clip.
+    for label, seq_r6 in (
+        ('recent_shift_up_equal_h',
+         [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(6)]
+         + [[car(1, 276., x=150., height=60., speed=0.)] for _ in range(2)]
+         + [[car(1, 268., x=150., height=48., speed=0.)]]),
+        ('saved_1px_taller_before_recent',
+         [[car(1, 276., x=150., height=61., speed=0.)] for _ in range(6)]
+         + [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(12)]
+         + [[car(1, 268., x=150., height=48., speed=0.)]]),
+        ('saved_1px_taller_then_partial_shrink',
+         [[car(1, 276., x=150., height=61., speed=0.)] for _ in range(6)]
+         + [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(12)]
+         + [[car(1, 274., x=150., height=54., speed=0.)] for _ in range(10)]
+         + [[car(1, 268., x=150., height=48., speed=0.)]]),
+        # Sol S2 Round 7: interior nondominated (h=60, rear=238.0) between (61, 233.3) and (54, 239.2).
+        ('nondominated_interior_height_rear',
+         [[car(1, 276., x=150., height=61., speed=0.)] for _ in range(6)]
+         + [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(12)]
+         + [[car(1, 277., x=150., height=54., speed=0.)] for _ in range(10)]
+         + [[car(1, 268., x=150., height=48., speed=0.)]]),
+        # Sol S11 Round 7: equal-score horizontal anchor (x=157) not dominated by older x=150 anchor.
+        ('equal_score_distinct_x_drift_gate',
+         [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(6)]
+         + [[car(1, 280., x=157., height=60., speed=0.)] for _ in range(12)]
+         + [[car(1, 274., x=157., height=54., speed=0.)] for _ in range(10)]
+         + [[car(1, 268., x=160., height=48., speed=0.)]]),
+        # Sol S2 Round 8: over-cap Pareto frontier jitter must not evict high-coverage (280, 60)
+        # (tested both at 17 points and 40 points > MAX_CLIP_BASELINES).
+        ('over_cap_frontier_preserves_qualifying_corner_17',
+         [[car(1, 276., x=150., height=61., speed=0.)] for _ in range(6)]
+         + [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(12)]
+         + [obs for i in range(17) for obs in [[car(1, 278.25, x=150., height=56.25-i/16., speed=0.)]]*2]
+         + [[car(1, 278.25, x=150., height=56.25-16/16., speed=0.)] for _ in range(12)]
+         + [[car(1, 268., x=150., height=48., speed=0.)]]),
+        ('over_cap_frontier_preserves_qualifying_corner_40',
+         [[car(1, 276., x=150., height=61., speed=0.)] for _ in range(6)]
+         + [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(12)]
+         + [obs for i in range(40) for obs in [[car(1, 278.25, x=150., height=56.25-i/40., speed=0.)]]*2]
+         + [[car(1, 278.25, x=150., height=56.25-39/40., speed=0.)] for _ in range(12)]
+         + [[car(1, 268., x=150., height=48., speed=0.)]]),
+        # Sol S11 Round 8: equal-score horizontal jitter must not evict older x=157 drift anchor
+        # (tested both at 17 jitter values and 40 jitter values > MAX_CLIP_BASELINES).
+        ('over_cap_equal_score_x_jitter_17',
+         [[car(1, 280., x=157., height=60., speed=0.)] for _ in range(12)]
+         + [obs for i in range(17) for obs in [[car(1, 280., x=150.+i/32., height=60., speed=0.)]]*2]
+         + [[car(1, 274., x=157., height=54., speed=0.)] for _ in range(12)]
+         + [[car(1, 268., x=160., height=48., speed=0.)]]),
+        ('over_cap_equal_score_x_jitter_40',
+         [[car(1, 280., x=157., height=60., speed=0.)] for _ in range(12)]
+         + [obs for i in range(40) for obs in [[car(1, 280., x=150.+i/80., height=60., speed=0.)]]*2]
+         + [[car(1, 274., x=157., height=54., speed=0.)] for _ in range(12)]
+         + [[car(1, 268., x=160., height=48., speed=0.)]]),
+        # Sol S11 Round 9: lossless drift-gate containment preserves x=157 across 40 higher-rear
+        # anchors and subsequent slow horizontal drift to x=165.9375 (within 9 px of x=157).
+        ('lossless_x_drift_containment_round9',
+         [[car(1, 280., x=157., height=60., speed=0.)] for _ in range(12)]
+         + [[car(1, 280.125, x=156.875, height=60., speed=0.)] for _ in range(12)]
+         + [obs for i in range(40) for obs in [[car(1, 280.125, x=150.+0.171875*i, height=60., speed=0.)]]*2]
+         + [[car(1, 274., x=min(156.703125+0.5*i, 165.9375), height=54., speed=0.)] for i in range(32)]
+         + [[car(1, 268., x=165.9375, height=48., speed=0.)]]),
+    ):
+        waits_r6 = book(side=lambda p: 270.-p[1])
+        play(waits_r6, seq_r6, phase='RED')
+        row_r6 = only_row(waits_r6)
+        assert not row_r6['completed'] and not row_r6['crossed_stop_line'], label
+        assert waits_r6.active[(0, 1)].get('pending_crossing') is not None, label
+
+    # Sol S2 Round 9: lossless nondominated frontier preserves (280, 60) across 40 finer steps
+    # at stop_y=274 so (273.65, 50.95) with top pinned at y1=222.7 stays pending, not SERVED.
+    waits_r9 = book(side=lambda p: 274.-p[1])
+    seq_r9 = ([[car(1, 280., x=150., height=60.1, speed=0.)] for _ in range(12)]
+              + [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(12)]
+              + [obs for i in range(40) for obs in [[car(1, 280., x=150., height=59.75-0.18*i, speed=0.)]]*2]
+              + [[car(1, 278.7, x=150., height=56., speed=0.)] for _ in range(12)]
+              + [[car(1, 273.65, x=150., height=50.95, speed=0.)]])
+    play(waits_r9, seq_r9, phase='RED')
+    row_r9 = only_row(waits_r9)
+    assert not row_r9['completed'] and not row_r9['crossed_stop_line']
+    assert waits_r9.active[(0, 1)].get('pending_crossing') is not None
+
+
+def test_sustained_stationary_jitter_per_frame_cost_stays_bounded():
+    """Sol S12/S13: 6 stopped vehicles jittering < 1 px (1D, 3D, Pareto) for 60 s
+    keep stationary, clipped, and genuine-departure crossing times bounded with O(1)
+    skyline stop-line checks; slow drift compacts column arrays; growing height evicts
+    dominated entries from live indexes."""
+    waits = book(side=lambda p: 270.-p[1])
+    tail_ms = []
+    for f in range(1800):
+        dx = (f % 1799)/1800.  # 1799 distinct sub-pixel x positions inside < 1 px
+        obs = [car(1+k, 280., x=100.+80.*k+dx, height=60., speed=0.) for k in range(6)]
+        started = time.perf_counter()
+        waits.observe(obs, 'RED', f/FPS, f+1, 1, unassigned=())
+        elapsed_ms = (time.perf_counter()-started)*1000.
+        if f >= 1650:
+            tail_ms.append(elapsed_ms)
+    median_ms = sorted(tail_ms)[len(tail_ms)//2]
+    assert median_ms < 5.0, f'1D jitter median tail frame time {median_ms:.2f} ms exceeds budget'
+    # Clipped frame on all 6 vehicles after 60 s of jitter is still caught as pending, not SERVED.
+    waits.observe([car(1+k, 268., x=100.+80.*k+0.5, height=48., speed=0.) for k in range(6)],
+                  'RED', 1800/FPS, 1801, 1, unassigned=())
+    assert all(not r['crossed_stop_line'] for r in waits.records.values())
+
+    # 3D (x, y2, h) sub-pixel jitter for 60 s: both stationary tail AND crossing frame stay fast.
+    waits_3d = book(side=lambda p: 270.-p[1])
+    tail_3d_ms = []
+    for f in range(1800):
+        obs = []
+        for k in range(6):
+            dx = (((f*37+k*13) % 997)/997.-0.5)*0.9
+            dy = (((f*53+k*29) % 991)/991.-0.5)*0.9
+            dh = (((f*71+k*41) % 983)/983.-0.5)*0.9
+            obs.append(car(1+k, 280.+dy, x=100.+80.*k+dx, height=60.+dh, speed=0.))
+        started = time.perf_counter()
+        waits_3d.observe(obs, 'RED', f/FPS, f+1, 1, unassigned=())
+        elapsed_ms = (time.perf_counter()-started)*1000.
+        if f >= 1650:
+            tail_3d_ms.append(elapsed_ms)
+    median_3d_ms = sorted(tail_3d_ms)[len(tail_3d_ms)//2]
+    assert median_3d_ms < 5.0, f'3D jitter median tail frame time {median_3d_ms:.2f} ms exceeds budget'
+    started = time.perf_counter()
+    waits_3d.observe([car(1+k, 268., x=100.+80.*k, height=48., speed=0.) for k in range(6)],
+                     'RED', 1800/FPS, 1801, 1, unassigned=())
+    cross_3d_ms = (time.perf_counter()-started)*1000.
+    assert cross_3d_ms < 10.0, f'3D jitter crossing frame time {cross_3d_ms:.2f} ms exceeds budget'
+    assert all(not r['crossed_stop_line'] for r in waits_3d.records.values())
+
+    # Sol S12: genuine departure after 60 s of Pareto accumulation (900 unique (h, y2)/track),
+    # INCLUDING partial drift pruning on the departure frame, must avoid rebuilding/sorting
+    # and check only the tallest eligible baseline on the straight stop line.
+    side_calls = [0]
+    def counted_side(p):
+        side_calls[0] += 1
+        return 275.-p[1]
+    waits_dep = book(side=counted_side)
+    for f in range(1800):
+        step = f//2
+        dx = -0.5 if step < 15 else 0.0
+        h = 60.-0.001*step
+        y2 = 276.-0.0004*step
+        obs = [car(1+k, y2, x=100.+80.*k+dx, height=h, speed=0.) for k in range(6)]
+        waits_dep.observe(obs, 'RED', f/FPS, f+1, 1, unassigned=())
+    assert len(waits_dep.active[(0, 1)]['clip_baselines']) >= 850
+    side_calls[0] = 0
+    started = time.perf_counter()
+    # x=+8.6 prunes the 15 step<15 baselines while ~885 survive; y1=214 clears y=275 for all.
+    waits_dep.observe([car(1+k, 262., x=100.+80.*k+8.6, height=48., speed=1.) for k in range(6)],
+                      'GREEN', 1800/FPS, 1801, 1, unassigned=())
+    depart_ms = (time.perf_counter()-started)*1000.
+    assert depart_ms < 15.0, f'genuine departure after partial prune took {depart_ms:.2f} ms'
+    assert side_calls[0] <= 120, f'genuine departure scanned baselines ({side_calls[0]} side calls)'
+    assert all(r['tracking_state'] == 'SERVED' and r['crossed_stop_line'] for r in waits_dep.records.values())
+
+    # Sol S12 (Round 13/14): scattered equal-height partial pruning across mixed leaves must
+    # stay fast on BOTH genuine departure AND clipped crossing without refreshing KD leaves.
+    for mode, stop_y, dep_py, dep_spd, expect_served in (
+        ('depart', 275., 262., 1., True),
+        ('clipped', 270., 264., 0., False),
+    ):
+        waits_eq = book(side=lambda p, sy=stop_y: sy-p[1])
+        for f in range(1800):
+            step = f//2
+            dx = -0.5 if (step % 4 == 0 and step < 800) else 0.0  # 200 scattered across all leaves
+            y2 = 276.+0.002*step  # 900 distinct y2 values sharing the EXACT SAME height=60
+            obs = [car(1+k, y2, x=100.+80.*k+dx, height=60., speed=0.) for k in range(6)]
+            waits_eq.observe(obs, 'RED', f/FPS, f+1, 1, unassigned=())
+        assert len(waits_eq.active[(0, 1)]['clip_baselines']._blocks) >= 4
+        started = time.perf_counter()
+        waits_eq.observe([car(1+k, dep_py, x=100.+80.*k+8.6, height=48., speed=dep_spd) for k in range(6)],
+                         'GREEN', 1800/FPS, 1801, 1, unassigned=())
+        eq_ms = (time.perf_counter()-started)*1000.
+        assert eq_ms < 15.0, f'scattered equal-height partial-prune {mode} took {eq_ms:.2f} ms'
+        assert all(r['crossed_stop_line'] is expect_served for r in waits_eq.records.values())
+
+    # Sol S13: growing height with fixed top/center evicts dominated live baselines (retaining 1/track).
+    waits_grow = book(side=lambda p: 270.-p[1])
+    for f in range(1800):
+        h = 60.+0.88*(f/1799.)
+        y2 = 220.+h
+        obs = [car(1+k, y2, x=100.+80.*k, height=h, speed=0.) for k in range(6)]
+        waits_grow.observe(obs, 'RED', f/FPS, f+1, 1, unassigned=())
+    for k in range(6):
+        saved = waits_grow.active[(0, 1+k)]['clip_baselines']
+        assert len(saved) == 1 and len(saved._x) == 1
+
+    # Sol S13: taller baseline also evicts previously accumulated spatially-spread dominated entries.
+    waits_spread = book(side=lambda p: 270.-p[1])
+    seq_spread = ([obs for i in range(40) for obs in [[car(1, 280., x=150.+0.02*i, height=60., speed=0.)]]*2]
+                  + [[car(1, 290., x=150.4, height=70., speed=0.)] for _ in range(12)])
+    play(waits_spread, seq_spread, phase='RED')
+    saved_spread = waits_spread.active[(0, 1)]['clip_baselines']
+    assert len(saved_spread) == 1 and saved_spread._blocks[0].h[0] == 70.
+    assert saved_spread._h[saved_spread._root.idxs[0]] == 70.
+
+    # Slow unidirectional drift AND mass pruning followed by covered frames compact dead slots.
+    waits_creep = book(side=lambda p: 270.-p[1])
+    for f in range(1850):
+        waits_creep.observe([car(1, 280., x=100.+0.02*f, height=60., speed=0.)],
+                            'RED', f/FPS, f+1, 1, unassigned=())
+    saved_creep = waits_creep.active[(0, 1)].get('clip_baselines')
+    assert saved_creep is not None and len(saved_creep) > 0
+    assert sum(saved_creep._alive) == len(saved_creep)
+    assert len(saved_creep._x) <= 4*max(len(saved_creep), 64)
+
+    # Sol Round 14: pruning 901 baselines down to 1 live + 300 stable covered frames compacts slots;
+    # dense pruning (901 -> ~200 live) also compacts incrementally without leaving dead slots resident.
+    waits_prune1 = book(side=lambda p: 270.-p[1])
+    for f in range(1802):
+        step = f//2
+        x = 150. if step < 900 else 155.
+        waits_prune1.observe([car(1, 276.+0.001*step, x=x, height=60., speed=0.)],
+                             'RED', f/FPS, f+1, 1, unassigned=())
+    for f in range(1802, 2102):
+        waits_prune1.observe([car(1, 277., x=160., height=60., speed=0.)],
+                             'RED', f/FPS, f+1, 1, unassigned=())
+    saved_p1 = waits_prune1.active[(0, 1)]['clip_baselines']
+    assert len(saved_p1) == len(saved_p1._x) <= 8
+
+    waits_prune_dense = book(side=lambda p: 270.-p[1])
+    for f in range(1800):
+        step = f//2
+        x = 150. if step < 700 else 155.
+        waits_prune_dense.observe([car(1, 276.+0.001*step, x=x, height=60., speed=0.)],
+                                  'RED', f/FPS, f+1, 1, unassigned=())
+    for f in range(1800, 1850):
+        waits_prune_dense.observe([car(1, 277., x=160., height=60., speed=0.)],
+                                  'RED', f/FPS, f+1, 1, unassigned=())
+    saved_pd = waits_prune_dense.active[(0, 1)]['clip_baselines']
+    assert 150 <= len(saved_pd) == len(saved_pd._x) <= 250
+
+    # Sol Round 15 (S18): holding a pending crossing across the stop line must ALSO advance
+    # compaction instead of stalling 201 live anchors in 901 slots.
+    waits_pending_compact = book(side=lambda p: 270.-p[1])
+    for f in range(1800):
+        step = f//2
+        x = 150. if step < 700 else 155.
+        waits_pending_compact.observe([car(1, 276.+0.001*step, x=x, height=60., speed=0.)],
+                                      'RED', f/FPS, f+1, 1, unassigned=())
+    for f in range(1800, 2101):
+        waits_pending_compact.observe([car(1, 264., x=160., height=48., speed=0.)],
+                                      'RED', f/FPS, f+1, 1, unassigned=())
+    assert not only_row(waits_pending_compact)['crossed_stop_line']
+    assert waits_pending_compact.active[(0, 1)].get('pending_crossing') is not None
+    saved_pc = waits_pending_compact.active[(0, 1)]['clip_baselines']
+    assert 150 <= len(saved_pc) == len(saved_pc._x) <= 250
+
+    # Sol Round 15 (S12): monotonic multi-thousand-entry compaction must stay within per-frame
+    # budget without whole-subtree KD/R-tree rebuild spikes.
+    waits_mono = book(side=lambda p: 270.-p[1])
+    for f in range(4000):
+        x = 150. if f < 2100 else 155.
+        waits_mono.observe([car(1, 276.+0.0005*f, x=x, height=60., speed=0.)],
+                           'RED', f/FPS, f+1, 1, unassigned=())
+    mono_times = []
+    for k in range(50):
+        f = 4000+k
+        started = time.perf_counter()
+        waits_mono.observe([car(1, 278.0, x=160., height=60., speed=0.)],
+                           'RED', f/FPS, f+1, 1, unassigned=())
+        mono_times.append((time.perf_counter()-started)*1000.)
+    saved_mono = waits_mono.active[(0, 1)]['clip_baselines']
+    assert max(mono_times) < 15.0, f'monotonic compaction spike {max(mono_times):.2f} ms'
+    assert 1500 <= len(saved_mono) == len(saved_mono._x) <= 2000
+
+    # Sol Round 16 (S12 budgeted dominance, R-tree level balance, and shared 64-copy budget):
+    # 1. Anti-correlated near-dominators across 6 tracks stay inside the frame budget on hold.
+    waits_dom = book(side=lambda p: 270.-p[1])
+    for i in range(600):
+        t = 1.+i/600.
+        d = -1e-6 if i % 2 == 0 else 1e-6
+        h = 60.+t/0.15
+        for rep in range(2):
+            f = 2*i+rep
+            obs = [car(1+k, 216.+1.0000001*t-d+h, x=150.+80.*k+1.0000001*t+d, height=h, speed=0.) for k in range(6)]
+            waits_dom.observe(obs, 'RED', f/FPS, f+1, 1, unassigned=())
+    hold_dom = []
+    for k_f in range(5):
+        f = 1200+k_f
+        started = time.perf_counter()
+        waits_dom.observe([car(1+k, 276., x=150.+80.*k, height=60., speed=0.) for k in range(6)],
+                          'RED', f/FPS, f+1, 1, unassigned=())
+        hold_dom.append((time.perf_counter()-started)*1000.)
+    assert max(hold_dom) < 15.0, f'anti-correlated dominance frame took {max(hold_dom):.2f} ms'
+
+    # 2. Dominance deletion preserves uniform R-tree leaf depth across non-root levels.
+    def leaf_depths(node, depth=0):
+        if node is None: return set()
+        if node.idxs is not None: return {depth}
+        out = set()
+        for child in node.children: out |= leaf_depths(child, depth+1)
+        return out
+    waits_bal = book(side=lambda p: 270.-p[1])
+    for f in range(702):
+        waits_bal.observe([car(1, 280., x=150.+min(f, 699)/200., height=60., speed=0.)],
+                          'RED', f/FPS, f+1, 1, unassigned=())
+    for k_f in range(20):
+        f = 702+k_f
+        waits_bal.observe([car(1, 290., x=149.7, height=70., speed=0.)],
+                          'RED', f/FPS, f+1, 1, unassigned=())
+    assert len(leaf_depths(waits_bal.active[(0, 1)]['clip_baselines']._root)) == 1
+
+    # 3. Small prunes across 6 tracks (13 live/track = 78 total) respect the shared 64-copy budget.
+    waits_b64 = book(side=lambda p: 270.-p[1])
+    for f in range(1800):
+        step = f//2
+        x_off = 0. if step < 887 else 5.
+        waits_b64.observe([car(1+k, 276.+0.001*step, x=150.+80.*k+x_off, height=60., speed=0.) for k in range(6)],
+                          'RED', f/FPS, f+1, 1, unassigned=())
+    copied_on_1800 = [0]
+    from src.experiment.vehicle_waits import _ClipBaselines
+    orig_step = _ClipBaselines._step_compact
+    def spy_step(self, budget):
+        n = orig_step(self, budget)
+        copied_on_1800[0] += n
+        return n
+    _ClipBaselines._step_compact = spy_step
+    try:
+        waits_b64.observe([car(1+k, 264., x=150.+80.*k+10., height=48., speed=0.) for k in range(6)],
+                          'RED', 1800/FPS, 1801, 1, unassigned=())
+    finally:
+        _ClipBaselines._step_compact = orig_step
+    assert copied_on_1800[0] <= 64
+    for f in range(1801, 1805):
+        waits_b64.observe([car(1+k, 264., x=150.+80.*k+10., height=48., speed=0.) for k in range(6)],
+                          'RED', f/FPS, f+1, 1, unassigned=())
+    for k in range(6):
+        cb_k = waits_b64.active[(0, 1+k)]['clip_baselines']
+        assert len(cb_k) == len(cb_k._x) <= 20
+
+    # Sol Round 17 (S12):
+    # 1. Exact monotonic height_eligible cutoff stops scanning immediately at top_speed == 0.35*h + 5e-11.
+    waits_spd = book(side=lambda p: 270.-p[1])
+    for f in range(3000):
+        x_off = 0.9*(f//2)/1500.
+        waits_spd.observe([car(1+k, 276., x=150.+80.*k+x_off, height=60., speed=0.) for k in range(6)],
+                          'RED', f/FPS, f+1, 1, unassigned=())
+    for j in range(8):
+        f = 3000+j
+        waits_spd.observe([car(1+k, 276., x=150.9+80.*k+0.7*j, height=60., speed=0.) for k in range(6)],
+                          'RED', f/FPS, f+1, 1, unassigned=())
+    started = time.perf_counter()
+    waits_spd.observe([car(1+k, 264., x=150.9+80.*k+0.7*8+5e-11, height=48., speed=1.) for k in range(6)],
+                      'GREEN', 3008/FPS, 3009, 1, unassigned=())
+    spd_ms = (time.perf_counter()-started)*1000.
+    assert spd_ms < 10.0, f'top-speed cutoff crossing took {spd_ms:.2f} ms'
+    assert all(r['crossed_stop_line'] for r in waits_spd.records.values())
+
+    # 2. Six-track dominance wave queues deferred eviction even after budget exhaustion and converges fairly.
+    waits_wave6 = book(side=lambda p: 270.-p[1])
+    for f in range(2000):
+        waits_wave6.observe([car(1+k, 280., x=150.+80.*k+(f//2)/1000., height=60., speed=0.) for k in range(6)],
+                            'RED', f/FPS, f+1, 1, unassigned=())
+    for j in range(301):
+        f = 2000+j
+        waits_wave6.observe([car(1+k, 290., x=150.5+80.*k, height=70., speed=0.) for k in range(6)],
+                            'RED', f/FPS, f+1, 1, unassigned=())
+    for k in range(6):
+        cb_k = waits_wave6.active[(0, 1+k)]['clip_baselines']
+        assert len(cb_k) == 1 and len(cb_k._x) <= 8
+
+    # Sol Round 18 (S12):
+    # 1. Equal-height block rear rejection jumps past all blocks in O(log B); dead blocks are skipped via live_count.
+    from src.experiment.vehicle_waits import _rear_err, OCCLUSION_BOTTOM_SHARE
+    cb_eq = _ClipBaselines()
+    for i in range(4096):
+        b = (150.+1e-5*i, 216., 276., 60., 276.-OCCLUSION_BOTTOM_SHARE*60., _rear_err(276., 60.))
+        cb_eq._insert_raw(*b)
+    side_calls_eq = [0]
+    def counted_eq_side(p):
+        side_calls_eq[0] += 1
+        return 270.-p[1]
+    started = time.perf_counter()
+    res_eq = cb_eq.best_for_crossing(
+        lambda hb: True, lambda y2b, hb: (y2b-269.) >= OCCLUSION_BOTTOM_SHARE*(hb-48.)-1e-9,
+        269.-OCCLUSION_BOTTOM_SHARE*48.-1e-9-_rear_err(269., 48.), 48., 221., 150., counted_eq_side, None,
+    )
+    assert res_eq is None and side_calls_eq[0] == 0 and (time.perf_counter()-started)*1000. < 2.0
+
+    # Dead h=60 blocks above live h=55 blocks must be skipped without scanning dead slots
+    # on both genuine crossing (h=48 > 0.85*55) and clipped crossing (h=46 <= 0.85*55).
+    for cross_h, expect_crossed in ((48., True), (46., False)):
+        waits_dead = book(side=lambda p: 270.-p[1])
+        for f in range(1800):
+            j = 0.9*(f//2)/900.
+            waits_dead.observe([car(1+k, 276., x=150.+80.*k+j, height=60., speed=0.) for k in range(6)],
+                               'RED', f/FPS, f+1, 1, unassigned=())
+        for f in range(1800, 3600):
+            j = 0.9*((f-1800)//2)/900.
+            waits_dead.observe([car(1+k, 271., x=155.+80.*k+j, height=55., speed=0.) for k in range(6)],
+                               'RED', f/FPS, f+1, 1, unassigned=())
+        for j in range(16):
+            f = 3600+j
+            waits_dead.observe([car(1+k, 271., x=160.+80.*k, height=55., speed=0.) for k in range(6)],
+                               'RED', f/FPS, f+1, 1, unassigned=())
+        started = time.perf_counter()
+        waits_dead.observe([car(1+k, 216.+cross_h, x=160.+80.*k, height=cross_h, speed=0.) for k in range(6)],
+                           'RED', 3616/FPS, 3617, 1, unassigned=())
+        assert (time.perf_counter()-started)*1000. < 10.0
+        assert all(r['crossed_stop_line'] is expect_crossed for r in waits_dead.records.values())
+
+    # 2. Reserved sweep budget prevents busy jittering tracks from starving a queued eviction,
+    # and independent queued dominators (h=70 @ x=150.25 and h=71 @ x=154.25) do not overwrite each other.
+    import random
+    rng_s = random.Random(23)
+    waits_starve = book(side=lambda p: 270.-p[1])
+    for f in range(1800):
+        obs = [car(1+k, 280., x=150.+80.*k+0.02*rng_s.random(), height=60., speed=0.) for k in range(5)]
+        obs.append(car(6, 280., x=550.+(f//2)/900., height=60., speed=0.))
+        waits_starve.observe(obs, 'RED', f/FPS, f+1, 1, unassigned=())
+    for f in range(1800, 2200):
+        obs = [car(1+k, 280., x=150.+80.*k+0.02*rng_s.random(), height=60., speed=0.) for k in range(5)]
+        obs.append(car(6, 290., x=550.5, height=70., speed=0.))
+        waits_starve.observe(obs, 'RED', f/FPS, f+1, 1, unassigned=())
+    cb_6 = waits_starve.active[(0, 6)]['clip_baselines']
+    assert len(cb_6) == 1 and len(cb_6._x) <= 64
+
+    cb_q = _ClipBaselines()
+    for base_x in (150.25, 154.25):
+        for i in range(128):
+            bx = base_x-0.2+0.4*i/127.
+            cb_q.add((bx, 220., 280., 60., 280.-OCCLUSION_BOTTOM_SHARE*60., _rear_err(280., 60.)),
+                     compact=False, dom_budget=[0])
+    cb_q.add((150.25, 220., 290., 70., 290.-OCCLUSION_BOTTOM_SHARE*70., _rear_err(290., 70.)),
+             compact=False, dom_budget=[0])
+    cb_q.add((154.25, 220., 291., 71., 291.-OCCLUSION_BOTTOM_SHARE*71., _rear_err(291., 71.)),
+             compact=False, dom_budget=[0])
+    while cb_q.has_dom_sweep():
+        cb_q.step_dom_sweep(64)
+    assert len(cb_q) == 2
+
+    # Sol Round 19 (S12):
+    # 1. Mixed-height blocks reject by rear bound before per-height checks (both live and after
+    #    pruning higher-rear outliers in every block).
+    waits_mix = book(side=lambda p: 270.-p[1])
+    for f in range(4096):
+        h = 60.+0.00001*(f//2)
+        waits_mix.observe([car(1+k, 276., x=150.+80.*k, height=h, speed=0.) for k in range(6)],
+                          'RED', f/FPS, f+1, 1, unassigned=())
+    started = time.perf_counter()
+    waits_mix.observe([car(1+k, 269., x=150.+80.*k, height=48., speed=0.) for k in range(6)],
+                      'RED', 4096/FPS, 4097, 1, unassigned=())
+    mix_ms = (time.perf_counter()-started)*1000.
+    assert mix_ms < 10.0, f'mixed-height block rear rejection took {mix_ms:.2f} ms'
+    assert all(r['crossed_stop_line'] for r in waits_mix.records.values())
+
+    waits_mix_pruned = book(side=lambda p: 270.-p[1])
+    for f in range(4096):
+        step = f//2
+        outlier = step % 128 == 0
+        h = 60.+0.00001*step
+        y2 = 278. if outlier else 276.
+        x_off = 0. if outlier else 5.
+        waits_mix_pruned.observe([car(1+k, y2, x=150.+80.*k+x_off, height=h, speed=0.) for k in range(6)],
+                                 'RED', f/FPS, f+1, 1, unassigned=())
+    started = time.perf_counter()
+    waits_mix_pruned.observe([car(1+k, 269., x=160.+80.*k, height=48., speed=0.) for k in range(6)],
+                             'RED', 4096/FPS, 4097, 1, unassigned=())
+    mix_pruned_ms = (time.perf_counter()-started)*1000.
+    assert mix_pruned_ms < 10.0, f'pruned mixed-height rear rejection took {mix_pruned_ms:.2f} ms'
+    assert all(r['crossed_stop_line'] for r in waits_mix_pruned.records.values())
+
+    # 2. Deferred dominance enqueueing stays O(1) without copying _dom_queue, child-envelope checks
+    #    prevent false-positive queue growth, and compaction remaps large queues within budget.
+    rng19 = random.Random(19)
+    waits_q19 = book(side=lambda p: 270.-p[1])
+    q19_tail = []
+    for f in range(2500):
+        if f < 15:
+            obs = [car(1+k, 218.5+60., x=150.+80.*k, height=60., speed=0.) for k in range(6)]
+        elif f < 30:
+            obs = [car(1+k, 215.+61., x=150.+80.*k, height=61., speed=0.) for k in range(6)]
+        else:
+            obs = [car(1+k, 216.+61., x=150.+80.*k+0.18*(rng19.random()-0.5), height=61., speed=0.) for k in range(6)]
+        started = time.perf_counter()
+        waits_q19.observe(obs, 'RED', f/FPS, f+1, 1, unassigned=())
+        if f >= 2350:
+            q19_tail.append((time.perf_counter()-started)*1000.)
+    q19_median = sorted(q19_tail)[len(q19_tail)//2]
+    assert q19_median < 3.0, f'Round 19 enqueue tail median {q19_median:.2f} ms'
+    assert all(len(waits_q19.active[(0, 1+k)]['clip_baselines']._dom_queue) == 0 for k in range(6))
+
+    # Sol Round 20:
+    # 1. Queue compaction with > 64 queued entries genuinely enters multi-step compaction,
+    #    caps work per step at budget=64, and preserves surviving queue order.
+    cb_bigq = _ClipBaselines()
+    for i in range(500):
+        bx = 150.+0.001*i
+        cb_bigq.add((bx, 216., 276., 60., 276.-OCCLUSION_BOTTOM_SHARE*60., _rear_err(276., 60.)),
+                    compact=False, dom_budget=[0])
+    started = time.perf_counter()
+    for j in range(200):
+        bx = 150.+0.0005*j
+        cb_bigq.add((bx, 216., 277., 61., 277.-OCCLUSION_BOTTOM_SHARE*61., _rear_err(277., 61.)),
+                    compact=False, dom_budget=[0])
+    assert (time.perf_counter()-started)*1000. < 50.0
+    assert len(cb_bigq._dom_queue) == 199
+    # Prune all 500 h=60 entries (y1_hi=225.0 < 225.1) while keeping all 200 h=61 entries (y1_hi=225.15).
+    cb_bigq.prune(150.0, 225.1)
+    assert cb_bigq.needs_compact() and len(cb_bigq) == 200
+    expected_q = [(cb_bigq._x[q], cb_bigq._y1[q], cb_bigq._y2[q], cb_bigq._h[q])
+                  for q in cb_bigq._dom_queue if cb_bigq._alive[q]]
+    assert len(expected_q) == 199
+    compact_steps = 0
+    while cb_bigq.needs_compact():
+        step_work = cb_bigq.maybe_compact(64)
+        assert 0 < step_work <= 64
+        compact_steps += 1
+    assert compact_steps >= 6
+    actual_q = [(cb_bigq._x[q], cb_bigq._y1[q], cb_bigq._y2[q], cb_bigq._h[q]) for q in cb_bigq._dom_queue]
+    assert actual_q == expected_q
+    assert len(cb_bigq) == len(cb_bigq._x) == 200
+
+    # 2. Deferred eviction makes forward progress even with a 1-unit per-track sweep budget
+    #    (300 tracks > sweep_budget=256): after 30 jitter frames at h=60 and 90 frames at h=80,
+    #    every track finishes its sweep and converges to a single dominant baseline.
+    waits_300 = book(side=lambda p: 270.-p[1])
+    for f in range(30):
+        dx = 0.02*(f % 15)
+        waits_300.observe([car(1+k, 280., x=150.+80.*k+dx, height=60., speed=0.) for k in range(300)],
+                          'RED', f/FPS, f+1, 1, unassigned=())
+    for f in range(30, 120):
+        waits_300.observe([car(1+k, 300., x=150.+80.*k+0.15, height=80., speed=0.) for k in range(300)],
+                          'RED', f/FPS, f+1, 1, unassigned=())
+    for k in range(300):
+        cb_k = waits_300.active[(0, 1+k)]['clip_baselines']
+        assert len(cb_k) == 1 and not cb_k.has_dom_sweep()
+
+    # Sol Round 21:
+    # 1. Live exact-key index deduplicates repeating baselines (> 32 distinct keys) in O(1)
+    #    before spending dominance budget, preventing unbounded duplicate growth.
+    waits_dup = book(side=lambda p: 270.-p[1])
+    for f in range(400):
+        obs = [car(1+k, 280., x=150.+80.*k+0.02*(f % 50), height=60., speed=0.) for k in range(6)]
+        waits_dup.observe(obs, 'RED', f/FPS, f+1, 1, unassigned=())
+    for k in range(6):
+        cb_d = waits_dup.active[(0, 1+k)]['clip_baselines']
+        assert len(cb_d) == 50 and len(cb_d._x) == 50
+
+    # 2. Fixed copy range at rebuild start + mirroring later inserts lets compaction finish
+    #    even when 65 drifting tracks (> 64-unit budget) prune and append 1 baseline per frame.
+    waits_drift65 = book(side=lambda p: 270.-p[1])
+    for f in range(800):
+        obs = [car(1+k, 280., x=150.+80.*k+0.2*f, height=60., speed=0.) for k in range(65)]
+        waits_drift65.observe(obs, 'RED', f/FPS, f+1, 1, unassigned=())
+    for k in range(65):
+        cb_65 = waits_drift65.active[(0, 1+k)]['clip_baselines']
+        assert len(cb_65) <= 60 and len(cb_65._x) <= 220
+
+    # Sol Round 22:
+    # 1. Compaction preserves one authoritative FIFO for _dom_queue and never requeues
+    #    already-completed candidates or lets newly appended work jump ahead of older entries.
+    cb_fifo = _ClipBaselines()
+    for i in range(500):
+        cb_fifo.add((150.+0.001*i, 216., 276., 60., 276.-OCCLUSION_BOTTOM_SHARE*60., _rear_err(276., 60.)),
+                    compact=False, dom_budget=[0])
+    for j in range(200):
+        cb_fifo.add((150.+0.0005*j, 216., 277., 61., 277.-OCCLUSION_BOTTOM_SHARE*61., _rear_err(277., 61.)),
+                    compact=False, dom_budget=[0])
+    cb_fifo.prune(150.0, 225.1)  # prune all 500 h=60 -> 200 live h=61, 199 queued
+    assert cb_fifo.needs_compact() and len(cb_fifo._dom_queue) == 199
+    # Advance compaction through Phase 1 + 198 of 199 Phase 2 queue items, leaving 1 unremapped.
+    for _ in range(6):
+        cb_fifo.maybe_compact(64)
+    assert cb_fifo._rebuild is not None
+    # Append a newer candidate mid-compaction, then pop/finish 2 sweeps via step_dom_sweep:
+    # the oldest queued entry must run before the newly appended one, and completed sweeps
+    # must never reappear after compaction finishes.
+    newest_x = 150.15
+    cb_fifo.add((newest_x, 216., 278., 62., 278.-OCCLUSION_BOTTOM_SHARE*62., _rear_err(278., 62.)),
+                compact=False, dom_budget=[0])
+    # Note: 62 px may evict recent 61 px tail items; verify FIFO order of surviving queue across swap.
+    pre_swap_keys = [(cb_fifo._x[q], cb_fifo._h[q]) for q in cb_fifo._dom_queue if q >= 0 and cb_fifo._alive[q]]
+    assert pre_swap_keys[-1] == (newest_x, 62.)
+    # Pop the front-most pending item via step_dom_sweep (must be pre_swap_keys[0], NOT newest_x!).
+    if cb_fifo._dom_sweep is not None:
+        cb_fifo._dom_pending[cb_fifo._dom_sweep[0]] = 0
+        cb_fifo._dom_sweep = None
+    cb_fifo.step_dom_sweep(1)
+    assert cb_fifo._dom_sweep is not None
+    assert (cb_fifo._x[cb_fifo._dom_sweep[0]], cb_fifo._h[cb_fifo._dom_sweep[0]]) == pre_swap_keys[0]
+    # Finish this front-most sweep and finish compaction; completed item must NOT reappear,
+    # and all remaining pending items keep exact FIFO order ending with (newest_x, 62.).
+    while cb_fifo._dom_sweep is not None and cb_fifo._dom_sweep[0] == 501:
+        cb_fifo.step_dom_sweep(1)
+    remaining_before_swap = [(cb_fifo._x[q], cb_fifo._h[q]) for q in cb_fifo._dom_queue if q >= 0 and cb_fifo._alive[q]]
+    assert remaining_before_swap == pre_swap_keys[1:]
+    while cb_fifo.needs_compact():
+        cb_fifo.maybe_compact(64)
+    remaining_after_swap = [(cb_fifo._x[q], cb_fifo._h[q]) for q in cb_fifo._dom_queue if q >= 0 and cb_fifo._alive[q]]
+    assert remaining_after_swap == remaining_before_swap
+    assert pre_swap_keys[0] not in remaining_after_swap and remaining_after_swap[-1] == (newest_x, 62.)
+
+    # Also verify draining the entire queue (including a mid-compaction append) before swap
+    # leaves _dom_queue completely empty after swap (zero requeued completed candidates).
+    cb_drain = _ClipBaselines()
+    for i in range(500):
+        cb_drain.add((150.+0.001*i, 216., 276., 60., 276.-OCCLUSION_BOTTOM_SHARE*60., _rear_err(276., 60.)),
+                     compact=False, dom_budget=[0])
+    for j in range(100):
+        cb_drain.add((150.+0.0005*j, 216., 277., 61., 277.-OCCLUSION_BOTTOM_SHARE*61., _rear_err(277., 61.)),
+                     compact=False, dom_budget=[0])
+    cb_drain.prune(150.0, 225.1)
+    for _ in range(3):
+        cb_drain.maybe_compact(64)
+    assert cb_drain._rebuild is not None
+    cb_drain.add((150.15, 216., 278., 62., 278.-OCCLUSION_BOTTOM_SHARE*62., _rear_err(278., 62.)),
+                 compact=False, dom_budget=[0])
+    while cb_drain.has_dom_sweep():
+        cb_drain.step_dom_sweep(256)
+    while cb_drain.needs_compact():
+        cb_drain.maybe_compact(64)
+    assert not cb_drain.has_dom_sweep() and len(cb_drain._dom_queue) == 0
+
+    # 2. Frozen sweep_end + hot dominator cache prevents continuous h=60 inserts on 300 tracks
+    #    from starving a second queued 61 px sweep or accumulating dominated baselines.
+    waits_s300 = book(side=lambda p: 270.-p[1])
+    seq_s = 0
+    for i in range(6):
+        waits_s300.observe([car(1+k, 280., x=150.+80.*k+0.01*i, height=60., speed=0.) for k in range(300)],
+                           'RED', seq_s/FPS, seq_s+1, 1, unassigned=()); seq_s += 1
+    for i in range(4):
+        waits_s300.observe([car(1+k, 281., x=150.+80.*k, height=61., speed=0.) for k in range(300)],
+                           'RED', seq_s/FPS, seq_s+1, 1, unassigned=()); seq_s += 1
+    for i in range(4):
+        waits_s300.observe([car(1+k, 281., x=150.5+80.*k, height=61., speed=0.) for k in range(300)],
+                           'RED', seq_s/FPS, seq_s+1, 1, unassigned=()); seq_s += 1
+    for f in range(400):
+        waits_s300.observe([car(1+k, 280., x=150.5+80.*k+0.0001*(f+1), height=60., speed=0.) for k in range(300)],
+                           'RED', seq_s/FPS, seq_s+1, 1, unassigned=()); seq_s += 1
+    for k in range(300):
+        cb_s = waits_s300.active[(0, 1+k)]['clip_baselines']
+        assert len(cb_s) == 2 and not cb_s.has_dom_sweep()
+
+    # Sol Round 23:
+    # 1. Queueing a live dominator via covered() during compaction Phase 1 (before its slot
+    #    is copied into shadow) must not record -1 or drop the sweep across the swap.
+    cb_p1 = _ClipBaselines()
+    for i in range(160):
+        cb_p1.add((150.+0.01*i, 216., 276., 60., 276.-OCCLUSION_BOTTOM_SHARE*60., _rear_err(276., 60.)),
+                  compact=False, dom_budget=[0])
+    # Add 4 late slots surviving at x=165..165.4: one h=60 dominated by one h=61, plus two others.
+    cb_p1.add((165.0, 216., 276., 60., 276.-OCCLUSION_BOTTOM_SHARE*60., _rear_err(276., 60.)),
+              compact=False, dom_budget=[0])
+    cb_p1.add((165.0, 216., 277., 61., 277.-OCCLUSION_BOTTOM_SHARE*61., _rear_err(277., 61.)),
+              compact=False, dom_budget=[0])
+    cb_p1.add((165.4, 216., 277., 61., 277.-OCCLUSION_BOTTOM_SHARE*61., _rear_err(277., 61.)),
+              compact=False, dom_budget=[0])
+    cb_p1.add((165.8, 216., 277., 61., 277.-OCCLUSION_BOTTOM_SHARE*61., _rear_err(277., 61.)),
+              compact=False, dom_budget=[0])
+    cb_p1._dom_sweep = None; cb_p1._dom_queue.clear(); cb_p1._dom_cache.clear()
+    cb_p1._dom_pending[:] = bytes(len(cb_p1._dom_pending))
+    cb_p1.prune(165.4, 216.)  # kills first 160 slots, leaving 4 live slots (160..163)
+    assert len(cb_p1) == 4 and cb_p1.needs_compact()
+    # Keep a dummy active sweep on slot 162 so covered() appends slot 161 to _dom_queue during Phase 1.
+    cb_p1._dom_sweep = (162, -2, len(cb_p1._alive))
+    cb_p1._dom_pending[162] = 1
+    cb_p1.maybe_compact(1)  # copies slot 160 only; slot 161 is not mapped yet!
+    assert cb_p1._rebuild is not None and 161 not in cb_p1._rebuild[3]
+    assert cb_p1.covered((165.01, 216., 276., 60., 276.-OCCLUSION_BOTTOM_SHARE*60., _rear_err(276., 60.)),
+                         dom_budget=[64])
+    assert 161 in list(cb_p1._dom_queue)
+    while cb_p1.needs_compact():
+        cb_p1.maybe_compact(64)
+    while cb_p1.has_dom_sweep():
+        cb_p1.step_dom_sweep(64)
+    assert len(cb_p1) == 3
+
+    # 2. Resumable cover-probe + fair unused-budget distribution finds a dominator at the tail
+    #    of 32+ anchors even across 25 busy tracks (never accumulating 1,000 dominated sightings).
+    waits_25 = book(side=lambda p: 270.-p[1])
+    seq_25 = 0
+    for a in range(32):
+        for _ in range(2):
+            obs = [car(1+k, 281., x=150.+80.*k+0.25*a, height=61., speed=0.) for k in range(25)]
+            waits_25.observe(obs, 'RED', seq_25/FPS, seq_25+1, 1, unassigned=()); seq_25 += 1
+    for f in range(400):
+        obs = [car(1+k, 280., x=150.+80.*k+0.25*31+0.0001*(f+1), height=60., speed=0.) for k in range(25)]
+        waits_25.observe(obs, 'RED', seq_25/FPS, seq_25+1, 1, unassigned=()); seq_25 += 1
+    for k in range(25):
+        cb_25 = waits_25.active[(0, 1+k)]['clip_baselines']
+        assert len(cb_25) == 32 and not cb_25.has_dom_sweep()
+
+    # 3. _SlotFIFO indexed reads and chunked growth appends stay O(1) at 131,072 entries.
+    from src.experiment.vehicle_waits import _SlotFIFO
+    fifo = _SlotFIFO()
+    for i in range(131072):
+        fifo.append(i)
+    started = time.perf_counter()
+    fifo.append(131072)
+    assert (time.perf_counter()-started)*1000. < 1.0
+    started = time.perf_counter()
+    mid_vals = [fifo[65536+j] for j in range(64)]
+    assert (time.perf_counter()-started)*1000. < 1.0
+    assert mid_vals == [65536+j for j in range(64)]
+
+    # Sol Round 24:
+    # 1. Pending sweep membership bitmap deduplicates repeated dominator enqueues across
+    #    >16-entry queues (25 tracks cycling 32 nearby anchors over 800 frames).
+    waits_cyc = book(side=lambda p: 270.-p[1])
+    seq_c = 0
+    for a in range(32):
+        for _ in range(2):
+            obs = [car(1+k, 281., x=150.+80.*k+0.25*a, height=61., speed=0.) for k in range(25)]
+            waits_cyc.observe(obs, 'RED', seq_c/FPS, seq_c+1, 1, unassigned=()); seq_c += 1
+    for f in range(400):
+        a = f % 32
+        obs = [car(1+k, 280., x=150.+80.*k+0.25*a+0.0001*(f+1), height=60., speed=0.) for k in range(25)]
+        waits_cyc.observe(obs, 'RED', seq_c/FPS, seq_c+1, 1, unassigned=()); seq_c += 1
+    for k in range(25):
+        cb_c = waits_cyc.active[(0, 1+k)]['clip_baselines']
+        assert len(cb_c._dom_queue) <= len(cb_c._x)
+        q_list = list(cb_c._dom_queue)
+        assert len(q_list) == len(set(q_list))
+
+    # 2. Lossless resumable cover bitmap never drops overflow candidates (20 tall + 20 short
+    #    with dom_budget=[0] drains to exact 20 live baselines with 0 covered survivors).
+    cb_20 = _ClipBaselines()
+    for i in range(20):
+        bx = 150.+0.3*i
+        cb_20.add((bx, 220., 281., 61., 281.-OCCLUSION_BOTTOM_SHARE*61., _rear_err(281., 61.)),
+                  compact=False, dom_budget=[0])
+    cb_20._dom_cache.clear()
+    for i in range(20):
+        bx = 150.+0.3*i+0.01
+        cb_20.add((bx, 220., 280., 60., 280.-OCCLUSION_BOTTOM_SHARE*60., _rear_err(280., 60.)),
+                  compact=False, dom_budget=[0])
+    while cb_20.has_dom_sweep():
+        cb_20.step_dom_sweep(1)
+    assert len(cb_20) == 20 and not cb_20.has_dom_sweep()
+
+    # 3. Dedicated 1-unit scheduling flag alternates fairly between eviction and cover jobs
+    #    even when a new cover candidate arrives before every 1-unit maintenance step.
+    cb_alt = _ClipBaselines()
+    for i in range(25):
+        bx = 150.+0.3*i
+        cb_alt.add((bx, 220., 280., 60., 280.-OCCLUSION_BOTTOM_SHARE*60., _rear_err(280., 60.)),
+                   compact=False, dom_budget=[0])
+    for i in range(25):
+        bx = 150.+0.3*i
+        cb_alt.add((bx, 220., 281., 61., 281.-OCCLUSION_BOTTOM_SHARE*61., _rear_err(281., 61.)),
+                   compact=False, dom_budget=[0])
+    cb_alt._dom_cache.clear()
+    ev_calls = [0]; cov_calls = [0]
+    orig_ev = _ClipBaselines._step_evict_sweep; orig_cov = _ClipBaselines._step_cover_probe
+    _ClipBaselines._step_evict_sweep = lambda self, b: (ev_calls.__setitem__(0, ev_calls[0]+1), orig_ev(self, b))[1]
+    _ClipBaselines._step_cover_probe = lambda self, b: (cov_calls.__setitem__(0, cov_calls[0]+1), orig_cov(self, b))[1]
+    try:
+        for i in range(30):
+            bx = 150.+0.3*(i % 25)+0.001*(i+1)
+            cb_alt.add((bx, 220., 280., 60., 280.-OCCLUSION_BOTTOM_SHARE*60., _rear_err(280., 60.)),
+                       compact=False, dom_budget=[0])
+            cb_alt.step_dom_sweep(1)
+    finally:
+        _ClipBaselines._step_evict_sweep = orig_ev
+        _ClipBaselines._step_cover_probe = orig_cov
+    assert ev_calls[0] >= 10 and cov_calls[0] >= 10
+
+    # 4. Wrapped dominance window (n_obs=25, dom_start=2) distributes budget fairly in input order
+    #    so track 0 does not consume all 384 units while tracks 2..24 get 0.
+    waits_wrap = book(side=lambda p: 270.-p[1])
+    for f in range(5):
+        obs = [car(1+k, 281., x=150.+80.*k+0.01*f, height=61., speed=0.) for k in range(25)]
+        waits_wrap.observe(obs, 'RED', f/FPS, f+1, 1, unassigned=())
+    waits_wrap._dom_cursor = 2  # dom_start = (2*24) % 25 = 23 -> wraps around track 0..21
+    seen_shares = []
+    orig_eval = waits_wrap._evaluate_crossing
+    def spy_eval(state, prev_obs, observation, phase, timestamp, sequence, cycle_id,
+                 valid_motion, continuing, keep_pending, dom_budget):
+        seen_shares.append((observation.local_id, dom_budget[0]))
+        dom_budget[0] = 0  # simulate busy track consuming its whole share
+        return orig_eval(state, prev_obs, observation, phase, timestamp, sequence, cycle_id,
+                         valid_motion, continuing, keep_pending, dom_budget)
+    waits_wrap._evaluate_crossing = spy_eval
+    waits_wrap.observe([car(1+k, 281., x=150.+80.*k+0.2, height=61., speed=0.) for k in range(25)],
+                       'RED', 5/FPS, 6, 1, unassigned=())
+    nonzero = [sh for _, sh in seen_shares if sh > 0]
+    assert len(nonzero) == 24 and max(nonzero) == 16 and min(nonzero) == 16
+
+    # Sol Round 25:
+    # 1. Indexed resumable cover search + batch eviction keeps 64 tracks cycling 32 nearby
+    #    anchors under sustained short-baseline jitter from growing unboundedly.
+    waits_64 = book(side=lambda p: 270.-p[1])
+    seq_64 = 0
+    for a in range(32):
+        for _ in range(2):
+            obs = [car(1+k, 281., x=150.+80.*k+0.24*a, height=61., speed=0.) for k in range(64)]
+            waits_64.observe(obs, 'RED', seq_64/FPS, seq_64+1, 1, unassigned=()); seq_64 += 1
+    for f in range(1000):
+        a = f % 32
+        obs = [car(1+k, 280., x=150.+80.*k+0.24*a+1e-5*(f+1), height=60., speed=0.) for k in range(64)]
+        waits_64.observe(obs, 'RED', seq_64/FPS, seq_64+1, 1, unassigned=()); seq_64 += 1
+    live_64 = sorted(len(waits_64.active[(0, 1+k)]['clip_baselines']) for k in range(64))
+    assert live_64[32] <= 64, f'64-track cycling median live {live_64[32]} grew unbounded'
+
+    # 2. Bulk drift pruning immediately clears both _dom_pending and _cover_pending and
+    #    decrements _cover_count in both live and shadow indexes (zero dead flags survive swap).
+    cb_pr = _ClipBaselines()
+    for i in range(700):
+        bx = 150.+0.001*i
+        cb_pr.add((bx, 220., 281., 61., 281.-OCCLUSION_BOTTOM_SHARE*61., _rear_err(281., 61.)),
+                  compact=False, dom_budget=[0])
+    cb_pr._dom_cache.clear()
+    for i in range(700):
+        bx = 150.+0.001*i+1e-5
+        cb_pr.add((bx, 220., 280., 60., 280.-OCCLUSION_BOTTOM_SHARE*60., _rear_err(280., 60.)),
+                  compact=False, dom_budget=[0])
+    # Surviving tall/short pair at x=165.0
+    cb_pr.add((165.0, 220., 281., 61., 281.-OCCLUSION_BOTTOM_SHARE*61., _rear_err(281., 61.)),
+              compact=False, dom_budget=[0])
+    cb_pr._dom_cache.clear()
+    cb_pr.add((165.01, 220., 280., 60., 280.-OCCLUSION_BOTTOM_SHARE*60., _rear_err(280., 60.)),
+              compact=False, dom_budget=[0])
+    assert cb_pr._cover_count >= 700
+    cb_pr.prune(165.0, 220.)
+    assert len(cb_pr) == 2 and cb_pr._cover_count == 1
+    assert sum(cb_pr._cover_pending) == 1 and sum(cb_pr._dom_pending) <= 1
+    while cb_pr.needs_compact():
+        cb_pr.maybe_compact(64)
+    assert sum(cb_pr._cover_pending) == cb_pr._cover_count == 1
+    while cb_pr.has_dom_sweep():
+        cb_pr.step_dom_sweep(16)
+    assert len(cb_pr) == 1 and cb_pr._cover_count == 0 and not cb_pr.has_dom_sweep()
+
+    # 3. Cross-block (h, y2) runs (>256 entries) resume cleanly across block boundaries under
+    #    1-unit budgets for both indexed cover probes and indexed batch eviction.
+    cb_xb = _ClipBaselines()
+    for i in range(400):
+        bx = 100.+0.25*i
+        cb_xb.add((bx, 220., 281., 61., 281.-OCCLUSION_BOTTOM_SHARE*61., _rear_err(281., 61.)),
+                  compact=False, dom_budget=[0])
+    assert len(cb_xb._blocks) >= 2
+    cb_xb._dom_cache.clear()
+    for bx in (100.01, 100.26, 150.01, 199.74):
+        cb_xb.add((bx, 220., 280., 60., 280.-OCCLUSION_BOTTOM_SHARE*60., _rear_err(280., 60.)),
+                  compact=False, dom_budget=[0])
+    for _ in range(2000):
+        if not cb_xb.has_dom_sweep():
+            break
+        cb_xb.step_dom_sweep(1)
+    assert len(cb_xb) == 400 and not cb_xb.has_dom_sweep()
+
+    # 4. Fixed-depth radix _SlotFIFO has zero directory resizing across growth + negative prepend.
+    import sys
+    fifo_2l = _SlotFIFO()
+    for i in range(262144):
+        fifo_2l.append(i)
+    root_sz = sys.getsizeof(fifo_2l._root)
+    started = time.perf_counter()
+    fifo_2l.append(262144)
+    assert (time.perf_counter()-started)*1000. < 1.0
+    assert sys.getsizeof(fifo_2l._root) == root_sz and fifo_2l[262144] == 262144
+    for i in range(1, 300):
+        fifo_2l.appendleft(-i)
+    assert fifo_2l[0] == -299 and fifo_2l.popleft() == -299 and fifo_2l.pop() == 262144
+
+    # Sol Round 26:
+    # 1. Vertical jitter (32 y2 anchors) AND 3D height+x jitter across 64 tracks stay bounded.
+    for mode in ('vertical', '3d_height_x'):
+        waits_v = book(side=lambda p: 270.-p[1])
+        seq_v = 0
+        for a in range(32):
+            for _ in range(2):
+                if mode == 'vertical':
+                    obs = [car(1+k, 281.+0.24*a, x=150.+80.*k, height=61., speed=0.) for k in range(64)]
+                else:
+                    obs = [car(1+k, 281.+0.01*a, x=150.+80.*k+0.24*a, height=61.+0.01*a, speed=0.) for k in range(64)]
+                waits_v.observe(obs, 'RED', seq_v/FPS, seq_v+1, 1, unassigned=()); seq_v += 1
+        for f in range(1000):
+            a = f % 32
+            if mode == 'vertical':
+                obs = [car(1+k, 280.+0.24*a, x=150.+80.*k+1e-5*(f+1), height=60., speed=0.) for k in range(64)]
+            else:
+                obs = [car(1+k, 280., x=150.+80.*k+0.24*a+1e-5*(f+1), height=60., speed=0.) for k in range(64)]
+            waits_v.observe(obs, 'RED', seq_v/FPS, seq_v+1, 1, unassigned=()); seq_v += 1
+        live_v = sorted(len(waits_v.active[(0, 1+k)]['clip_baselines']) for k in range(64))
+        assert live_v[32] <= 48, f'64-track {mode} cycling median live {live_v[32]} grew unbounded'
+
+    # 2. Same-height probes never retire multiple candidates on a 1-unit budget returning 0.
+    cb_sh = _ClipBaselines()
+    for y in (279., 281.):
+        cb_sh.add((150., y-60., y, 60., y-42., _rear_err(y, 60.)), compact=False, dom_budget=[0])
+    for i in range(32):
+        y = 280.+0.001*i
+        cb_sh.add((150., y-60., y, 60., y-42., _rear_err(y, 60.)), compact=False, dom_budget=[0])
+    # Force pending cover probes even after strict max_h <= bh skips queueing them, and verify 1-unit charge.
+    for s in range(2, 34):
+        cb_sh._queue_cover_probe(s)
+    used_1 = cb_sh.step_dom_sweep(1)
+    assert used_1 == 1 and cb_sh.has_dom_sweep()
+
+    # 3. Synthetic non-standard geometry equal-height baseline with larger y2 is still evicted.
+    cb_syn = _ClipBaselines()
+    cb_syn.add((0., 0., 62., 61., 90., 1e-12), compact=False, dom_budget=[0])
+    cb_syn.add((1., 0., 60., 60., 90., 1e-12), compact=False, dom_budget=[0])
+    cb_syn.add((0., 0., 61., 61., 100., 1e-12), compact=False, dom_budget=[0])
+    while cb_syn.has_dom_sweep():
+        cb_syn.step_dom_sweep(1)
+    assert len(cb_syn) == 2 and cb_syn._alive[0] == 0 and cb_syn._alive[1] == 1 and cb_syn._alive[2] == 1
+
+    # Sol Round 27:
+    # 1. Combined 2D (8x4) x/y grid + 32 distinct heights + drifting short height across 64 tracks
+    #    stays inside split-safe R-tree DFS without accumulating dominated shorter baselines.
+    waits_grid = book(side=lambda p: 270.-p[1])
+    seq_g = 0
+    for a in range(32):
+        for _ in range(2):
+            y1_a = 220.+0.35*(a//8); h_a = 61.+0.015*a
+            obs = [car(1+k, y1_a+h_a, x=150.+24.*k+0.35*(a % 8), height=h_a, speed=0.) for k in range(64)]
+            waits_grid.observe(obs, 'RED', seq_g/FPS, seq_g+1, 1, unassigned=()); seq_g += 1
+    for f in range(1000):
+        a = f % 32
+        y1_f = 220.+0.35*(a//8); h_f = 60.-1e-5*f
+        obs = [car(1+k, y1_f+h_f, x=150.+24.*k+0.35*(a % 8)+1e-5*(f+1), height=h_f, speed=0.) for k in range(64)]
+        waits_grid.observe(obs, 'RED', seq_g/FPS, seq_g+1, 1, unassigned=()); seq_g += 1
+    live_g = sorted(len(waits_grid.active[(0, 1+k)]['clip_baselines']) for k in range(64))
+    assert live_g[32] <= 64, f'64-track 2D+height grid median live {live_g[32]} grew unbounded'
+
+    # 2. Equal-key synthetic scans (513 tuples with identical x, y2, h) strictly obey budget=1
+    #    for BOTH evict sweeps and cover probes even across R-tree splits.
+    cb_eqev = _ClipBaselines()
+    for i in range(513):
+        cb_eqev.add((0., i*1e-6, 60., 60., 42., 1e-12), compact=False, dom_budget=[0])
+    cb_eqev.add((0., 0., 61., 61., 50., 1e-12), compact=False, dom_budget=[0])
+    assert cb_eqev.step_dom_sweep(1) == 1
+    for i in range(4):
+        cb_eqev.add((100.+10.*i, 200., 275., 75., 0., 1e-12), compact=False, dom_budget=[0])
+    assert cb_eqev.step_dom_sweep(1) <= 1
+    assert cb_eqev.step_dom_sweep(1) <= 1
+    cb_eqcv = _ClipBaselines()
+    for i in range(513):
+        cb_eqcv.add((0., i*1e-6, 61., 61., 50., 1e-12), compact=False, dom_budget=[0])
+    cb_eqcv.add((0., 10.0, 60., 60., 42., 1e-12), compact=False, dom_budget=[0])
+    cb_eqcv._queue_cover_probe(513)
+    assert cb_eqcv.step_dom_sweep(1) == 1
+    for i in range(4):
+        cb_eqcv.add((100.+10.*i, 200., 275., 75., 0., 1e-12), compact=False, dom_budget=[0])
+    assert cb_eqcv.step_dom_sweep(1) <= 1
+    assert cb_eqcv.step_dom_sweep(1) <= 1
+
+
+def test_missed_frame_clears_crossing_clip_evidence_but_preserves_fragment_history():
+    """Sol S14: a missed frame clears saved clip baselines AND crossing clip history so
+    pre-gap boxes cannot suppress a post-gap crossing, while gap-tolerant motion history
+    is still preserved for fragment continuation."""
+    waits = book(side=lambda p: 270.-p[1])
+    for f in range(5):
+        waits.observe([car(1, 280., x=150., height=60., speed=0.)], 'RED', f/FPS, f+1, 1, unassigned=())
+    waits.observe([], 'RED', 5/FPS, 6, 1, unassigned=())  # one missed frame
+    waits.observe([car(1, 274., x=150., height=54., speed=0.)], 'RED', 6/FPS, 7, 1, unassigned=())
+    waits.observe([car(1, 268., x=150., height=48., speed=0.)], 'RED', 7/FPS, 8, 1, unassigned=())
+    row = only_row(waits)
+    assert row['tracking_state'] == 'SERVED' and row['crossed_stop_line']
+
+    # Fragment matching across a brief missed frame still retains gap-tolerant motion history.
+    waits_link = book(side=lambda p: -1.)
+    for f in range(5):
+        waits_link.observe([car(1, 200.+3.*f, x=150., height=60., speed=3.)], 'GREEN', f/FPS, f+1, 1, unassigned=())
+    waits_link.observe([], 'GREEN', 5/FPS, 6, 1, unassigned=())  # missed frame inside max_gap_sec
+    waits_link.observe([car(1, 200.+3.*6, x=150., height=60., speed=3.)], 'GREEN', 6/FPS, 7, 1, unassigned=())
+    assert len(waits_link.active[(0, 1)]['history']) == 6
+    waits_link.observe([], 'GREEN', 7/FPS, 8, 1, unassigned=())
+    waits_link.observe([car(2, 200.+3.*8, x=150., height=60., speed=3.)], 'GREEN', 8/FPS, 9, 1, unassigned=())
+    assert len(waits_link.records) == 1 and only_row(waits_link).get('identity_links')
+
+    # Sol S14 (Round 12): invalid geometry (zero-width box, even with explicit height) must
+    # clear pending_crossing, clip_baselines, and clip_history so subsequent crossings serve.
+    from dataclasses import replace
+    waits_bad = book(side=lambda p: 270.-p[1])
+    for f in range(5):
+        waits_bad.observe([car(1, 280., x=150., height=60., speed=0.)], 'RED', f/FPS, f+1, 1, unassigned=())
+    waits_bad.observe([car(1, 268., x=150., height=48., speed=0.)], 'RED', 5/FPS, 6, 1, unassigned=())
+    assert waits_bad.active[(0, 1)].get('pending_crossing') is not None
+    # Zero-width malformed box with explicit height=48: must clear all clip state and not enter clip_history.
+    bad_obs = replace(car(1, 268., x=150., height=48., speed=0.), bbox=(150., 220., 150., 268.), height=48.)
+    waits_bad.observe([bad_obs], 'RED', 6/FPS, 7, 1, unassigned=())
+    assert waits_bad.active[(0, 1)].get('pending_crossing') is None
+    assert waits_bad.active[(0, 1)].get('clip_baselines') is None
+    assert len(waits_bad.active[(0, 1)].get('clip_history', ())) == 0
+    # Next two valid observations cross the stop line -> must complete SERVED.
+    waits_bad.observe([car(1, 274., x=150., height=54., speed=0.)], 'RED', 7/FPS, 8, 1, unassigned=())
+    waits_bad.observe([car(1, 268., x=150., height=48., speed=0.)], 'RED', 8/FPS, 9, 1, unassigned=())
+    row_bad = only_row(waits_bad)
+    assert row_bad['tracking_state'] == 'SERVED' and row_bad['crossed_stop_line']
+
+    # Sol S14 (Round 13): clip -> partial recovery behind line -> zero-width box ACROSS line
+    # clears pending_crossing WITHOUT falling through to SERVED; and a malformed box BEHIND
+    # the line cannot serve as the starting point for a crossing on the very next frame.
+    waits_hold = book(side=lambda p: 270.-p[1])
+    for f in range(5):
+        waits_hold.observe([car(1, 280., x=150., height=60., speed=0.)], 'RED', f/FPS, f+1, 1, unassigned=())
+    waits_hold.observe([car(1, 268., x=150., height=48., speed=0.)], 'RED', 5/FPS, 6, 1, unassigned=())
+    waits_hold.observe([car(1, 274., x=150., height=54., speed=0.)], 'RED', 6/FPS, 7, 1, unassigned=())
+    assert waits_hold.active[(0, 1)].get('pending_crossing') is not None
+    bad_across = replace(car(1, 268., x=150., height=48., speed=0.), bbox=(150., 220., 150., 268.), height=48.)
+    waits_hold.observe([bad_across], 'RED', 7/FPS, 8, 1, unassigned=())
+    assert waits_hold.active[(0, 1)].get('pending_crossing') is None
+    assert not only_row(waits_hold)['crossed_stop_line']
+    # Malformed box BEHIND line cannot start a crossing on the next valid frame across the line.
+    bad_behind = replace(car(1, 274., x=150., height=54., speed=0.), bbox=(150., 220., 150., 274.), height=54.)
+    waits_hold.observe([bad_behind], 'RED', 8/FPS, 9, 1, unassigned=())
+    waits_hold.observe([car(1, 268., x=150., height=48., speed=0.)], 'RED', 9/FPS, 10, 1, unassigned=())
+    assert not only_row(waits_hold)['crossed_stop_line']
+
+    # Sol Round 19: explicit oversized height (bbox=None) or out-of-bounds inferred top edge
+    # (py - height beyond _MAX_PIXEL_COORD) must NOT confirm a pending crossing; it clears clip state.
+    for bad_pt, bad_h in (((150., 265.), 1e40), ((150., -5e14), 8e14)):
+        waits_big_h = book(side=lambda p: 270.-p[1])
+        for f in range(6):
+            waits_big_h.observe([car(1, 280., x=150., height=60., speed=0.)], 'RED', f/FPS, f+1, 1, unassigned=())
+        waits_big_h.observe([car(1, 265., x=150., height=45., speed=0.)], 'RED', 6/FPS, 7, 1, unassigned=())
+        assert waits_big_h.active[(0, 1)].get('pending_crossing') is not None
+        huge_obs = VehicleObservation(1, 'car', 0., bad_pt, in_region=True, velocity_valid=True,
+                                      epoch=0, bbox=None, height=bad_h)
+        waits_big_h.observe([huge_obs], 'RED', 7/FPS, 8, 1, unassigned=())
+        assert waits_big_h.active[(0, 1)].get('pending_crossing') is None
+        assert not only_row(waits_big_h)['crossed_stop_line']
+
+    # Sol Round 13 (stale re-entry): after acquisition invalidation clears previous=None, a fresh
+    # outside EXIT_PENDING observation behind the line followed by a consecutive in-ROI crossing
+    # must evaluate the crossing independently of wait interval accounting and complete SERVED.
+    waits_stale = book(exit_persistence_sec=0.3, side=lambda p: 270.-p[1])
+    waits_stale.observe([car(1, 280., x=150., height=60., speed=0.)], 'RED', 0., 1, 1, unassigned=())
+    waits_stale.invalidate(0.5, 'acquisition_stale')
+    assert waits_stale.active[(0, 1)]['previous'] is None
+    waits_stale.observe([car(1, 276., x=150., height=60., speed=2., in_region=False)], 'GREEN', 1.0, 2, 2, unassigned=())
+    assert waits_stale.active[(0, 1)]['previous'] is None and waits_stale.active[(0, 1)]['exit_last'] is not None
+    waits_stale.observe([car(1, 264., x=150., height=60., speed=2., in_region=True)], 'GREEN', 1.0+1/FPS, 3, 2, unassigned=())
+    row_stale = only_row(waits_stale)
+    assert row_stale['tracking_state'] == 'SERVED' and row_stale['crossed_stop_line'] and row_stale['crossing_cycle'] == 2
+
+    # Sol Round 14 (outside-track veto after invalidation): a fresh outside EXIT_PENDING track
+    # with previous=None must still veto an ambiguous occlusion-tail 1 -> 2 handoff, matching
+    # the non-invalidated veto while the control without track 3 still links 1 -> 2.
+    def run_post_invalidation_veto(include_track3, invalidate_track3):
+        w = book(exit_persistence_sec=0.3, side=lambda p: -1.)
+        if include_track3:
+            w.observe([car(3, 280., x=150., height=60., speed=0., in_region=True)], 'RED', 0., 1, 1, unassigned=())
+            if invalidate_track3:
+                w.invalidate(0.1, 'acquisition_stale')
+                assert w.active[(0, 3)]['previous'] is None
+        t0 = 0.2
+        seq_v = [
+            [car(1, 280., x=150., height=60., speed=0.)],
+            [car(1, 280., x=150., height=60., speed=0.)],
+            [car(1, 280., x=150., height=60., speed=0.)],
+            [car(1, 280., x=150., height=60., speed=0.)],
+            [car(1, 265., x=150., height=45., speed=0.)],
+            [car(1, 260., x=150., height=40., speed=0.)] + (
+                [car(3, 280., x=150., height=60., speed=0., in_region=False)] if include_track3 else []
+            ),
+        ]
+        for i, obs in enumerate(seq_v):
+            w.observe(obs, 'RED', t0+i/FPS, 2+i, 1, unassigned=())
+        if include_track3:
+            assert w.active[(0, 3)]['exit_candidate'] is not None
+            if invalidate_track3:
+                assert w.active[(0, 3)]['previous'] is None
+        for i in range(6):
+            w.observe([], 'RED', t0+(len(seq_v)+i)/FPS, 2+len(seq_v)+i, 1, unassigned=())
+        w.observe([car(2, 280., x=150., height=60., speed=0.)],
+                  'RED', t0+(len(seq_v)+6)/FPS, 2+len(seq_v)+6, 1, unassigned=())
+        return [l for r in w.records.values() for l in r.get('identity_links', ())]
+
+    assert run_post_invalidation_veto(include_track3=False, invalidate_track3=False)  # control links 1 -> 2
+    assert run_post_invalidation_veto(include_track3=True, invalidate_track3=False) == []
+    assert run_post_invalidation_veto(include_track3=True, invalidate_track3=True) == []
+
+
+def test_bottom_clip_rear_share_cutoff_uses_original_float_comparison():
+    """Sol S15 + Round 35: exact 106-bit double-double rear scoring matches exact real
+    ``(y2_base - py) >= 0.7 * (h_base - height) - 1e-9`` down to 2e-17 where naive float64
+    rearrangement ``(y2_base - 0.7*h_base) >= (py - 0.7*height) - 1e-9`` fails, with zero
+    cutoff dead zone between short clip_history and indexed _ClipBaselines."""
+    import struct
+    f32 = lambda v: struct.unpack('f', struct.pack('f', v))[0]
+    y2_base, h_base = 275.0, f32(69.48)
+    py_cross, h_cross = 262.17599754433496, f32(51.16)
+    # Exact real diff is +2.03e-17 (>= 0): exact/original passes while naive float64 rearrangement fails.
+    assert (y2_base-py_cross) >= 0.7*(h_base-h_cross)-1e-9
+    assert not ((y2_base-0.7*h_base) >= (py_cross-0.7*h_cross)-1e-9)
+    waits = book(side=lambda p: 270.-p[1])
+    y1_mid = py_cross-h_cross
+    # Establish baseline (y2_base, h_base), then age it out of clip_history into _ClipBaselines.
+    # Middle height 60.0 fails height_eligible (51.16 > 0.85*60), so only the indexed 69.48 baseline can hold.
+    seq = ([[car(1, y2_base, x=150., height=h_base, speed=0.)] for _ in range(10)]
+           + [[car(1, y1_mid+60., x=150., height=60., speed=0.)] for _ in range(12)]
+           + [[car(1, py_cross, x=150., height=h_cross, speed=0.)]])
+    play(waits, seq, phase='RED')
+    row = only_row(waits)
+    assert not row['completed'] and not row['crossed_stop_line']
+    assert waits.active[(0, 1)].get('pending_crossing') is not None
+
+
+def test_pending_crossing_confirms_across_consecutive_exit_pending_outside_frames():
+    """Sol S3: an active crossing anchor is retained across consecutive outside frames
+    while EXIT_PENDING, and confirms SERVED once the reconstructed rear clears the line."""
+    stop_y = 270.
+    # 1. Clip starts inside ROI, vehicle steps outside (EXIT_PENDING), clears rear next frame.
+    waits = book(exit_persistence_sec=0.3, side=lambda p: stop_y-p[1])
+    frames = [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(5)]
+    frames += [[car(1, 265., x=150., height=45., speed=0.)]]  # clipped inside ROI -> pending set
+    end = play(waits, frames, phase='GREEN')
+    waits.observe([car(1, 260., x=150., height=45., speed=2., in_region=False)], 'GREEN', end/FPS, end+1, 1, unassigned=())
+    row = only_row(waits)
+    assert not row['completed'] and row['tracking_state'] == 'EXIT_PENDING'
+    waits.observe([car(1, 253., x=150., height=45., speed=2., in_region=False)], 'GREEN', (end+1)/FPS, end+2, 1, unassigned=())
+    assert row['crossed_stop_line'] and row['tracking_state'] == 'SERVED'
+    assert row['crossing_phase'] == 'GREEN'
+    assert row['crossing_evidence']['from_side'] < 0 <= row['crossing_evidence']['to_side']
+
+    # 2. Clip starts on the first outside frame, then clears rear on the next consecutive outside frame.
+    waits_first = book(exit_persistence_sec=0.3, side=lambda p: stop_y-p[1])
+    end2 = play(waits_first, [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(5)], phase='GREEN')
+    waits_first.observe([car(1, 265., x=150., height=45., speed=0., in_region=False)], 'GREEN', end2/FPS, end2+1, 1, unassigned=())
+    row2 = only_row(waits_first)
+    assert not row2['completed'] and row2['tracking_state'] == 'EXIT_PENDING'
+    waits_first.observe([car(1, 253., x=150., height=45., speed=2., in_region=False)], 'GREEN', (end2+1)/FPS, end2+2, 1, unassigned=())
+    assert row2['crossed_stop_line'] and row2['tracking_state'] == 'SERVED'
+
+    # 3. Dropped frame while EXIT_PENDING discards pending crossing (no crossing across a gap).
+    waits_gap = book(exit_persistence_sec=0.3, side=lambda p: stop_y-p[1])
+    end3 = play(waits_gap, frames, phase='GREEN')
+    waits_gap.observe([car(1, 260., x=150., height=45., speed=2., in_region=False)], 'GREEN', end3/FPS, end3+1, 1, unassigned=())
+    waits_gap.observe([], 'GREEN', (end3+1)/FPS, end3+2, 1, unassigned=())
+    waits_gap.observe([car(1, 253., x=150., height=45., speed=2., in_region=False)], 'GREEN', (end3+2)/FPS, end3+3, 1, unassigned=())
+    assert not only_row(waits_gap)['crossed_stop_line']
+
+    # 4. Preceding outside frame with UNKNOWN phase yields crossing_phase == UNKNOWN.
+    waits_unk = book(exit_persistence_sec=0.3, side=lambda p: stop_y-p[1])
+    end4 = play(waits_unk, frames, phase='GREEN')
+    waits_unk.observe([car(1, 260., x=150., height=45., speed=2., in_region=False)], 'UNKNOWN', end4/FPS, end4+1, None, unassigned=())
+    waits_unk.observe([car(1, 253., x=150., height=45., speed=2., in_region=False)], 'GREEN', (end4+1)/FPS, end4+2, 1, unassigned=())
+    row4 = only_row(waits_unk)
+    assert row4['crossed_stop_line'] and row4['crossing_phase'] == 'UNKNOWN'
+    assert 'crossing_phase_unknown' in row4['quality_flags']
+
+
+def test_roi_exit_persistence_longer_than_association_gap_uses_outside_sighting_for_expiry():
+    """Sol S4: when exit_persistence_sec > association_gap_sec, a single dropped frame after
+    > association_gap_sec of tracked outside sightings must not close the row or split a return."""
+    waits = VehicleWaits('run', RunPolicy(stop_persistence_sec=0, exit_persistence_sec=1.5, association_gap_sec=1.0),
+                         side=lambda p: -1.)
+    for i in range(3):
+        waits.observe([car(1, 120., speed=0.)], 'RED', i/FPS, i+1, 1)
+    # Tracked outside continuously for 32 frames (1.067 s > 1.0 s association gap, < 1.5 s exit).
+    for i in range(3, 35):
+        waits.observe([car(1, 120., speed=0., in_region=False)], 'RED', i/FPS, i+1, 1)
+    row = only_row(waits)
+    assert not row['completed'] and row['tracking_state'] == 'EXIT_PENDING'
+    assert row['last_seen'] == pytest.approx(2/FPS)
+    # Single dropped frame at 35/FPS (1.10 s since last in-ROI, 0.033 s since last outside sighting).
+    waits.observe([], 'RED', 35/FPS, 36, 1)
+    assert not row['completed'] and row['last_seen'] == pytest.approx(2/FPS)
+    # Returns inside ROI at 36/FPS: stays on the same single row (no :segment-1).
+    waits.observe([car(1, 120., speed=0., in_region=True)], 'RED', 36/FPS, 37, 1)
+    assert list(waits.records) == ['run:acquisition:0:1']
+    assert row['unknown_sec'] == pytest.approx(34/FPS)
+
+    # Vanishing permanently after outside sightings still expires after association_gap_sec from last outside sighting.
+    waits_lost = VehicleWaits('run', RunPolicy(stop_persistence_sec=0, exit_persistence_sec=1.5, association_gap_sec=1.0),
+                              side=lambda p: -1.)
+    for i in range(3):
+        waits_lost.observe([car(1, 120., speed=0.)], 'RED', i/FPS, i+1, 1)
+    for i in range(3, 35):
+        waits_lost.observe([car(1, 120., speed=0., in_region=False)], 'RED', i/FPS, i+1, 1)
+    waits_lost.observe([], 'RED', 64/FPS, 65, 1)  # 30/30 = 1.000 s after last outside sighting (not yet > 1.0)
+    assert not only_row(waits_lost)['completed']
+    waits_lost.observe([], 'RED', 65/FPS, 66, 1)  # 31/30 = 1.033 s > 1.0 s -> tracking_lost
+    lost = only_row(waits_lost)
+    assert lost['completed'] and 'tracking_lost' in lost['quality_flags']
+    assert lost['last_seen'] == pytest.approx(2/FPS)
+
+
+@pytest.mark.parametrize('fps', [30., 60., 120., 240.])
+def test_bottom_clipped_stationary_car_does_not_falsely_cross_at_high_fps(fps):
+    """Sol S6: motion history retains enough samples to span MIN_FIT_SPAN_SEC at high FPS
+    so bottom-edge occlusion clipping stays open at 120/240 fps just as at 30 fps."""
+    stop_y = 270.
+    waits = book(side=lambda p: stop_y-p[1])
+    pre_frames = int(round(0.15*fps))
+    seq = 0
+    for _ in range(pre_frames):
+        waits.observe([car(1, 280., x=150., height=60., speed=0.)], 'RED', seq/fps, seq+1, 1, unassigned=())
+        seq += 1
+    for _ in range(5):
+        waits.observe([car(1, 265., x=150., height=45., speed=0.)], 'RED', seq/fps, seq+1, 1, unassigned=())
+        seq += 1
+    row = only_row(waits)
+    assert not row['completed'] and not row['crossed_stop_line']
+    # Genuine forward motion clears the reconstructed rear and completes SERVED.
+    for i in range(1, 5):
+        waits.observe([car(1, (220.-5.*i)+45., x=150., height=45., speed=2.)], 'GREEN', seq/fps, seq+1, 1, unassigned=())
+        seq += 1
+    assert row['crossed_stop_line'] and row['tracking_state'] == 'SERVED'
+
+
+def test_exit_timer_and_crossing_continuity_share_max_gap_tolerance():
+    """Sol S3 Round 2: with max_gap_sec=0.1, consecutive outside sightings at 0.3 s and
+    0.4 s (0.4 - 0.3 == 0.1 + 3e-17) must not advance the exit timer while dropping the anchor."""
+    waits = book(max_gap_sec=0.1, exit_persistence_sec=0.3, side=lambda p: 270.-p[1])
+    waits.observe([car(1, 280., x=150., height=60., speed=0.)], 'GREEN', 0.0, 1, 1, unassigned=())
+    waits.observe([car(1, 280., x=150., height=60., speed=0.)], 'GREEN', 0.1, 2, 1, unassigned=())
+    waits.observe([car(1, 265., x=150., height=45., speed=0.)], 'GREEN', 0.2, 3, 1, unassigned=())
+    waits.observe([car(1, 260., x=150., height=45., speed=2., in_region=False)], 'GREEN', 0.3, 4, 1, unassigned=())
+    row = only_row(waits)
+    assert not row['completed'] and row['tracking_state'] == 'EXIT_PENDING'
+    waits.observe([car(1, 253., x=150., height=45., speed=2., in_region=False)], 'GREEN', 0.4, 5, 1, unassigned=())
+    assert row['crossed_stop_line'] and row['tracking_state'] == 'SERVED'
+
+
+def test_single_tracked_outside_frame_preserves_clip_anchor_and_records_unknown_wait():
+    """Sol S7: a single tracked outside frame must preserve crossing/clip continuity across
+    consecutive same-ID ROI transitions while still recording the dip as unknown coverage."""
+    stop_y = 270.
+    waits = book(exit_persistence_sec=0.3, side=lambda p: stop_y-p[1])
+    frames = [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(5)]
+    frames += [[car(1, 265., x=150., height=45., speed=0.)]]
+    end = play(waits, frames, phase='RED')
+    # Single tracked outside frame while still clipped.
+    waits.observe([car(1, 265., x=150., height=45., speed=0., in_region=False)], 'RED', end/FPS, end+1, 1, unassigned=())
+    # Re-enters inside ROI at partial recovery h=51 (y2=271, behind line), then re-clips to h=45.
+    waits.observe([car(1, 271., x=150., height=51., speed=0., in_region=True)], 'RED', (end+1)/FPS, end+2, 1, unassigned=())
+    waits.observe([car(1, 265., x=150., height=45., speed=0., in_region=True)], 'RED', (end+2)/FPS, end+3, 1, unassigned=())
+    row = only_row(waits)
+    assert not row['completed'] and not row['crossed_stop_line']
+    assert 'observation_gap' in row['quality_flags']
+    assert row['unknown_sec'] == pytest.approx(2/FPS)
+    assert row['red_wait_sec'] == pytest.approx(6/FPS)  # 5 before dip + 1 after re-entry
+
+
+def test_unclipped_vehicle_exiting_behind_line_crosses_on_consecutive_outside_frame():
+    """Sol S8: an unclipped vehicle that leaves the ROI behind the line and crosses on the
+    next consecutive outside frame must complete SERVED rather than EXITED."""
+    waits = book(exit_persistence_sec=0.3, side=lambda p: 270.-p[1])
+    end = play(waits, [[car(1, 280., x=150., height=60., speed=2.)] for _ in range(5)], phase='GREEN')
+    waits.observe([car(1, 275., x=150., height=60., speed=2., in_region=False)], 'GREEN', end/FPS, end+1, 1, unassigned=())
+    row = only_row(waits)
+    assert not row['completed'] and row['tracking_state'] == 'EXIT_PENDING'
+    waits.observe([car(1, 265., x=150., height=60., speed=2., in_region=False)], 'GREEN', (end+1)/FPS, end+2, 1, unassigned=())
+    assert row['crossed_stop_line'] and row['tracking_state'] == 'SERVED'
+    assert row['crossing_evidence']['from_side'] < 0 <= row['crossing_evidence']['to_side']
+
+    # Same sequence with a stationary bottom clip on the second outside frame stays held, not SERVED.
+    waits_clip = book(exit_persistence_sec=0.3, side=lambda p: 270.-p[1])
+    end2 = play(waits_clip, [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(5)], phase='RED')
+    waits_clip.observe([car(1, 280., x=150., height=60., speed=0., in_region=False)], 'RED', end2/FPS, end2+1, 1, unassigned=())
+    waits_clip.observe([car(1, 265., x=150., height=45., speed=0., in_region=False)], 'RED', (end2+1)/FPS, end2+2, 1, unassigned=())
+    assert not only_row(waits_clip)['crossed_stop_line']
+
+
+def test_consecutive_outside_observations_advance_geometric_recovery():
+    """Sol S9: two qualifying behind-line recoveries while EXIT_PENDING clear the stale
+    pending anchor so a full-height 57 px departure past stop_y=270 confirms SERVED."""
+    waits = book(exit_persistence_sec=0.3, side=lambda p: 270.-p[1])
+    frames = [[car(1, 280., x=150., height=60., speed=0.)] for _ in range(5)]
+    frames += [[car(1, 265., x=150., height=45., speed=0.)]]
+    end = play(waits, frames, phase='GREEN')
+    waits.observe([car(1, 277., x=150., height=57., speed=0., in_region=False)], 'GREEN', end/FPS, end+1, 1, unassigned=())
+    waits.observe([car(1, 277., x=150., height=57., speed=0., in_region=False)], 'GREEN', (end+1)/FPS, end+2, 1, unassigned=())
+    assert waits.active[(0, 1)].get('pending_crossing') is None
+    waits.observe([car(1, 269., x=150., height=57., speed=2., in_region=False)], 'GREEN', (end+2)/FPS, end+3, 1, unassigned=())
+    row = only_row(waits)
+    assert row['crossed_stop_line'] and row['tracking_state'] == 'SERVED'
+
+
+def test_exit_pending_track_vetoes_occlusion_link_using_latest_outside_box():
+    """Sol S10: an EXIT_PENDING track tracked outside > 0.35 s after its last in-ROI sighting
+    must still veto an occlusion-tail link near its latest outside box when it vanishes."""
+    waits = book(exit_persistence_sec=0.6, side=lambda p: -1.)
+    # Track 5 enters ROI at f=0..2, then steps outside ROI at f=3..14 (0.40 s > 0.35 s after in-ROI)
+    # sitting near (152, 160, h=60 -> y1=100). Meanwhile Track 1 builds a stationary occlusion tail
+    # at (150, 100, h=100->55) at f=2..9, vanishes at f=10..14, and Track 5 vanishes at f=15.
+    for i in range(15):
+        obs = []
+        if i < 3:
+            obs.append(car(5, 160., x=250., height=60., speed=0., in_region=True))
+        else:
+            obs.append(car(5, 160., x=152., height=60., speed=0., in_region=False))
+        if 2 <= i < 10:
+            frac = (i-2)/7.
+            h = 100.-45.*frac
+            obs.append(car(1, 100.+h, x=150., height=h, speed=0., in_region=True))
+        waits.observe(obs, 'RED', i/FPS, i+1, 1, unassigned=())
+    # At f=15 (dt_in_roi for #5 = 13/30 = 0.433 s > 0.35 s, dt_outside for #5 = 1/30 = 0.033 s),
+    # newborn #2 appears 2 px from #5's latest outside box and inside #1's occlusion top-gate.
+    waits.observe([car(2, 160., x=150., height=60., speed=0., in_region=True)], 'RED', 15/FPS, 16, 1, unassigned=())
+    assert _links(waits) == []
+
+    # Sol S10 Round 3: a final heightless outside observation clears history, yet the track's
+    # last valid box (within veto_window of its own timestamp) must still veto; once that valid
+    # box ages past 0.35 s, the veto expires cleanly even if heightless outside frames continue.
+    for extra_heightless, expect_links in ((1, []), (11, [(1, 2)])):
+        waits_h = book(exit_persistence_sec=1.0, side=lambda p: -1.)
+        valid_end = 14
+        tail_start = valid_end+extra_heightless-12
+        for i in range(valid_end+extra_heightless):
+            obs = []
+            if i < 3:
+                obs.append(car(5, 160., x=250., height=60., speed=0., in_region=True))
+            elif i < valid_end:
+                obs.append(car(5, 160., x=152., height=60., speed=0., in_region=False))
+            else:
+                obs.append(car(5, 160., x=152., height=None, speed=0., in_region=False, bbox=False))
+            if tail_start <= i < tail_start+8:
+                frac = (i-tail_start)/7.
+                h = 100.-45.*frac
+                obs.append(car(1, 100.+h, x=150., height=h, speed=0., in_region=True))
+            waits_h.observe(obs, 'RED', i/FPS, i+1, 1, unassigned=())
+        idx = valid_end+extra_heightless
+        waits_h.observe([car(2, 160., x=150., height=60., speed=0., in_region=True)], 'RED', idx/FPS, idx+1, 1, unassigned=())
+        assert _links(waits_h) == expect_links, extra_heightless
+
+
+def test_legacy_crossing_gate_unchanged_when_both_options_off():
+    """Sol S3 Round 3: with both fragment_continuation and exit_persistence_sec off and
+    max_gap_sec=0.1, an in-ROI sign change from 0.3 to 0.4 s (observation_gap) must not cross."""
+    waits = VehicleWaits('run', RunPolicy(stop_persistence_sec=0, max_gap_sec=0.1), side=lambda p: p[1]-100.)
+    waits.observe([car(1, 90., speed=2.)], 'GREEN', 0.3, 1, 1)
+    waits.observe([car(1, 110., speed=2.)], 'GREEN', 0.4, 2, 1)
+    row = only_row(waits)
+    assert 'observation_gap' in row['quality_flags']
+    assert not row['crossed_stop_line'] and not row['completed']
+
+
+def test_exit_pending_crossing_during_first_green_counts_in_live_and_archived_n_served(tmp_path):
+    """Sol S8 Round 3: a vehicle observed in-ROI only while phase is UNKNOWN (cycles=[])
+    that crosses on a consecutive EXIT_PENDING outside frame after GREEN confirms cycle 1
+    must count in n_served across live, retained-evicted, and archived store reads."""
+    DARK = np.zeros((8, 8, 3), np.uint8)
+    e = ObservationEngine('run-s8', RunPolicy(debounce_frames=1, stop_persistence_sec=0, exit_persistence_sec=0.3),
+                          {'xmin': 0, 'ymin': 0, 'xmax': 8, 'ymax': 8}, lambda p: p[1]-100., lambda *_: None)
+    e.enable_retention(1, tmp_path)
+    store = ExperimentStore(tmp_path, e.run_id, {})
+    # f=0,1: inside ROI while signal is dark (UNKNOWN -> cycles=[]).
+    e.observe_acquisition(DARK, 0.0, 1, [car(1, 90., speed=2., in_region=True)])
+    e.observe_acquisition(DARK, 1/FPS, 2, [car(1, 92., speed=2., in_region=True)])
+    # f=2: steps outside ROI behind stop line while GREEN starts cycle 1 (EXIT_PENDING).
+    e.observe_acquisition(GREEN, 2/FPS, 3, [car(1, 95., speed=2., in_region=False)])
+    # f=3: crosses stop line on consecutive outside frame while GREEN cycle 1 is active.
+    e.observe_acquisition(GREEN, 3/FPS, 4, [car(1, 105., speed=2., in_region=False)])
+    # f=4: advance clock past crossing_at so green_start <= completed_at < end.
+    e.observe_acquisition(GREEN, 4/FPS, 5, [])
+    row = e.waits.records['run-s8:acquisition:0:1']
+    assert row['crossed_stop_line'] and row['crossing_cycle'] == 1 and row['cycles'] == []
+    assert e.snapshot()['comparisons'][0]['n_served'] == 1
+    # Evict completed vehicle via retention commit + acknowledge, then check live and archived reads.
+    state, token = e.prepare_commit(); store.persist(state); e.acknowledge(token)
+    assert 'run-s8:acquisition:0:1' not in e.waits.records
+    assert e.snapshot()['comparisons'][0]['n_served'] == 1
+    e.close()
+    state, token = e.prepare_commit(); store.persist(state); e.acknowledge(token)
+    archived = store.read()
+    assert archived['comparisons'][0]['n_served'] == 1
+
+    # Sol Round 15 (default-off n_served invariance): with both options off (exit_persistence_sec=0)
+    # and 1-frame debounce, GREEN(empty) -> YELLOW(car inside y=90) -> GREEN(car outside y=110)
+    # keeps cycle 2 n_served == 0 across live, retention eviction, export, and reopened pre-upgrade
+    # archives (where exit_persistence_sec is absent); native exit_persistence_sec=0.3 counts 1.
+    import json
+    YELLOW = np.full((8, 8, 3), (0, 255, 255), np.uint8)
+    for exit_sec, expect_served in ((0.0, 0), (0.3, 1)):
+        eng = ObservationEngine(f'run-r15-{int(exit_sec*10)}',
+                                RunPolicy(debounce_frames=1, stop_persistence_sec=0, exit_persistence_sec=exit_sec),
+                                {'xmin': 0, 'ymin': 0, 'xmax': 8, 'ymax': 8}, lambda p: p[1]-100., lambda *_: None)
+        eng.enable_retention(1, tmp_path)
+        st = ExperimentStore(tmp_path, eng.run_id, {})
+        eng.observe_acquisition(GREEN, 0.0, 1, [])
+        eng.observe_acquisition(YELLOW, 1/FPS, 2, [car(1, 90., speed=2., in_region=True)])
+        eng.observe_acquisition(GREEN, 2/FPS, 3, [car(1, 110., speed=2., in_region=False)])
+        eng.observe_acquisition(GREEN, 3/FPS, 4, [])
+        c2_live = next(c for c in eng.snapshot()['comparisons'] if c['cycle_id'] == 2)
+        assert c2_live['n_served'] == expect_served
+        s1, tok1 = eng.prepare_commit(); st.persist(s1); eng.acknowledge(tok1)
+        c2_evicted = next(c for c in eng.snapshot()['comparisons'] if c['cycle_id'] == 2)
+        assert c2_evicted['n_served'] == expect_served
+        eng.close()
+        s2, tok2 = eng.prepare_commit(); st.persist(s2); eng.acknowledge(tok2)
+        c2_arch = next(c for c in st.read()['comparisons'] if c['cycle_id'] == 2)
+        assert c2_arch['n_served'] == expect_served
+        if exit_sec == 0.0:
+            # Simulate reopening a pre-upgrade archive where exit_persistence_sec was absent from policy.
+            ev_path = st.directory/'evidence.json'
+            ev_data = json.loads(ev_path.read_text())
+            ev_data['state']['policy'].pop('exit_persistence_sec', None)
+            ev_path.write_text(json.dumps(ev_data))
+            reopened = ExperimentStore.open(st.directory)
+            c2_legacy = next(c for c in reopened.read()['comparisons'] if c['cycle_id'] == 2)
+            assert c2_legacy['n_served'] == 0
+
+
+def test_delayed_vehicle_eviction_does_not_leak_archived_crossing_cycle_population(tmp_path):
+    """Sol S8 Round 4 & 5: when an open A/B episode starts on the crossing frame (so the
+    final interval straddles the retention cutoff and keeps old cycle membership) and delays
+    vehicle eviction until a separate acknowledgment AFTER the crossing cycle has been
+    archived, retention acknowledgment must not recreate cycle_population for the archived
+    cycle, while still preserving upcoming RED-cycle membership."""
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from src.common.types import TrafficSnapshot
+    from src.experiment.wait_savings import SchedulePolicy
+    from test_vehicle_identity import detection
+
+    roi = {'xmin': 0, 'ymin': 0, 'xmax': 16, 'ymax': 16}
+    book = ObservationEngine('paired-s8', RunPolicy(debounce_frames=1, stop_persistence_sec=0),
+                             roi, lambda p: p[1]-45.,
+                             lambda *_: SimpleNamespace(green_seconds=10, failsafe_active=False),
+                             identity_policy=IdentityPolicy(mode='persistent_v1', confirmation_observations=2,
+                                                            confirmation_sec=.1, exit_persistence_sec=0),
+                             schedule_policy=SchedulePolicy(enabled=True, unchanged_clearance=True),
+                             system_roi=roi)
+    book.enable_retention(1, tmp_path)
+    store = ExperimentStore(tmp_path, 'paired-s8', {})
+    frames_rgb = {
+        'RED': np.full((16, 16, 3), (0, 0, 255), np.uint8),
+        'GREEN': np.full((16, 16, 3), (0, 255, 0), np.uint8),
+        'YELLOW': np.full((16, 16, 3), (0, 255, 255), np.uint8),
+    }
+
+    def analyze():
+        return TrafficSnapshot(v_w_pcu=2, occupancy_pct=10, queue_meters=4), {'inference_calls': 1}
+
+    seq = 0
+    def step(t, a, b, ev=()):
+        nonlocal seq
+        seq += 1
+        book.observe_system_frame(t)
+        book.observe_a(frames_rgb[a], t, seq, analyze, {'timestamp': t, 'sequence': seq})
+        book.observe_acquisition(frames_rgb[b], t, seq, (), identity_evidence=ev)
+
+    # Cycle 1 GREEN starts at t=0.0; vehicle 101 builds confirmation at t=0.0..0.1 behind line
+    # and crosses at t=0.2 on the EXACT frame A turns GREEN (opening episode with protected_since=0.2).
+    v101_pre = replace(detection(101), point=(50., 40.), ground=(5., 4.))
+    v101_post = replace(detection(101), point=(50., 50.), ground=(5., 5.))
+    step(0.0, 'RED', 'GREEN', (v101_pre,))
+    step(0.1, 'RED', 'GREEN', (v101_pre,))
+    step(0.2, 'GREEN', 'GREEN', (v101_post,))
+    book.schedule.await_idle()
+    vid_101 = next(iter(book.waits.records))
+    row_101 = book.waits.records[vid_101]
+    assert row_101['crossed_stop_line'] and row_101['crossing_cycle'] == 1 and 1 in row_101['cycles']
+
+    # End B Cycle 1 and complete B Cycle 2 while A's episode stays open (protecting v101 from eviction).
+    step(0.3, 'GREEN', 'YELLOW')
+    step(0.4, 'GREEN', 'RED')
+    step(0.5, 'GREEN', 'GREEN')   # B Cycle 2 starts
+    step(0.6, 'GREEN', 'YELLOW')  # B Cycle 2 ends -> Cycle 1 is now outside budget=1
+    step(0.7, 'GREEN', 'RED')
+
+    # Commit 1: Cycle 1 is archived and dropped while v101 remains held in memory with cycle 1 still in row['cycles']!
+    state1, token1 = book.prepare_commit(); store.persist(state1); book.acknowledge(token1)
+    assert 1 not in {c['cycle_id'] for c in book.phase.cycles}
+    assert vid_101 in book.waits.records
+    assert 1 in book.waits.records[vid_101]['cycles']
+    assert 1 not in book.retention.cycle_population
+
+    # Close A's episode so v101 is evicted in a SEPARATE acknowledgment AFTER Cycle 1 archival.
+    book.invalidate_a('a_observation_gap', 0.8)
+    step(0.9, 'RED', 'RED')
+
+    # Commit 2 (separate acknowledgment AFTER Cycle 1 archival): v101 evicts, and Cycle 1 must NOT be recreated!
+    state2, token2 = book.prepare_commit(); store.persist(state2); book.acknowledge(token2)
+    assert vid_101 not in book.waits.records
+    assert 1 not in book.retention.cycle_population
+
+    # Also verify upcoming RED-cycle membership (cycle_id == phase.cycle_id + 1) IS preserved on eviction.
+    upcoming_cycle = book.phase.cycle_id+1
+    v202 = replace(detection(202), point=(150., 40.), ground=(15., 4.))
+    step(1.0, 'RED', 'RED', (v202,))
+    step(1.1, 'RED', 'RED', (v202,))
+    step(1.2, 'RED', 'RED', (v202,))
+    step(1.3, 'RED', 'RED', (replace(v202, in_region=False),))
+    state3, token3 = book.prepare_commit(); store.persist(state3); book.acknowledge(token3)
+    assert upcoming_cycle in book.retention.cycle_population
+    assert book.retention.cycle_population[upcoming_cycle]['count'] == 1
+    book.close()
+
+
+def test_crossing_at_exact_max_gap_and_sub_tolerance_exit_persistence():
+    """Sol Round 29:
+    1. A genuine pending crossing confirmation at dt == max_gap_sec (e.g. 0.4 - 0.3 = 0.1 + 2.8e-17)
+       must confirm SERVED in-ROI identically to outside-ROI rather than dropping pending_crossing.
+    2. A tiny valid exit_persistence_sec (e.g. 1e-9) must enter EXIT_PENDING on the first outside
+       sighting and never confirm EXITED on zero elapsed time or split the return into :segment-1."""
+    for exit_sec in (0.0, 0.3):
+        waits = VehicleWaits(
+            'gap-edge',
+            RunPolicy(max_gap_sec=0.1, fragment_continuation=True, exit_persistence_sec=exit_sec),
+            side=lambda p: 270.-p[1],
+        )
+        for seq, (t, y, h) in enumerate([(0.0, 280., 60.), (0.1, 280., 60.), (0.2, 280., 60.),
+                                         (0.3, 265., 45.), (0.4, 253., 45.)], start=1):
+            waits.observe([car(1, y, x=150., height=h, speed=0.)], 'RED', t, seq, 1, unassigned=())
+            if seq == 4:
+                assert not only_row(waits)['crossed_stop_line']
+        row = only_row(waits)
+        assert row['crossed_stop_line'] and row['tracking_state'] == 'SERVED'
+
+    waits_tiny = VehicleWaits(
+        'tiny-exit',
+        RunPolicy(exit_persistence_sec=1e-9),
+        side=lambda p: -1.,
+    )
+    waits_tiny.observe([car(1, 200., x=150., height=60., speed=0., in_region=True)], 'RED', 0.0, 1, 1)
+    waits_tiny.observe([car(1, 200., x=150., height=60., speed=0., in_region=False)], 'RED', 1/FPS, 2, 1)
+    row_tiny = only_row(waits_tiny)
+    assert not row_tiny['completed'] and row_tiny['tracking_state'] == 'EXIT_PENDING'
+    waits_tiny.observe([car(1, 200., x=150., height=60., speed=0., in_region=True)], 'RED', 2/FPS, 3, 1)
+    assert len(waits_tiny.records) == 1
+    assert not only_row(waits_tiny)['completed'] and only_row(waits_tiny)['tracking_state'] != 'EXITED'
+    # Two consecutive outside sightings spanning >= 1e-9 DO confirm EXITED at the first outside timestamp.
+    waits_tiny.observe([car(1, 200., x=150., height=60., speed=0., in_region=False)], 'RED', 3/FPS, 4, 1)
+    assert only_row(waits_tiny)['tracking_state'] == 'EXIT_PENDING'
+    waits_tiny.observe([car(1, 200., x=150., height=60., speed=0., in_region=False)], 'RED', 4/FPS, 5, 1)
+    assert only_row(waits_tiny)['completed'] and only_row(waits_tiny)['tracking_state'] == 'EXITED'
+    assert only_row(waits_tiny)['completed_at'] == pytest.approx(3/FPS)
+
+    # Sol Round 30:
+    # 1. Exact-gap crossing through ObservationEngine preserves a single GREEN cycle,
+    #    crossing_cycle=1, n_served=1, and full red wait at dt == max_gap_sec (0.4 - 0.3).
+    eng = ObservationEngine(
+        'gap-engine',
+        RunPolicy(max_gap_sec=0.1, fragment_continuation=True, exit_persistence_sec=0.3),
+        {'xmin': 0, 'ymin': 0, 'xmax': 8, 'ymax': 8},
+        lambda p: 270.-p[1],
+        lambda *_: None,
+    )
+    for seq, (t, y, h) in enumerate([(0.0, 280., 60.), (0.1, 280., 60.), (0.2, 280., 60.),
+                                     (0.3, 265., 45.), (0.4, 253., 45.)], start=1):
+        eng.observe_acquisition(GREEN, t, seq, [car(1, y, x=150., height=h, speed=0.)], unassigned_boxes=())
+    for seq, t in enumerate([0.45, 0.50, 0.55], start=6):
+        eng.observe_acquisition(GREEN, t, seq, [], unassigned_boxes=())
+    eng_row = next(iter(eng.waits.records.values()))
+    assert eng_row['tracking_state'] == 'SERVED' and eng_row['crossing_cycle'] == 1
+    comps = eng.snapshot()['comparisons']
+    assert len(comps) == 1 and comps[0]['n_served'] == 1
+
+    waits_red = VehicleWaits(
+        'gap-red',
+        RunPolicy(max_gap_sec=0.1, stop_persistence_sec=0, fragment_continuation=True, exit_persistence_sec=0.3),
+        side=lambda p: 270.-p[1],
+    )
+    for seq, t in enumerate([0.2, 0.3, 0.4], start=1):
+        waits_red.observe([car(1, 280., x=150., height=60., speed=0.)], 'RED', t, seq, 1, unassigned=())
+    red_row = only_row(waits_red)
+    assert red_row['red_wait_sec'] == pytest.approx(0.2, abs=1e-9)
+    assert 'observation_gap' not in red_row['quality_flags']
+
+    # 2. Small configured max_gap_sec (1e-9) must not allow handoffs exceeding it (dt=1.5e-9).
+    waits_sm = VehicleWaits('small-gap', RunPolicy(max_gap_sec=1e-9, fragment_continuation=True), side=lambda p: -1.)
+    for seq, t in enumerate([0.0, 5e-10, 1e-9], start=1):
+        waits_sm.observe([car(1, 200., x=150., height=60., speed=0.)], 'RED', t, seq, 1, unassigned=())
+    waits_sm.observe([car(2, 200., x=150., height=60., speed=0.)], 'RED', 2.5e-9, 4, 1, unassigned=())
+    assert len(waits_sm.records) == 2 and not any(r.get('identity_links') for r in waits_sm.records.values())
+
+    # Sol Round 32: exact association_gap_sec=0.1 at 10 fps (0.30000000000000004 - 0.2) must not
+    # complete an EXIT_PENDING visit as LOST or split its return at 0.4 into :segment-1.
+    waits_assoc = VehicleWaits(
+        'assoc-edge',
+        RunPolicy(max_gap_sec=0.1, association_gap_sec=0.1, exit_persistence_sec=0.3),
+        side=lambda p: -1.,
+    )
+    waits_assoc.observe([car(1, 200., x=150., height=60., speed=0., in_region=True)], 'RED', 0.0, 1, 1)
+    waits_assoc.observe([car(1, 200., x=150., height=60., speed=0., in_region=True)], 'RED', 0.1, 2, 1)
+    waits_assoc.observe([car(1, 200., x=150., height=60., speed=0., in_region=False)], 'RED', 0.2, 3, 1)
+    waits_assoc.observe([], 'RED', 0.30000000000000004, 4, 1)
+    assert not only_row(waits_assoc)['completed'] and only_row(waits_assoc)['tracking_state'] == 'LOST'
+    waits_assoc.observe([car(1, 200., x=150., height=60., speed=0., in_region=True)], 'RED', 0.4, 5, 1)
+    assert len(waits_assoc.records) == 1 and not only_row(waits_assoc)['completed']
+
+
+def test_malformed_outside_box_does_not_confirm_exit_and_disabled_path_skips_box_parsing(monkeypatch):
+    """Sol Round 33:
+    1. Under exit_persistence_sec=0.3 (with fragment_continuation False or True), a malformed
+       outside box (e.g. zero-width [15, 30, 15, 60]) must not confirm a false EXITED or split
+       the subsequent return into :segment-1; it must behave like a missing sample.
+    2. With continuation disabled (default RunPolicy() and PersistentVehicleWaits), crossing checks
+       must never call _valid_box_geometry or slice supplied observation boxes."""
+    from dataclasses import replace
+
+    for fc in (False, True):
+        waits = VehicleWaits(
+            f'bad-outside-{fc}',
+            RunPolicy(fragment_continuation=fc, exit_persistence_sec=0.3),
+            side=lambda p: -1.,
+        )
+        waits.observe([car(1, 200., x=150., height=60., speed=0., in_region=True)], 'RED', 0.0, 1, 1)
+        waits.observe([car(1, 200., x=150., height=60., speed=0., in_region=True)], 'RED', 0.1, 2, 1)
+        for seq, t in ((3, 0.2), (4, 0.3), (5, 0.4)):
+            waits.observe([car(1, 200., x=150., height=60., speed=0., in_region=False)], 'RED', t, seq, 1)
+        bad_obs = replace(car(1, 60., x=15., height=30., speed=0., in_region=False), bbox=[15., 30., 15., 60.])
+        waits.observe([bad_obs], 'RED', 0.5, 6, 1)
+        row = only_row(waits)
+        assert not row['completed'] and row['tracking_state'] == 'LOST'
+        waits.observe([car(1, 200., x=150., height=60., speed=0., in_region=True)], 'RED', 0.6, 7, 1)
+        assert len(waits.records) == 1
+        assert not only_row(waits)['completed']
+
+        # A valid outside sighting after the malformed outside sample restarts exit persistence.
+        waits.observe([car(1, 200., x=150., height=60., speed=0., in_region=False)], 'RED', 0.7, 8, 1)
+        waits.observe([bad_obs], 'RED', 0.8, 9, 1)
+        waits.observe([car(1, 200., x=150., height=60., speed=0., in_region=False)], 'RED', 0.9, 10, 1)
+        assert not only_row(waits)['completed'] and only_row(waits)['tracking_state'] == 'EXIT_PENDING'
+
+    class SpyBox:
+        def __init__(self, coords):
+            self._coords = tuple(coords)
+            self.slices = 0
+        def __getitem__(self, key):
+            self.slices += 1
+            return self._coords[key]
+
+    geom_calls = 0
+    orig_geom = VehicleWaits._valid_box_geometry
+    def spy_geom(observation):
+        nonlocal geom_calls
+        geom_calls += 1
+        return orig_geom(observation)
+    monkeypatch.setattr(VehicleWaits, '_valid_box_geometry', staticmethod(spy_geom))
+
+    for waits in (
+        VehicleWaits('default-off', RunPolicy(), side=lambda p: 270.-p[1]),
+        PersistentVehicleWaits('persist-off', RunPolicy(fragment_continuation=True, exit_persistence_sec=0.3),
+                               side=lambda p: 270.-p[1], identity_policy=IdentityPolicy(mode='persistent_v1')),
+    ):
+        spy_box = SpyBox((140., 220., 160., 280.))
+        for seq, (t, y, in_roi) in enumerate([(0.0, 280., True), (0.1, 280., True), (0.2, 280., True), (0.3, 260., True)], start=1):
+            obs = VehicleObservation(
+                local_id=1, class_name='car', point=(150., y), in_region=in_roi,
+                speed_mps=0., velocity_valid=True, stable_id=True, epoch=0,
+                bbox=spy_box, height=None,
+            )
+            waits.observe([obs], 'GREEN', t, seq, 1)
+        assert geom_calls == 0
+        assert spy_box.slices == 0
+        assert only_row(waits)['crossed_stop_line']
+        # Outside exit observation under default-off / persistent must also never slice boxes.
+        spy_exit = SpyBox((140., 220., 160., 280.))
+        waits.observe([VehicleObservation(2, 'car', 0., (150., 280.), stable_id=True, velocity_valid=True,
+                                          in_region=True, epoch=0, bbox=spy_exit, height=None)], 'RED', 0.4, 5, 1)
+        waits.observe([VehicleObservation(2, 'car', 0., (150., 280.), stable_id=True, velocity_valid=True,
+                                          in_region=False, epoch=0, bbox=spy_exit, height=None)], 'RED', 0.5, 6, 1)
+        assert geom_calls == 0
+        assert spy_exit.slices == 0
+
+
+def test_sparse_prune_of_block_maxima_does_not_rescan_stationary_history():
+    """Sol Round 34: pruning the cached rear maximum from hundreds of blocks out of >33k
+    stationary baselines must keep crossing queries O(log N) and lossless (zero full-block rescans)."""
+    import random
+    from src.experiment.vehicle_waits import _ClipBaselines, _HBlock, _HNode, _rear_err, OCCLUSION_BOTTOM_SHARE
+
+    cb = _ClipBaselines()
+    # 512 distinct height bands x 65 entries = 33,280 baselines across >500 _HBlock leaves.
+    # In each band, 64 entries sit at x=150 with low rear (y2=272) and 1 entry sits at x=142
+    # with high rear (y2=282) so a small +x drift prunes ONLY the 512 high-rear block maxima.
+    for band in range(512):
+        h = 60.0 + 0.01 * band
+        y2_low = 272.0 + 0.7 * (h - 60.0)
+        y1_low = y2_low - h
+        r_low = y2_low - OCCLUSION_BOTTOM_SHARE * h
+        e_low = _rear_err(y2_low, h)
+        for j in range(64):
+            cb._insert_raw(150.0 + 1e-4 * j, y1_low, y2_low, h, r_low, e_low)
+        y2_hi = 282.0 + 0.7 * (h - 60.0)
+        y1_hi = y2_hi - h
+        r_hi = y2_hi - OCCLUSION_BOTTOM_SHARE * h
+        e_hi = _rear_err(y2_hi, h)
+        # band 0 stays at x=150 (survives prune); bands 1..511 sit at x=141 (pruned at px=150.2).
+        x_hi = 150.0 if band == 0 else 141.0
+        cb._insert_raw(x_hi, y1_hi, y2_hi, h, r_hi, e_hi)
+
+    assert len(cb) == 33280 and len(cb._blocks) >= 512
+    # Prune ONLY the 511 high-rear entries at x=141 (r = 0.15 * h <= 9.8, 141 + 9.8 = 150.8 < 151.0).
+    assert cb.prune(151.0, 216.0, compact=False)
+    assert len(cb) == 33280 - 511
+
+    py_q, h_q = 269.0, 48.0
+    rear_floor = py_q - OCCLUSION_BOTTOM_SHARE * h_q - 1e-9 - _rear_err(py_q, h_q)
+    rear_ok = lambda y2b, hb: (y2b - py_q) >= OCCLUSION_BOTTOM_SHARE * (hb - h_q) - 1e-9
+    h_ok = lambda hb: h_q <= 0.85 * hb + 1e-9
+
+    # Query 1: only band 0's surviving high-rear entry qualifies (must find it in O(log N)).
+    side_calls = [0]
+    def counted_side(p):
+        side_calls[0] += 1
+        return 270.0 - p[1]
+    t0 = time.perf_counter()
+    hit = cb.best_for_crossing(h_ok, rear_ok, rear_floor, h_q, py_q - h_q, 151.0, counted_side, None)
+    dt_hit_ms = (time.perf_counter() - t0) * 1000.0
+    assert hit == (60.0, 282.0) and side_calls[0] <= 2 and dt_hit_ms < 5.0
+
+    # Query 2: raise rear_floor above all 32,769 survivors -> O(1) root prune (0 side calls).
+    side_calls[0] = 0
+    high_py = 290.0
+    high_floor = high_py - OCCLUSION_BOTTOM_SHARE * h_q - 1e-9 - _rear_err(high_py, h_q)
+    high_ok = lambda y2b, hb: (y2b - high_py) >= OCCLUSION_BOTTOM_SHARE * (hb - h_q) - 1e-9
+    t1 = time.perf_counter()
+    miss = cb.best_for_crossing(h_ok, high_ok, high_floor, h_q, high_py - h_q, 151.0, counted_side, None)
+    dt_miss_ms = (time.perf_counter() - t1) * 1000.0
+    assert miss is None and side_calls[0] == 0 and dt_miss_ms < 2.0
+
+    # Verify B-tree + indexed heap invariants and randomized brute-force crossing equivalence.
+    def check_h_invariants(store):
+        if store._hroot is None:
+            assert store.count == 0
+            return
+        seen_live = 0
+        def walk(node, parent):
+            nonlocal seen_live
+            assert node.parent is parent
+            if type(node) is _HBlock:
+                assert len(node.rear_heap) == node.live_count
+                seen_live += node.live_count
+                for pos, s in enumerate(node.rear_heap):
+                    assert store._alive[s] and store._hpos[s] == pos and store._blk_by_id[store._slot_bid[s]] is node
+                    if pos > 0:
+                        ps = node.rear_heap[(pos - 1) >> 1]
+                        assert store._rear[ps] + store._err[ps] >= store._rear[s] + store._err[s]
+                exp_max = max((store._rear[s] + store._err[s] for s in node.slots if store._alive[s]), default=-float('inf'))
+                assert node.max_rear_hi == exp_max
+                return node.h[0], node.h[-1], node.y2[-1], node.x[-1], node.max_rear_hi
+            c_stats = [walk(c, node) for c in node.children]
+            assert node.min_h == c_stats[0][0]
+            assert (node.max_h, node.max_y2, node.max_x) == c_stats[-1][1:4]
+            assert node.max_rear_hi == max(cs[4] for cs in c_stats)
+            return node.min_h, node.max_h, node.max_y2, node.max_x, node.max_rear_hi
+        walk(store._hroot, None)
+        assert seen_live == store.count
+
+    check_h_invariants(cb)
+
+    rng = random.Random(34)
+    cb_r = _ClipBaselines()
+    live_ref = []
+    for step in range(800):
+        h = round(rng.uniform(50.0, 90.0), 2)
+        y2 = round(rng.uniform(268.0, 295.0), 2)
+        x = round(rng.uniform(145.0, 155.0), 2)
+        y1 = y2 - h
+        rec = (x, y1, y2, h, y2 - OCCLUSION_BOTTOM_SHARE * h, _rear_err(y2, h))
+        cb_r.add(rec, compact=False, dom_budget=[64])
+        live_ref.append(rec)
+        if step % 40 == 39:
+            px_p = rng.uniform(146.0, 154.0)
+            y1_p = rng.uniform(200.0, 230.0)
+            cb_r.prune(px_p, y1_p, compact=False)
+            live_ref = [b for b in live_ref
+                        if abs(px_p - b[0]) <= 0.15 * b[3] and abs(y1_p - b[1]) <= 0.15 * b[3]]
+            if cb_r.needs_compact():
+                cb_r.maybe_compact(budget=128)
+            check_h_invariants(cb_r)
+            for _ in range(10):
+                hq = rng.uniform(35.0, 75.0)
+                pyq = rng.uniform(255.0, 285.0)
+                y1q = pyq - hq
+                pxq = rng.uniform(145.0, 155.0)
+                line_y = pyq + rng.uniform(0.0, 10.0)
+                side_fn = lambda p, ly=line_y: ly - p[1]
+                h_pred = lambda hb, hq=hq: hq <= 0.85 * hb + 1e-9
+                r_pred = lambda y2b, hb, pyq=pyq, hq=hq: (y2b - pyq) >= OCCLUSION_BOTTOM_SHARE * (hb - hq) - 1e-9
+                rf = pyq - OCCLUSION_BOTTOM_SHARE * hq - 1e-9 - _rear_err(pyq, hq)
+                got = cb_r.best_for_crossing(h_pred, r_pred, rf, hq, y1q, pxq, side_fn, None)
+                cands = [(b[3], b[2]) for b in live_ref
+                         if h_pred(b[3]) and r_pred(b[2], b[3]) and side_fn((pxq, y1q + b[3])) < 0]
+                want = max(cands) if cands else None
+                assert got == want
+
+
+def test_round35_pending_recheck_cutoff_pruning_and_live_drift_eviction(monkeypatch):
+    """Sol Round 35:
+    1. A pending crossing must recheck eligible baselines before completing SERVED so a taller
+       baseline (85 px) that becomes eligible on the confirmation frame keeps the crossing held
+       while its reconstructed rear (y=287) remains behind the stop line (y=270).
+    2. Exact double-double rear scoring eliminates the cutoff dead zone so 16,384 baselines sitting
+       1e-13 below rear_floor complete crossing lookup in O(1) via VehicleWaits.observe.
+    3. Exact live 4-axis drift envelopes on _HNode guarantee O(1) whole-track eviction (0 heap
+       deletions) after cross-axis pruning leaves dead entries in the orthogonal index."""
+    from fractions import Fraction
+    import math
+    import random
+    from src.experiment.vehicle_waits import (
+        _ClipBaselines, _HBlock, _exact_rear, _exact_floor, _REAR_SCALE, OCCLUSION_BOTTOM_SHARE,
+    )
+
+    # 1. Pending crossing rechecks taller eligible baseline before confirming SERVED.
+    #    Line at y=270 (side = 270 - y; >=0 is past the line).
+    waits_p = book(side=lambda p: 270.0 - p[1])
+    # Seed 85 px baseline at y1=201 (y2=286, rear=226.5) and 65 px baseline at y1=208 (y2=273, rear=227.5).
+    frames_p = [
+        (0.0, 286.0, 85.0),
+        (0.1, 286.0, 85.0),
+        (0.2, 273.0, 65.0),
+        (0.3, 273.0, 65.0),
+        (0.4, 273.0, 65.0),
+        (0.5, 273.0, 65.0),
+        (0.6, 273.0, 65.0),
+        (0.7, 273.0, 65.0),
+        (0.8, 273.0, 65.0),
+        (0.9, 273.0, 65.0),
+        # Frame 10 (first clipped frame across y=270): py=264.8, h=54 (y1=210.8).
+        # rear_floor = 264.8 - 0.7*54 = 227.0 -> 65 px (rear=227.5) IS eligible; 85 px (rear=226.5) is NOT yet eligible!
+        (1.0, 264.8, 54.0),
+        # Frame 11: py=244, h=42 (y1=202).
+        # Old h_base=65 gives y1+65 = 267 < 270 (would falsely confirm SERVED!).
+        # Newly eligible 85 px (rear=226.5 >= 214.6) gives y1+85 = 287 > 270 (still behind stop line!).
+        (1.1, 244.0, 42.0),
+    ]
+    for seq, (t, y, h) in enumerate(frames_p, start=1):
+        waits_p.observe([car(1, y, x=150.0, height=h, speed=0.0)], 'RED', t, seq, 1, unassigned=())
+        if seq == 11:
+            assert waits_p.active[(0, 1)].get('pending_crossing')['h_base'] == pytest.approx(65.0)
+    assert not only_row(waits_p)['crossed_stop_line']
+    assert waits_p.active[(0, 1)].get('pending_crossing')['h_base'] == pytest.approx(85.0)
+    # Frame 12: vehicle truly moves forward so even y1+85 = 268 < 270 clears the stop line -> SERVED!
+    waits_p.observe([car(1, 225.0, x=150.0, height=42.0, speed=0.0)], 'RED', 1.2, 13, 1, unassigned=())
+    assert only_row(waits_p)['crossed_stop_line'] and only_row(waits_p)['tracking_state'] == 'SERVED'
+
+    # 2. Exact 3-term/4-term scaled rear expansion accuracy vs Fraction + O(1) cutoff rejection (sole owner).
+    rng = random.Random(35)
+    f07 = Fraction(OCCLUSION_BOTTOM_SHARE)
+    f1e9 = Fraction(1e-9)
+    scale_int = 1 << _REAR_SCALE
+    for _ in range(2000):
+        scale = rng.choice([1e-305, 1e-12, 1.0, 1e3, 1e9, 1e14])
+        y2 = rng.uniform(-scale, scale)
+        h = rng.uniform(scale * 1e-3, min(scale, 1e14))
+        c0, c1, c2 = _exact_rear(y2, h)
+        exact = (Fraction(y2) - f07 * Fraction(h)) * scale_int
+        assert Fraction(c0) + Fraction(c1) + Fraction(c2) == exact
+        eps = min(1e-9, 1e-6 * h)
+        f0, f1, f2, f3 = _exact_floor(y2, h, eps)
+        assert Fraction(f0) + Fraction(f1) + Fraction(f2) + Fraction(f3) == exact - Fraction(eps) * scale_int
+
+    waits_cut = book(side=lambda p: 270.0 - p[1])
+    for seq in range(1, 5):
+        waits_cut.observe([car(1, 275.0, x=150.0, height=60.0, speed=0.0)], 'RED', (seq - 1) / FPS, seq, 1, unassigned=())
+    cb_cut = waits_cut.active[(0, 1)]['clip_baselines']
+    assert cb_cut is not None and cb_cut._exact_rear
+    # Inject 16,384 distinct-height baselines all sitting ~1e-13 below rear_floor of (py=269, h=48).
+    py_q, h_q = 269.0, 48.0
+    rf = _exact_floor(py_q, h_q, 1e-9)
+    target = math.ldexp(rf[0] + rf[1], -_REAR_SCALE) - 2e-13
+    cb_cut.clear()
+    for i in range(16384):
+        hb = 60.0 + 1e-4 * i
+        y2b = target + OCCLUSION_BOTTOM_SHARE * hb
+        r0, r1, r2 = _exact_rear(y2b, hb)
+        if (r0, r1, r2, 0.0) >= rf:
+            y2b = math.nextafter(y2b, -math.inf)
+            r0, r1, r2 = _exact_rear(y2b, hb)
+        assert (r0, r1, r2, 0.0) < rf
+        cb_cut._insert_raw(150.0, y2b - hb, y2b, hb, r0, 0.0, r1, r2)
+    assert len(cb_cut) == 16384
+    # Drop local reference so VehicleWaits is the sole owner of the baseline index during teardown.
+    del cb_cut
+    t0 = time.perf_counter()
+    waits_cut.observe([car(1, py_q, x=150.0, height=h_q, speed=0.0)], 'RED', 4 / FPS, 5, 1, unassigned=())
+    dt_ms = (time.perf_counter() - t0) * 1000.0
+    assert only_row(waits_cut)['crossed_stop_line'] and dt_ms < 2.0
+
+    # 3. Cross-axis pruning updates live _HNode drift bounds so subsequent whole-track eviction
+    #    clears in O(1) with 0 individual heap_remove calls.
+    cb_ev = _ClipBaselines(exact_rear=True)
+    for i in range(16384):
+        hb = 60.0 + 1e-4 * i
+        y2b = 200.0 + hb
+        r0, r1, r2 = _exact_rear(y2b, hb)
+        cb_ev._insert_raw(150.0, 200.0, y2b, hb, r0, 0.0, r1, r2)
+    # Outliers with smaller x (pruned horizontally) and huge y1 (would leave stale y_hi max).
+    for j in range(4):
+        hb = 60.0 + 0.01 * j
+        y2b = 300.0 + hb
+        r0, r1, r2 = _exact_rear(y2b, hb)
+        cb_ev._insert_raw(140.0, 300.0, y2b, hb, r0, 0.0, r1, r2)
+    assert len(cb_ev) == 16388
+    assert cb_ev.prune(151.0, 200.0, compact=False)
+    assert len(cb_ev) == 16384
+    removes = [0]
+    orig_rem = _HBlock.heap_remove
+    def spy_rem(self, *args, **kwargs):
+        removes[0] += 1
+        return orig_rem(self, *args, **kwargs)
+    monkeypatch.setattr(_HBlock, 'heap_remove', spy_rem)
+    t1 = time.perf_counter()
+    alive_after = cb_ev.prune(151.0, 225.0, compact=False)
+    dt_ev_ms = (time.perf_counter() - t1) * 1000.0
+    assert not alive_after and len(cb_ev) == 0 and removes[0] == 0 and dt_ev_ms < 2.0
+
+
+def test_round36_handoff_fail_closed_exact_rear_incremental_teardown_and_scale_shrink(monkeypatch):
+    """Sol Round 36:
+    1. P1: Malformed competitor boxes (e.g. truncated_competitor_bbox) must still fail closed
+       with exit_persistence_sec > 0 (no 1 -> 2 link, continuation_unavailable_frames == 1),
+       while remaining excluded from ledger updates.
+    2. P2: Exact 3-term/4-term rear arithmetic holds pending_crossing even on a 4.93e-31 cutoff
+       margin (y=86.5, (86.73534301973801, 2.9775606652610387) -> (86.13113975771972, 2.1144131466634843)),
+       both from clip_history and after aging into _ClipBaselines.
+    3. P2: Sole-owner index teardown on crossing and whole-track drift eviction at 65,536 baselines
+       runs in O(1) (< 2 ms) via incremental retirement, draining cleanly across subsequent frames.
+    4. P3: Relative shrink tolerance rejects growing microscopic boxes (1e-12 -> 1.1e-12) and
+       preserves O(1) side() early stopping across 16,384 microscopic baselines."""
+    import math
+    from src.experiment.vehicle_waits import (
+        _ClipBaselines, _HBlock, _exact_rear, _exact_floor, _REAR_SCALE, OCCLUSION_BOTTOM_SHARE,
+    )
+
+    # 1. P1: Malformed competitor with exit_persistence_sec=0.3 must fail closed.
+    for bad_other in (
+        VehicleObservation(3, 'car', 2., (100., NEWBORN_Y), height=40.,
+                           bbox=(97., NEWBORN_Y-40.), source_bbox=narrow(68.)),
+        VehicleObservation(3, 'car', 2., (100., NEWBORN_Y), height=40.,
+                           bbox=[15., 30., 15., 60.], source_bbox=narrow(68.), in_region=False),
+        VehicleObservation(3, 'car', 2., (100., NEWBORN_Y),
+                           bbox=(97., NEWBORN_Y-40., 10**400, NEWBORN_Y), source_bbox=narrow(68.)),
+    ):
+        waits_fc = book(exit_persistence_sec=0.3)
+        end = play(waits_fc, lost_one())
+        waits_fc.observe([newborn(source=narrow(66.)), bad_other], 'RED', end/FPS, end+1, 1, unassigned=())
+        assert _links(waits_fc) == []
+        assert waits_fc.continuation_unavailable_frames == 1
+        assert (0, 3) not in waits_fc.active
+
+    # 2. P2: Exact rear cutoff at +4.93e-31 margin holds pending_crossing (both direct and indexed).
+    yb, hb = 86.73534301973801, 2.9775606652610387
+    yc, hc = 86.13113975771972, 2.1144131466634843
+    assert (*_exact_rear(yb, hb), 0.0) >= _exact_floor(yc, hc, min(1e-9, 1e-6 * hc))
+    # Direct from clip_history (10 fps matching stationary top_speed bound):
+    waits_d = book(side=lambda p: 86.5 - p[1])
+    for seq in range(1, 6):
+        waits_d.observe([car(1, yb, x=150., height=hb, speed=0.)], 'RED', (seq - 1) * 0.1, seq, 1, unassigned=())
+    waits_d.observe([car(1, yc, x=150., height=hc, speed=0.)], 'RED', 0.5, 6, 1, unassigned=())
+    assert not only_row(waits_d)['crossed_stop_line']
+    assert waits_d.active[(0, 1)].get('pending_crossing') is not None
+    # Aged out of clip_history into _ClipBaselines:
+    waits_idx = book(side=lambda p: 86.5 - p[1])
+    h_mid = 2.45  # 2.1144 > 0.85*2.45 = 2.0825 -> middle baseline fails height_eligible
+    y2_mid = 86.55  # stays behind stop line y=86.5 while keeping y1=84.10 within 0.15*hb of both yb and yc
+    play(waits_idx, [[car(1, yb, x=150., height=hb, speed=0.)] for _ in range(10)]
+         + [[car(1, y2_mid, x=150., height=h_mid, speed=0.)] for _ in range(12)]
+         + [[car(1, yc, x=150., height=hc, speed=0.)]], phase='RED')
+    assert not only_row(waits_idx)['crossed_stop_line']
+    assert waits_idx.active[(0, 1)].get('pending_crossing') is not None
+
+    # 3. P2: Sole-owner crossing teardown AND whole-track drift eviction at 65,536 baselines < 2 ms.
+    waits_64k = book(side=lambda p: 270.0 - p[1])
+    for seq in range(1, 5):
+        waits_64k.observe([car(1, 275.0, x=150.0, height=60.0, speed=0.0)], 'RED', (seq - 1) / FPS, seq, 1, unassigned=())
+    cb_64k = waits_64k.active[(0, 1)]['clip_baselines']
+    py_q, h_q = 269.0, 48.0
+    rf = _exact_floor(py_q, h_q, 1e-9)
+    target = math.ldexp(rf[0] + rf[1], -_REAR_SCALE) - 2e-13
+    cb_64k.clear()
+    waits_64k._retired.clear()
+    for i in range(65536):
+        hb_i = 60.0 + 2e-5 * i
+        y2_i = target + OCCLUSION_BOTTOM_SHARE * hb_i
+        r0, r1, r2 = _exact_rear(y2_i, hb_i)
+        if (r0, r1, r2, 0.0) >= rf:
+            y2_i = math.nextafter(y2_i, -math.inf)
+            r0, r1, r2 = _exact_rear(y2_i, hb_i)
+        cb_64k._insert_raw(150.0, y2_i - hb_i, y2_i, hb_i, r0, 0.0, r1, r2)
+    assert len(cb_64k) == 65536
+    del cb_64k  # VehicleWaits is now the SOLE owner!
+    t0 = time.perf_counter()
+    waits_64k.observe([car(1, py_q, x=150.0, height=h_q, speed=0.0)], 'RED', 4 / FPS, 5, 1, unassigned=())
+    dt_cross_ms = (time.perf_counter() - t0) * 1000.0
+    assert only_row(waits_64k)['crossed_stop_line'] and dt_cross_ms < 2.0
+    assert waits_64k.active[(0, 1)]['clip_baselines'] is None
+    assert waits_64k._retired
+    # Subsequent frames drain retirement incrementally in bounded per-frame time until empty.
+    max_drain_ms = 0.0
+    seq = 6
+    while waits_64k._retired and seq < 500:
+        td = time.perf_counter()
+        waits_64k.observe([], 'RED', (seq - 1) / FPS, seq, 1, unassigned=())
+        max_drain_ms = max(max_drain_ms, (time.perf_counter() - td) * 1000.0)
+        seq += 1
+    assert not waits_64k._retired and max_drain_ms < 2.0
+
+    # Whole-track drift eviction at 65,536 baselines is also O(1) (< 2 ms) with 0 heap_remove calls.
+    cb_ev64 = _ClipBaselines(exact_rear=True)
+    for i in range(65536):
+        hb_i = 60.0 + 2e-5 * i
+        y2_i = 200.0 + hb_i
+        r0, r1, r2 = _exact_rear(y2_i, hb_i)
+        cb_ev64._insert_raw(150.0, 200.0, y2_i, hb_i, r0, 0.0, r1, r2)
+    rem_calls = [0]
+    orig_rem = _HBlock.heap_remove
+    def spy_rem64(self, *args, **kwargs):
+        rem_calls[0] += 1
+        return orig_rem(self, *args, **kwargs)
+    monkeypatch.setattr(_HBlock, 'heap_remove', spy_rem64)
+    t_ev = time.perf_counter()
+    alive_ev = cb_ev64.prune(150.0, 230.0, compact=False)
+    dt_ev64_ms = (time.perf_counter() - t_ev) * 1000.0
+    assert not alive_ev and len(cb_ev64) == 0 and rem_calls[0] == 0 and dt_ev64_ms < 2.0
+
+    # 4. P3: Growing microscopic box (1e-12 -> 1.1e-12 across y=1.05e-12) serves immediately
+    #    and 16,384 microscopic baselines trigger O(1) side() calls via straight-line early stop.
+    waits_grow = book(side=lambda p: p[1] - 1.05e-12)
+    for seq in range(1, 6):
+        waits_grow.observe([car(1, 1.0e-12, x=0.0, height=1.0e-12, speed=0.0)], 'GREEN', (seq - 1) / FPS, seq, 1, unassigned=())
+    waits_grow.observe([car(1, 1.1e-12, x=0.0, height=1.1e-12, speed=0.0)], 'GREEN', 5 / FPS, 6, 1, unassigned=())
+    assert only_row(waits_grow)['crossed_stop_line'] and only_row(waits_grow)['tracking_state'] == 'SERVED'
+
+    side_n = [0]
+    def micro_side(p):
+        side_n[0] += 1
+        return p[1] - 1.05e-12
+    waits_ms = book(side=micro_side)
+    for seq in range(1, 5):
+        waits_ms.observe([car(1, 1.0e-12, x=0.0, height=1.0e-12, speed=0.0)], 'GREEN', (seq - 1) / FPS, seq, 1, unassigned=())
+    cb_ms = waits_ms.active[(0, 1)]['clip_baselines']
+    cb_ms.clear()
+    for i in range(16384):
+        hb_i = 1.0e-12 + 1e-17 * i
+        y2_i = hb_i
+        r0, r1, r2 = _exact_rear(y2_i, hb_i)
+        cb_ms._insert_raw(0.0, 0.0, y2_i, hb_i, r0, 0.0, r1, r2)
+    del cb_ms
+    side_n[0] = 0
+    waits_ms.observe([car(1, 1.1e-12, x=0.0, height=1.1e-12, speed=0.0)], 'GREEN', 4 / FPS, 5, 1, unassigned=())
+    assert only_row(waits_ms)['crossed_stop_line']
+    assert side_n[0] <= 4  # only crossing check itself; 0 baseline scans!
+
+    # Also verify taller microscopic baselines (2e-12..3e-12) that are ALL past stop line early-stop in <= 2 side() calls.
+    side_t = [0]
+    def micro_side_tall(p):
+        side_t[0] += 1
+        return 1.05e-12 - p[1]
+    waits_mt = book(side=micro_side_tall)
+    for seq in range(1, 5):
+        waits_mt.observe([car(1, 2.0e-12, x=0.0, height=2.0e-12, speed=0.0)], 'GREEN', (seq - 1) / FPS, seq, 1, unassigned=())
+    cb_mt = waits_mt.active[(0, 1)]['clip_baselines']
+    cb_mt.clear()
+    for i in range(16384):
+        hb_i = 2.0e-12 + 1e-16 * i
+        y2_i = hb_i
+        r0, r1, r2 = _exact_rear(y2_i, hb_i)
+        cb_mt._insert_raw(0.0, 0.0, y2_i, hb_i, r0, 0.0, r1, r2)
+    del cb_mt
+    side_t[0] = 0
+    # Cross to y1=-3e-12, py=-2e-12, h=1e-12 -> even tallest y1+hb = -3e-12 + 3.6384e-12 = 0.6384e-12 < 1.05e-12 (past line).
+    waits_mt.observe([car(1, -2.0e-12, x=0.0, height=1.0e-12, speed=0.0)], 'GREEN', 4 / FPS, 5, 1, unassigned=())
+    assert only_row(waits_mt)['crossed_stop_line']
+    assert side_t[0] <= 6  # straight-line early stop fires on the very first block!
+
+
+def test_round37_bounded_retirement_under_loss_and_tiny_height_o1_pruning():
+    """Sol Round 37:
+    1. P2: Repeated tracking loss across 100 stationary tracks (both 3-on/1-off small indices
+       and 36-on/1-off deferred indices) must never accumulate unbounded retired _HBlock objects
+       or starve older retirement jobs.
+    2. P3: Sub-1e-300 heights (u=1e-305 across 16,384 baselines) must prune in O(1) via exact
+       power-of-two scaled rear expansions (<= 4 side() calls, identical to u=1e-12, zero leaf scans)."""
+    import gc
+    from src.experiment.vehicle_waits import _HBlock
+
+    # 1a. Sol's exact Round 37 P2 repro: 100 stationary tracks, 3 frames + 1 empty frame x 100 cycles (400 frames).
+    waits_loss = book(exit_persistence_sec=0.3, side=lambda p: 100.0 - p[1])
+    obs_100 = [
+        VehicleObservation(i + 1, 'car', 0.0, (10.0 * i, 140.0), stable_id=True, velocity_valid=True,
+                           in_region=True, epoch=0, bbox=(10.0 * i - 3.0, 100.0, 10.0 * i + 3.0, 140.0))
+        for i in range(100)
+    ]
+    for f in range(400):
+        frame_obs = () if (f % 4 == 3) else obs_100
+        waits_loss.observe(frame_obs, 'RED', f / 20.0, f + 1, 1, unassigned=())
+    assert len(waits_loss._retired) == 0
+    gc.collect()
+    assert sum(1 for obj in gc.get_objects() if type(obj) is _HBlock) == 0
+
+    # 1b. Deferred-retirement regime (> 32 distinct heights per track x 64 tracks, repeated loss):
+    #     queue drains in FIFO order faster than allocation and never grows unboundedly.
+    waits_big = book(exit_persistence_sec=0.3, side=lambda p: 100.0 - p[1])
+    for cyc in range(6):
+        base_f = cyc * 38
+        for step in range(37):
+            h_cur = 60.0 + 0.05 * step
+            obs_step = [
+                VehicleObservation(i + 1, 'car', 0.0, (20.0 * i, 100.0 + h_cur), stable_id=True, velocity_valid=True,
+                                   in_region=True, epoch=0, height=h_cur,
+                                   bbox=(20.0 * i - 5.0, 100.0, 20.0 * i + 5.0, 100.0 + h_cur))
+                for i in range(64)
+            ]
+            waits_big.observe(obs_step, 'RED', (base_f + step) / 20.0, base_f + step + 1, 1, unassigned=())
+        # Empty frame drops all 64 large baseline indices simultaneously -> deferred FIFO jobs.
+        waits_big.observe((), 'RED', (base_f + 37) / 20.0, base_f + 38, 1, unassigned=())
+    # Drain at most a few frames -> all older jobs finish cleanly (zero starvation / accumulation).
+    for extra in range(12):
+        waits_big.observe((), 'RED', (6 * 38 + extra) / 20.0, 6 * 38 + extra + 1, 1, unassigned=())
+    assert len(waits_big._retired) == 0
+
+    # 2. Sol's exact Round 37 P3 repro: u=1e-305 with n=16,384 baselines prunes at root (<= 4 side() calls).
+    u = 1e-305
+    n = 16384
+    side_calls = [0]
+    def tiny_side(p):
+        side_calls[0] += 1
+        return 1.05 * u - p[1]
+    waits_tiny = VehicleWaits('tiny-305', RunPolicy(fragment_continuation=True, max_gap_sec=0.2), side=tiny_side)
+    for i in range(n + 2):
+        h_i = (1.4 + 0.15 * i / n) * u
+        y_i = (0.28 - 0.01 * i / n) * u + 0.7 * h_i
+        obs_i = VehicleObservation(1, 'car', 0.0, (0.0, y_i), stable_id=True, velocity_valid=True,
+                                   in_region=True, epoch=0, height=h_i, bbox=None)
+        waits_tiny.observe([obs_i], 'GREEN', i * 0.1, i + 1, 1, unassigned=())
+    side_calls[0] = 0
+    obs_cross = VehicleObservation(1, 'car', 0.0, (0.0, u), stable_id=True, velocity_valid=True,
+                                   in_region=True, epoch=0, height=u, bbox=None)
+    waits_tiny.observe([obs_cross], 'GREEN', (n + 2) * 0.1, n + 3, 1, unassigned=())
+    assert only_row(waits_tiny)['crossed_stop_line'] and only_row(waits_tiny)['tracking_state'] == 'SERVED'
+    assert side_calls[0] <= 4
+
+
+def test_round38_queued_dom_retirement_bounded_and_o1_sparse_compaction():
+    """Sol Round 38:
+    1. P2: Repeated tracking loss on 300 tracks with queued _dom_queue entries must take
+       the synchronous fast path for small indices and never charge radix None slots on
+       deferred cleanup (0 retained _HBlocks / 0 growing backlog across 16 cycles).
+    2. P3: maybe_compact(1) after pruning 131,071 of 131,072 slots must neither allocate
+       an O(N) mapping upfront nor scan the dead bitmap prefix (peak traced alloc < 16 KB
+       and runtime < 1 ms regardless of historical slot count)."""
+    import gc
+    import tracemalloc
+    from src.experiment.vehicle_waits import _ClipBaselines, _HBlock, _exact_rear
+
+    # 1. Sol's exact Round 38 P2 repro (300 tracks x 16 cycles of 6 active + 1 empty frame).
+    waits_r = VehicleWaits('r38-repro', RunPolicy(fragment_continuation=True), lambda p: 100.0 - p[1])
+    pattern = [(0.0, 60.0)] * 2 + [(-0.12, 61.0)] * 2 + [(0.12, 61.0)] * 2
+    frames = [tuple(
+        VehicleObservation(i, 'car', 0.0, (5.0 * i + dx, 100.0 + h), velocity_valid=True,
+                           bbox=(5.0 * i + dx - 2.0, 100.0, 5.0 * i + dx + 2.0, 100.0 + h))
+        for i in range(1, 301)
+    ) for dx, h in pattern] + [()]
+    for f in range(16 * len(frames)):
+        waits_r.observe(frames[f % len(frames)], 'RED', f / 20.0, f + 1, 1, unassigned=())
+    assert len(waits_r._retired) == 0
+    gc.collect()
+    assert sum(1 for obj in gc.get_objects() if type(obj) is _HBlock) == 0
+
+    # Also verify deferred cleanup (> 32 slots WITH queued _dom_queue entries) stays bounded across cycles.
+    waits_big = VehicleWaits('r38-big', RunPolicy(fragment_continuation=True), lambda p: 100.0 - p[1])
+    for cyc in range(4):
+        base = cyc * 38
+        for s in range(37):
+            dx = -0.12 if s == 34 else (0.12 if s == 35 else 0.0)
+            h_s = 60.0 + 0.04 * s
+            obs_s = [
+                VehicleObservation(i, 'car', 0.0, (20.0 * i + dx, 100.0 + h_s), velocity_valid=True,
+                                   bbox=(20.0 * i + dx - 2.0, 100.0, 20.0 * i + dx + 2.0, 100.0 + h_s))
+                for i in range(1, 101)
+            ]
+            waits_big.observe(obs_s, 'RED', (base + s) / 20.0, base + s + 1, 1, unassigned=())
+        waits_big.observe((), 'RED', (base + 37) / 20.0, base + 38, 1, unassigned=())
+    assert len(waits_big._retired) <= 100
+    for extra in range(15):
+        waits_big.observe((), 'RED', (4 * 38 + extra) / 20.0, 4 * 38 + extra + 1, 1, unassigned=())
+    assert len(waits_big._retired) == 0
+
+    # 2. Sol's exact Round 38 P3 repro: sparse maybe_compact(1) at 16,384 vs 131,072 historical slots.
+    peaks = {}
+    for n in (16384, 131072):
+        cb = _ClipBaselines(exact_rear=True)
+        r0, r1, r2 = _exact_rear(60.0, 60.0)
+        for i in range(n):
+            cb._insert_raw(i / n, 0.0, 60.0, 60.0, r0, 0.0, r1, r2)
+        assert cb.prune(9.0 + (n - 1.5) / n, 0.0, compact=False)
+        assert len(cb) == 1
+        tracemalloc.start()
+        t0 = time.perf_counter()
+        copied = cb.maybe_compact(1)
+        dt_ms = (time.perf_counter() - t0) * 1000.0
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        peaks[n] = (peak, dt_ms)
+        assert copied == 1 and peak < 16384 and dt_ms < 2.0
+        # Complete compaction and verify the sole survivor is preserved identically.
+        assert cb.maybe_compact(4) >= 1 and cb._rebuild is None
+        assert len(cb) == 1 and cb._x[0] == (n - 1) / n
+    # Peak memory must stay O(1) (no linear jump from 16k to 131k).
+    assert peaks[131072][0] < 2 * peaks[16384][0] + 4096

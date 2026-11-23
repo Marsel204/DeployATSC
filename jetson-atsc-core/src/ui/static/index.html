@@ -101,8 +101,9 @@
       <h4>Native tracker IDs</h4>
       <div class="settings-grid">
         <div><label class="inline"><input id="fragmentContinuation" type="checkbox"> Continue a lost vehicle with a new native ID (experimental)</label></div>
+        <div><label for="exitPersistence">ROI exit persistence (s)</label><input id="exitPersistence" type="number" value="0" min="0" max="5" step="0.05"></div>
       </div>
-      <p class="settings-note">Off by default. Applies to native tracker IDs only; persistent vehicle IDs ignore it. A new ID continues a vehicle lost up to the maximum observation gap only when the pair is unique and no other box competes. The handoff time is counted as unknown, never as wait or a crossing.</p>
+      <p class="settings-note">Off by default (0 s exit persistence). Applies to native tracker IDs only; persistent vehicle IDs ignore both settings. Continuation bridges a lost vehicle only when unique and uncontested; exit persistence holds a row open across brief border dips without accruing outside wait.</p>
       <h4>Persistent identity</h4>
       <div class="settings-grid">
         <div><label for="identityRetention">Remember hidden vehicles (s)</label><input id="identityRetention" type="number" value="10" min="0.1" max="60" step="0.1"></div>

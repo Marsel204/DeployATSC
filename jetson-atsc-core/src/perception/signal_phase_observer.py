@@ -7,10 +7,13 @@ from src.experiment.contracts import Phase, RunPolicy
 
 
 class SignalPhaseObserver:
-    def __init__(self, roi, policy: RunPolicy, lamp_rois=None):
+    def __init__(self, roi, policy: RunPolicy, lamp_rois=None, *, gap_tolerance: float | None = None):
         self.roi = roi
         self.policy = policy
         self.lamp_rois = lamp_rois or {}
+        self.gap_tolerance = (min(1e-9, 1e-6*policy.max_gap_sec)
+                              if (gap_tolerance is None and (policy.fragment_continuation or policy.exit_persistence_sec > 0))
+                              else (0.0 if gap_tolerance is None else float(gap_tolerance)))
         self.phase = Phase.UNKNOWN
         self.events = []
         self.cycles = []
@@ -68,7 +71,7 @@ class SignalPhaseObserver:
     def observe(self, frame, timestamp, sequence):
         if sequence == self.last_sequence or (self.last_time is not None and timestamp <= self.last_time):
             return {"phase": str(self.phase), "measurement_phase": str(self.measurement_phase), "transition": None, "duplicate": True}
-        if self.last_time is not None and timestamp-self.last_time > self.policy.max_gap_sec:
+        if self.last_time is not None and timestamp-self.last_time > self.policy.max_gap_sec+self.gap_tolerance:
             self.invalidate(self.last_time, "observation_gap")
         self.last_time = timestamp; self.last_sequence = sequence
         self.scores = self._scores(frame)

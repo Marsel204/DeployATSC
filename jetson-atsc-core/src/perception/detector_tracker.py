@@ -10,6 +10,7 @@ Supports:
 
 from __future__ import annotations
 
+import math
 import os
 import time
 from functools import lru_cache
@@ -295,6 +296,7 @@ class DetectorTracker:
         self.imgsz = imgsz
         self.device = device
         self.max_gap_sec = max_gap_sec
+        self.gap_tolerance = 0.0
         self.set_tracking_profile(tracking_profile)
 
         self.is_tensorrt: bool = str(model_path).endswith(".engine")
@@ -656,11 +658,18 @@ class DetectorTracker:
         active_ids = set()
 
         for v in vehicles:
-            gx, gy = homography_func(v.bottom_center[0], v.bottom_center[1])
-            v.ground_pos = (gx, gy)
+            v.ground_pos = None
             v.velocity_valid = False
             v.velocity_mps = 0.0
             v.obs_count = 0
+            try:
+                bx, by = float(v.bottom_center[0]), float(v.bottom_center[1])
+            except (TypeError, ValueError, IndexError, OverflowError):
+                continue
+            if not (math.isfinite(bx) and math.isfinite(by) and abs(bx) <= 1e15 and abs(by) <= 1e15):
+                continue
+            gx, gy = homography_func(bx, by)
+            v.ground_pos = (gx, gy)
             # Each instance is camera-local; reset clears its epoch's namespace.
             # Detector-only array indices must never read or write stable history.
             if not v.stable_id or v.epoch != getattr(self,"epoch",0) or not np.isfinite([v.timestamp,gx,gy]).all():
@@ -671,7 +680,8 @@ class DetectorTracker:
                 continue
             # Check on return as well as during pruning: no update may have run
             # during the gap. All continuity decisions use source timestamps.
-            if traj and v.timestamp-traj[-1][0] > getattr(self,"max_gap_sec",5.0):
+            gap_limit = getattr(self,"max_gap_sec",5.0)+getattr(self,"gap_tolerance",0.0)
+            if traj and v.timestamp-traj[-1][0] > gap_limit:
                 traj.clear()
                 self.track_obs_counts.pop(v.track_id, None)
             traj.append((v.timestamp, gx, gy))
@@ -699,8 +709,9 @@ class DetectorTracker:
                 v.velocity_mps = 0.0
 
         # Prune using the same source-time continuity policy as returning tracks.
+        gap_limit = getattr(self,"max_gap_sec",5.0)+getattr(self,"gap_tolerance",0.0)
         for tid in list(self.track_trajectories.keys()):
             if tid not in active_ids:
-                if self.track_trajectories[tid] and (ref_time - self.track_trajectories[tid][-1][0] > getattr(self,"max_gap_sec",5.0)):
+                if self.track_trajectories[tid] and (ref_time - self.track_trajectories[tid][-1][0] > gap_limit):
                     del self.track_trajectories[tid]
                     self.track_obs_counts.pop(tid, None)

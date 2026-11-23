@@ -204,18 +204,25 @@ class ExperimentStore:
         # Cycle partial/served populations depend on eventual vehicle outcomes,
         # including tracks which outlive many cycles. Rebuild on explicit reads.
         if state['comparisons'] and all('green_start' in c for c in state['comparisons']):
-            by_cycle={}
+            policy=state.get('policy') or self.manifest.get('policy') or {}
+            identity=state.get('vehicle_identity') or self.manifest.get('vehicle_identity') or {}
+            native_exit=float(policy.get('exit_persistence_sec') or 0)>0 and identity.get('mode')!='persistent_v1'
+            by_cycle={};crossings_by_cycle={}
             for row in state['vehicles']:
-                for cycle_id in row.get('cycles',[]):by_cycle.setdefault(cycle_id,[]).append(row)
+                row_cycles=row.get('cycles',[])
+                for cycle_id in row_cycles:by_cycle.setdefault(cycle_id,[]).append(row)
+                if (row.get('crossed_stop_line') and row.get('crossing_cycle') is not None and
+                        (native_exit or row['crossing_cycle'] in row_cycles)):
+                    crossings_by_cycle.setdefault(row['crossing_cycle'],[]).append(row)
             for cycle in state['comparisons']:
                 rows=by_cycle.get(cycle['cycle_id'],[])
+                crossed=crossings_by_cycle.get(cycle['cycle_id'],[])
                 values=[r.get('wait_by_cycle',{}).get(str(cycle['cycle_id']),{}).get('red_wait_sec',0.) for r in rows]
                 end=cycle.get('green_end',state.get('time',0))
                 cycle.update(observed_vehicle_count=len(rows),
                     observed_mean_red_wait_sec=round(sum(values)/len(values),6) if values else None,
                     partial_vehicle_count=sum(bool(r.get('left_censored') or r.get('right_censored') or r.get('quality_flags')) for r in rows),
-                    n_served=sum(bool(r.get('crossed_stop_line') and r.get('crossing_cycle')==cycle['cycle_id'] and
-                                     cycle['green_start']<=r['completed_at']<end) for r in rows))
+                    n_served=sum(bool(cycle['green_start']<=r['completed_at']<end) for r in crossed))
         if 'policy' in state:
             from src.experiment.summary import summarize
             state['summary']=summarize(state['vehicles'],state['comparisons'],state['policy'].get('los_method'),state['predictions'],

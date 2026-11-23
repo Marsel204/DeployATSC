@@ -283,3 +283,489 @@ def test_default_off_and_persistent_sessions_skip_continuation_box_parsing(
     assert bool(obs_calls) is expect_obs
     assert bool(box_calls) is expect_box_parses
     assert bool(source_calls) is expect_box_parses
+
+
+def test_session_exit_persistence_bridges_border_dip_and_leaves_persistent_mode_unchanged(video_factory, tmp_path):
+    """RunPolicy.exit_persistence_sec reaches ObservationSession telemetry, keeps a
+    briefly dipping native vehicle on one row, and leaves persistent_v1 identical."""
+    class DippingDetector(ScriptedDetector):
+        def track(self, frames, timestamp=None):
+            index = round(timestamp*FPS)
+            # In run_payload, left polygon edge runs (20,30)->(10,220), so at y=60 edge is x~18.4:
+            # x=15 dips ~3.4 px outside while keeping an in-frame positive bbox [1,30,29,60].
+            x = 15 if index in (5, 6) else 25
+            vehicles = [scripted_vehicle(1, x, 60, timestamp, self.epoch)] if index < 12 else []
+            return [TrackedFrame(vehicles, withheld=(), epoch=self.epoch) for _ in frames]
+
+    def run_with(mode, exit_sec):
+        settings = run_payload(video_factory)
+        settings['policy'] = {'debounce_frames': 1, 'stop_persistence_sec': .1, 'exit_persistence_sec': exit_sec}
+        if mode == 'persistent_v1':
+            settings['vehicle_identity'] = {'mode': 'persistent_v1'}
+        class Manual(ObservationSession):
+            def _worker(self):self.ready.set()
+        session = Manual(settings, tmp_path/f'{mode}-{exit_sec}', detector_factory=DippingDetector, anfis_factory=FakeANFIS)
+        try:
+            assert session.telemetry()['policy']['exit_persistence_sec'] == pytest.approx(exit_sec)
+            for _ in range(14):session._process_batch()
+            snap = session.engine.snapshot(limit=100, evidence=True)
+            return {r['vehicle_id'].split(':', 1)[1]: {**r, 'vehicle_id': r['vehicle_id'].split(':', 1)[1]} for r in snap['vehicles']}
+        finally:
+            session.state = session.applied_state = 'stopped';session._cleanup()
+
+    native_off = run_with('native', 0.0)
+    native_on = run_with('native', 0.3)
+    assert set(native_off) == {'acquisition:0:1', 'acquisition:0:1:segment-1'}
+    assert set(native_on) == {'acquisition:0:1'}
+
+    # persistent_v1 rows must be identical regardless of RunPolicy.exit_persistence_sec.
+    assert run_with('persistent_v1', 0.0) == run_with('persistent_v1', 0.3)
+
+
+def test_session_malformed_box_behind_stop_line_never_starts_false_crossing(video_factory, tmp_path):
+    """Sol S14 (Round 14/15): ObservationSession with fragment_continuation=True preserves
+    malformed-box information instead of degrading a zero-width or NaN box to bbox=None,
+    and skips malformed boxes in preview rendering so acquisition continues cleanly without
+    falsely completing SERVED (while a valid transition across stop_y=210 still serves)."""
+    def make_detector(first_kind, y_first, y_second):
+        class CrossingDetector(ScriptedDetector):
+            def track(self, frames, timestamp=None):
+                index = round(timestamp*FPS)
+                if index == 0:
+                    if first_kind == 'zero_width':
+                        bbox = [100., y_first-30., 100., y_first]
+                    elif first_kind == 'nan':
+                        bbox = [86., float('nan'), 114., y_first]
+                    else:
+                        bbox = [86., y_first-30., 114., y_first]
+                    v = TrackedVehicle(1, 2, 'car', bbox, .9, timestamp, obs_count=6, epoch=self.epoch)
+                    v.source_bbox = tuple(bbox)
+                    vehicles = [v]
+                elif index == 1:
+                    vehicles = [scripted_vehicle(1, 100., y_second, timestamp, self.epoch)]
+                else:
+                    vehicles = []
+                return [TrackedFrame(vehicles, withheld=(), epoch=self.epoch) for _ in frames]
+        return CrossingDetector
+
+    def run_crossing(tag, first_kind, y_first, y_second, flip_stop_line=False):
+        settings = run_payload(video_factory)
+        if flip_stop_line:
+            p0, p1 = settings['acquisition']['stop_line']
+            settings['acquisition']['stop_line'] = [p1, p0]
+        settings['policy'] = {'debounce_frames': 1, 'stop_persistence_sec': .1, 'fragment_continuation': True}
+        class Manual(ObservationSession):
+            def _worker(self):self.ready.set()
+        session = Manual(settings, tmp_path/f'{tag}-{first_kind}',
+                         detector_factory=make_detector(first_kind, y_first, y_second), anfis_factory=FakeANFIS)
+        try:
+            assert session.calibrations['acquisition'].side((100., y_first)) < 0 <= session.calibrations['acquisition'].side((100., y_second))
+            for _ in range(3):session._process_batch()
+            assert session.runtime['acquisition']['frames'] == 3
+            rows = {k.split(':', 1)[1]: r for k, r in session.engine.waits.records.items()}
+            return rows['acquisition:0:1']
+        finally:
+            session.state = session.applied_state = 'stopped';session._cleanup()
+
+    # Exact Round 14/15 repros (upward y=212 -> 206 AND downward y=206 -> 212 across stop_y=210).
+    for tag, y0, y1, flip in (('up', 212., 206., True), ('down', 206., 212., False)):
+        for bad_kind in ('zero_width', 'nan'):
+            bad_row = run_crossing(tag, bad_kind, y0, y1, flip_stop_line=flip)
+            assert not bad_row['crossed_stop_line'] and bad_row['tracking_state'] != 'SERVED'
+        good_row = run_crossing(tag, 'valid', y0, y1, flip_stop_line=flip)
+        assert good_row['crossed_stop_line'] and good_row['tracking_state'] == 'SERVED'
+
+
+def test_session_nan_footpoint_does_not_confirm_false_roi_exit_or_split_segment(video_factory, tmp_path):
+    """Sol Round 16: non-finite footpoints (e.g. y2=NaN) must be treated as missing
+    observations rather than outside-ROI sightings, so 9 NaN frames under exit_persistence_sec=0.3
+    do not falsely close the row as EXITED or split the return into :segment-1."""
+    class NanFootpointDetector(ScriptedDetector):
+        def track(self, frames, timestamp=None):
+            index = round(timestamp*FPS)
+            if index == 0 or index == 10:
+                bbox = [86., 120., 114., 150.]
+            elif 1 <= index <= 9:
+                bbox = [86., 120., 114., float('nan')]
+            else:
+                return [TrackedFrame([], withheld=(), epoch=self.epoch) for _ in frames]
+            v = TrackedVehicle(1, 2, 'car', bbox, .9, timestamp, obs_count=6, epoch=self.epoch)
+            v.source_bbox = tuple(bbox)
+            return [TrackedFrame([v], withheld=(), epoch=self.epoch) for _ in frames]
+
+    settings = run_payload(video_factory)
+    settings['policy'] = {'debounce_frames': 1, 'stop_persistence_sec': .1,
+                          'fragment_continuation': True, 'exit_persistence_sec': 0.3}
+    class Manual(ObservationSession):
+        def _worker(self):self.ready.set()
+    session = Manual(settings, tmp_path/'nan-footpoint', detector_factory=NanFootpointDetector, anfis_factory=FakeANFIS)
+    try:
+        for _ in range(12):session._process_batch()
+        rows = {k.split(':', 1)[1]: r for k, r in session.engine.waits.records.items()}
+        assert set(rows) == {'acquisition:0:1'}
+        row = rows['acquisition:0:1']
+        assert not row['completed'] and row['tracking_state'] != 'EXITED'
+        assert 'observation_gap' in row['quality_flags']
+    finally:
+        session.state = session.applied_state = 'stopped';session._cleanup()
+
+
+def test_session_nan_footpoint_does_not_corrupt_detector_velocity_or_red_wait(video_factory, tmp_path):
+    """Sol Round 17/18: DetectorTracker.update_velocities and ObservationSession must reject
+    non-finite and float32-overflowing footpoints (NaN, 1e40) before OpenCV perspectiveTransform
+    and ROI/crossing accounting, preserving the exact red wait and tracking state of missing frames."""
+    from src.perception.detector_tracker import DetectorTracker
+
+    def make_velocity_detector(bad_y2):
+        class RealVelocityDetector(ScriptedDetector):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.track_obs_counts = {}
+                self.max_history_len = 5
+                self.last_seen_timestamp = 0.0
+                self.max_gap_sec = 5.0
+            def track(self, frames, timestamp=None):
+                index = round(timestamp*FPS)
+                if index < 12 or 22 <= index < 36:
+                    bbox = [86., 120., 114., 150.]
+                elif bad_y2 is not None and 12 <= index < 22:
+                    bbox = [86., 120., 114., bad_y2]
+                else:
+                    return [TrackedFrame([], withheld=(), epoch=self.epoch) for _ in frames]
+                v = TrackedVehicle(1, 2, 'car', bbox, .9, timestamp, obs_count=6, epoch=self.epoch)
+                v.source_bbox = tuple(bbox)
+                return [TrackedFrame([v], withheld=(), epoch=self.epoch) for _ in frames]
+            def update_velocities(self, vehicles, project, timestamp=None):
+                DetectorTracker.update_velocities(self, vehicles, project, timestamp=timestamp)
+        return RealVelocityDetector
+
+    def run_red_wait(tag, bad_y2):
+        settings = run_payload(video_factory)
+        settings['policy'] = {'debounce_frames': 1, 'stop_persistence_sec': .1,
+                              'fragment_continuation': True, 'exit_persistence_sec': 0.3}
+        class Manual(ObservationSession):
+            def _worker(self):self.ready.set()
+        session = Manual(settings, tmp_path/f'nan-vel-{tag}',
+                         detector_factory=make_velocity_detector(bad_y2), anfis_factory=FakeANFIS)
+        try:
+            for _ in range(36):session._process_batch()
+            row = next(iter(session.engine.waits.records.values()))
+            return row['red_wait_sec'], row['tracking_state'], row['crossed_stop_line'], len(session.engine.waits.records)
+        finally:
+            session.state = session.applied_state = 'stopped';session._cleanup()
+
+    wait_missing, state_missing, crossed_missing, count_missing = run_red_wait('missing', None)
+    assert count_missing == 1 and not crossed_missing and wait_missing > 0.75
+    for tag, bad_y2 in (('nan', float('nan')), ('overflow_1e40', 1e40), ('overflow_3e38', 3e38)):
+        wait_bad, state_bad, crossed_bad, count_bad = run_red_wait(tag, bad_y2)
+        assert count_bad == 1 and crossed_bad is False
+        assert state_bad == state_missing
+        assert wait_bad == pytest.approx(wait_missing, abs=1e-6)
+
+
+def test_observation_start_rejects_overflowing_exit_persistence_int_with_422(video_factory, tmp_path, monkeypatch):
+    """Sol Round 28: out-of-range JSON integers (e.g. 10**309) in policy.exit_persistence_sec
+    must raise ValueError in RunPolicy and return HTTP 422 (never HTTP 500 OverflowError)."""
+    from functools import partial
+    from fastapi.testclient import TestClient
+    from src.experiment.contracts import RunPolicy
+    from src.ui.app import app
+    import src.ui.observation_api as api
+    from src.ui.observation_session import ObservationManager
+
+    for bad in (10**309, -(10**309)):
+        with pytest.raises(ValueError, match='finite'):
+            RunPolicy(exit_persistence_sec=bad)
+
+    manager = ObservationManager(
+        tmp_path/'runs', tmp_path/'profiles',
+        partial(ObservationSession, detector_factory=ScriptedDetector, anfis_factory=FakeANFIS),
+    )
+    monkeypatch.setattr(api, 'observations', manager)
+    with TestClient(app) as client:
+        for bad in (10**309, -(10**309)):
+            payload = run_payload(video_factory)
+            payload['policy']['exit_persistence_sec'] = bad
+            response = client.post('/api/observation/start',
+                                   content=json.dumps(payload),
+                                   headers={'content-type': 'application/json'})
+            assert response.status_code == 422, response.text
+    if manager.current:
+        manager.current.stop()
+
+
+@pytest.mark.parametrize('policy_extra', [
+    {'fragment_continuation': True},
+    {'exit_persistence_sec': 0.3},
+])
+def test_session_exact_max_gap_replay_preserves_detector_velocity_and_red_wait(video_factory, tmp_path, policy_extra):
+    """Sol Round 31: five 10 fps RED frames with max_gap_sec=0.1 (where 0.30000000000000004 - 0.2 > 0.1)
+    must not reset DetectorTracker velocity history when either native option is enabled, preserving
+    STOPPED state and red_wait_sec=0.2 (matching max_gap_sec=0.100000001)."""
+    import cv2
+    import numpy as np
+    from src.perception.detector_tracker import DetectorTracker
+
+    red_path = tmp_path/'red_10fps.avi'
+    writer = cv2.VideoWriter(str(red_path), cv2.VideoWriter_fourcc(*'MJPG'), 10.0, (320, 240))
+    frame = np.full((240, 320, 3), (0, 0, 255), np.uint8)
+    for _ in range(8):
+        writer.write(frame)
+    writer.release()
+
+    class StationaryRealVelocityDetector(ScriptedDetector):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.track_obs_counts = {}
+            self.max_history_len = 10
+            self.last_seen_timestamp = 0.0
+            self.max_gap_sec = 5.0
+            self.gap_tolerance = 0.0
+        def track(self, frames, timestamp=None):
+            bbox = [86., 120., 114., 150.]
+            v = TrackedVehicle(1, 2, 'car', bbox, .9, timestamp, obs_count=1, epoch=self.epoch)
+            v.source_bbox = tuple(bbox)
+            return [TrackedFrame([v], withheld=(), epoch=self.epoch) for _ in frames]
+        def update_velocities(self, vehicles, project, timestamp=None):
+            DetectorTracker.update_velocities(self, vehicles, project, timestamp=timestamp)
+
+    settings = run_payload(video_factory)
+    settings['system']['source'] = str(red_path)
+    settings['acquisition']['source'] = str(red_path)
+    settings['shared_test'] = True
+    settings['policy'] = {'debounce_frames': 1, 'stop_persistence_sec': 0.0, 'max_gap_sec': 0.1, **policy_extra}
+    class Manual(ObservationSession):
+        def _worker(self):self.ready.set()
+    session = Manual(settings, tmp_path/f"gap10-{list(policy_extra)[0]}",
+                     detector_factory=StationaryRealVelocityDetector, anfis_factory=FakeANFIS)
+    try:
+        assert session.detectors['acquisition'].max_gap_sec == 0.1
+        for _ in range(5):
+            session._process_batch()
+        row = next(iter(session.engine.waits.records.values()))
+        assert row['tracking_state'] == 'STOPPED'
+        assert row['red_wait_sec'] == pytest.approx(0.2, abs=1e-6)
+        assert row['unknown_sec'] == pytest.approx(0.2, abs=1e-6)
+    finally:
+        session.state = session.applied_state = 'stopped'; session._cleanup()
+
+
+@pytest.mark.parametrize('policy_extra', [{}, {'fragment_continuation': True}, {'exit_persistence_sec': 0.3}])
+def test_session_accepts_slotted_custom_detector_without_gap_tolerance(video_factory, tmp_path, policy_extra):
+    """Sol Round 32: custom detectors declaring __slots__ without gap_tolerance must still
+    start and process frames cleanly under default-off and opt-in policies."""
+    class SlottedDetector:
+        __slots__ = ('epoch', 'track_trajectories', 'max_gap_sec')
+        def __init__(self, *args, **kwargs):
+            self.epoch = 0
+            self.track_trajectories = {}
+            self.max_gap_sec = 5.0
+        def track(self, frames, timestamp=None):
+            return [TrackedFrame([], withheld=(), epoch=self.epoch) for _ in frames]
+        def update_velocities(self, vehicles, project, timestamp=None):
+            pass
+        def reset_tracking(self):
+            self.epoch += 1
+
+    settings = run_payload(video_factory)
+    settings['policy'] = {'debounce_frames': 1, 'stop_persistence_sec': 0.1, **policy_extra}
+    class Manual(ObservationSession):
+        def _worker(self):self.ready.set()
+    session = Manual(settings, tmp_path/f"slotted-{len(policy_extra)}-{next(iter(policy_extra), 'off')}",
+                     detector_factory=SlottedDetector, anfis_factory=FakeANFIS)
+    try:
+        session._process_batch()
+        assert session.detectors['acquisition'].max_gap_sec == session.policy.max_gap_sec
+    finally:
+        session.state = session.applied_state = 'stopped'; session._cleanup()
+
+
+@pytest.mark.parametrize('policy_extra', [{'fragment_continuation': True}, {'exit_persistence_sec': 0.3}])
+def test_session_accepts_slotted_custom_detector_with_readonly_gap_tolerance(video_factory, tmp_path, policy_extra):
+    """Sol Round 33: custom detectors exposing a getter-only gap_tolerance property must start
+    cleanly without raising AttributeError under either native opt-in."""
+    class ReadOnlyGapTolDetector:
+        __slots__ = ('epoch', 'track_trajectories', 'max_gap_sec')
+        def __init__(self, *args, **kwargs):
+            self.epoch = 0
+            self.track_trajectories = {}
+            self.max_gap_sec = 5.0
+        @property
+        def gap_tolerance(self):
+            return 0.0
+        def track(self, frames, timestamp=None):
+            return [TrackedFrame([], withheld=(), epoch=self.epoch) for _ in frames]
+        def update_velocities(self, vehicles, project, timestamp=None):
+            pass
+        def reset_tracking(self):
+            self.epoch += 1
+
+    settings = run_payload(video_factory)
+    settings['policy'] = {'debounce_frames': 1, 'stop_persistence_sec': 0.1, **policy_extra}
+    class Manual(ObservationSession):
+        def _worker(self):self.ready.set()
+    session = Manual(settings, tmp_path/f"ro-gaptol-{next(iter(policy_extra))}",
+                     detector_factory=ReadOnlyGapTolDetector, anfis_factory=FakeANFIS)
+    try:
+        session._process_batch()
+        assert session.detectors['acquisition'].max_gap_sec == session.policy.max_gap_sec
+        assert session.detectors['acquisition'].gap_tolerance == 0.0
+    finally:
+        session.state = session.applied_state = 'stopped'; session._cleanup()
+
+
+@pytest.mark.parametrize('policy_extra', [
+    {'exit_persistence_sec': 0.3},
+    {'fragment_continuation': True, 'exit_persistence_sec': 0.3},
+])
+def test_session_malformed_outside_box_matches_missing_frame_for_exit_and_red_wait(video_factory, tmp_path, policy_extra):
+    """Sol Round 34:
+    1. With exit_persistence_sec=0.3 alone (fragment_continuation=False), a malformed zero-width
+       outside box at the exit confirmation frame must not confirm EXITED or split the return into :segment-1.
+    2. With either exit_persistence_sec alone or both options enabled and real DetectorTracker velocity
+       tracking, a malformed outside box must not enter velocity history, preserving exact red_wait_sec
+       equal to omitting that frame."""
+    import cv2
+    import numpy as np
+    from src.perception.detector_tracker import DetectorTracker
+
+    red_path = tmp_path/'red_10fps_bad_outside.avi'
+    writer = cv2.VideoWriter(str(red_path), cv2.VideoWriter_fourcc(*'MJPG'), 10.0, (320, 240))
+    frame = np.full((240, 320, 3), (0, 0, 255), np.uint8)
+    for _ in range(20):
+        writer.write(frame)
+    writer.release()
+
+    def run_variant(mode):
+        class RealVelocityVariantDetector(ScriptedDetector):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.track_obs_counts = {}
+                self.max_history_len = 10
+                self.last_seen_timestamp = 0.0
+                self.max_gap_sec = 5.0
+                self.gap_tolerance = 0.0
+            def track(self, frames, timestamp=None):
+                idx = round(timestamp * 10.0)
+                if idx in (0, 1) or idx >= 6:
+                    # Inside approach ROI, stationary
+                    bbox = [86., 120., 114., 150.]
+                elif idx in (2, 3, 4):
+                    # Valid box outside approach ROI
+                    bbox = [10., 30., 20., 60.]
+                elif idx == 5:
+                    if mode == 'missing':
+                        return [TrackedFrame([], withheld=(), epoch=self.epoch) for _ in frames]
+                    # Malformed zero-width box outside approach ROI
+                    bbox = [15., 30., 15., 60.]
+                else:
+                    return [TrackedFrame([], withheld=(), epoch=self.epoch) for _ in frames]
+                v = TrackedVehicle(1, 2, 'car', bbox, .9, timestamp, obs_count=6, epoch=self.epoch)
+                v.source_bbox = tuple(bbox)
+                return [TrackedFrame([v], withheld=(), epoch=self.epoch) for _ in frames]
+            def update_velocities(self, vehicles, project, timestamp=None):
+                DetectorTracker.update_velocities(self, vehicles, project, timestamp=timestamp)
+
+        settings = run_payload(video_factory)
+        settings['system']['source'] = str(red_path)
+        settings['acquisition']['source'] = str(red_path)
+        settings['shared_test'] = True
+        settings['policy'] = {'debounce_frames': 1, 'stop_persistence_sec': 0.0, **policy_extra}
+        class Manual(ObservationSession):
+            def _worker(self):self.ready.set()
+        session = Manual(settings, tmp_path/f"badout-{len(policy_extra)}-{mode}",
+                         detector_factory=RealVelocityVariantDetector, anfis_factory=FakeANFIS)
+        try:
+            for _ in range(18):
+                session._process_batch()
+            return session.engine.waits.rows(limit=10)
+        finally:
+            session.state = session.applied_state = 'stopped'; session._cleanup()
+
+    rows_missing = run_variant('missing')
+    rows_bad = run_variant('malformed')
+    assert len(rows_missing) == 1 and len(rows_bad) == 1
+    row_missing, row_bad = rows_missing[0], rows_bad[0]
+    assert not row_bad['completed'] and not row_missing['completed']
+    assert row_bad['tracking_state'] == row_missing['tracking_state'] == 'STOPPED'
+    assert row_bad['red_wait_sec'] > 0.5
+    assert row_bad['red_wait_sec'] == pytest.approx(row_missing['red_wait_sec'], abs=1e-9)
+    assert row_bad['unknown_sec'] == pytest.approx(row_missing['unknown_sec'], abs=1e-9)
+
+
+@pytest.mark.parametrize('policy_extra', [
+    {'exit_persistence_sec': 0.3},
+    {'fragment_continuation': True, 'exit_persistence_sec': 0.3},
+])
+def test_session_malformed_in_roi_box_on_reentry_matches_missing_frame(video_factory, tmp_path, policy_extra):
+    """Sol Round 35: a malformed zero-width in-ROI box on the first in-ROI frame after EXIT_PENDING
+    must neither confirm SERVED, clear EXIT_PENDING, enter velocity history, nor shrink unknown_sec
+    under either exit_persistence_sec alone or combined with fragment_continuation."""
+    import cv2
+    import numpy as np
+    from src.perception.detector_tracker import DetectorTracker
+
+    red_path = tmp_path/'red_25fps_bad_reentry.avi'
+    writer = cv2.VideoWriter(str(red_path), cv2.VideoWriter_fourcc(*'MJPG'), 25.0, (320, 240))
+    frame = np.full((240, 320, 3), (0, 0, 255), np.uint8)
+    for _ in range(18):
+        writer.write(frame)
+    writer.release()
+
+    def run_variant(mode):
+        class ReentryDetector(ScriptedDetector):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.track_obs_counts = {}
+                self.max_history_len = 10
+                self.last_seen_timestamp = 0.0
+                self.max_gap_sec = 5.0
+                self.gap_tolerance = 0.0
+            def track(self, frames, timestamp=None):
+                idx = round(timestamp * 25.0)
+                if idx in (0, 1):
+                    # Inside ROI, behind stop line (stop_y = 210)
+                    bbox = [86., 150., 114., 180.]
+                elif idx in (2, 3):
+                    # Outside ROI -> EXIT_PENDING
+                    bbox = [10., 30., 20., 60.]
+                elif idx == 4:
+                    if mode == 'missing':
+                        return [TrackedFrame([], withheld=(), epoch=self.epoch) for _ in frames]
+                    # Malformed zero-width box INSIDE ROI, ACROSS stop line (y2 = 220 > 210)!
+                    bbox = [100., 190., 100., 220.]
+                elif idx >= 5:
+                    # Valid box back inside ROI, behind stop line
+                    bbox = [86., 150., 114., 180.]
+                else:
+                    return [TrackedFrame([], withheld=(), epoch=self.epoch) for _ in frames]
+                v = TrackedVehicle(1, 2, 'car', bbox, .9, timestamp, obs_count=6, epoch=self.epoch)
+                v.source_bbox = tuple(bbox)
+                return [TrackedFrame([v], withheld=(), epoch=self.epoch) for _ in frames]
+            def update_velocities(self, vehicles, project, timestamp=None):
+                DetectorTracker.update_velocities(self, vehicles, project, timestamp=timestamp)
+
+        settings = run_payload(video_factory)
+        settings['system']['source'] = str(red_path)
+        settings['acquisition']['source'] = str(red_path)
+        settings['shared_test'] = True
+        settings['policy'] = {'debounce_frames': 1, 'stop_persistence_sec': 0.0, **policy_extra}
+        class Manual(ObservationSession):
+            def _worker(self):self.ready.set()
+        session = Manual(settings, tmp_path/f"badreentry-{len(policy_extra)}-{mode}",
+                         detector_factory=ReentryDetector, anfis_factory=FakeANFIS)
+        try:
+            for _ in range(15):
+                session._process_batch()
+            return session.engine.waits.rows(limit=10)
+        finally:
+            session.state = session.applied_state = 'stopped'; session._cleanup()
+
+    rows_missing = run_variant('missing')
+    rows_bad = run_variant('malformed')
+    assert len(rows_missing) == 1 and len(rows_bad) == 1
+    rm, rb = rows_missing[0], rows_bad[0]
+    assert not rb['completed'] and not rb['crossed_stop_line']
+    assert rb['tracking_state'] == rm['tracking_state']
+    assert rb['red_wait_sec'] == pytest.approx(rm['red_wait_sec'], abs=1e-9)
+    assert rb['unknown_sec'] == pytest.approx(rm['unknown_sec'], abs=1e-9)

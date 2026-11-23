@@ -9,16 +9,20 @@ instead. It is opt-in and does nothing in **Persistent vehicle IDs** mode.
 
 - Dashboard: *Setup → Detection thresholds, identity and A/B comparison →
   Native tracker IDs →* tick **Continue a lost vehicle with a new native ID
-  (experimental)**, then start the run. While a run is current, the page
-  restores the box from that run's live telemetry (`policy`). The saved-run
-  browser loads evidence rows only, not the settings form; a saved run's
-  setting is in its manifest policy and export.
+  (experimental)** and/or set **ROI exit persistence (s)** (default `0`), then
+  start the run. While a run is current, the page restores both controls from
+  that run's live telemetry (`policy`). The saved-run browser loads evidence
+  rows only, not the settings form; a saved run's setting is in its manifest
+  policy and export.
 - API: `POST /api/observation/start` with
-  `"policy": {"fragment_continuation": true, ...}`.
-- Python: `RunPolicy(fragment_continuation=True)`.
+  `"policy": {"fragment_continuation": true, "exit_persistence_sec": 0.3, ...}`.
+- Python: `RunPolicy(fragment_continuation=True, exit_persistence_sec=0.3)`.
 
-Untick the box (or send `false` / omit the field) to restore one row per
-native ID. The value is saved in the run manifest's policy.
+Untick the box / set `exit_persistence_sec` to `0` (or omit the fields) to
+restore immediate exit completion and one row per native ID. Both values are
+saved in the run manifest's policy and ignored in **Persistent vehicle IDs**
+mode (`PersistentVehicleWaits` uses `IdentityPolicy.exit_persistence_sec`
+instead and never double-applies `RunPolicy.exit_persistence_sec`).
 
 ## Rule
 
@@ -145,6 +149,49 @@ matching, so they never block a newborn on the frame they lapse.
   is unknown coverage, even on adjacent frames. It gives no wait, no stop-line
   crossing and no motion history. The stop state restarts on the new ID.
 - A crossing is counted only from the new ID's own consecutive frames.
+- **Bottom-edge occlusion crossing resilience** (active when
+  `fragment_continuation=True`): when a stationary vehicle's box shrinks upward
+  from the bottom edge (`height <= 0.85 * h_base` against two consecutive
+  earlier sightings or a preserved stationary pre-clip baseline, bottom-edge
+  share `>= 0.70`, pinned top edge and horizontal center within `0.15 * h_base`,
+  top speed `< 0.35 * h_base/s`, with history spanning at least 0.1 s up to 32
+  samples at high frame rates) and restoring `h_base` places its unclipped rear
+  back behind the stop line (`side((x, y1 + h_base)) < 0`), the premature
+  `SERVED` crossing is held as a pending crossing rather than completing the
+  row. While a vehicle remains stationary (box top and center pinned within
+  `0.15 * h_base`, top speed `< 0.35 * h_base/s`), its two-consecutive-sighting
+  supported baseline is preserved across partial bottom-edge shrinkage behind
+  the line and across partial/95% recoveries so cumulative bottom shrinkage
+  cannot degrade the baseline before crossing; behind-line sightings keep the
+  pending anchor until two consecutive behind-line observations geometrically
+  recover (`height >= 0.95 * h_base`). Genuine departures (including full-height
+  departures after recovery, or clipped departures whose unclipped rear
+  `side((x, y1 + h_base)) >= 0` clears the line) confirm immediately across
+  consecutive in-ROI, `EXIT_PENDING` outside, and same-ID re-entry frames.
+  Frame gaps, handoffs, confirmed exits, and invalidations clear any pending
+  crossing and stationary clip baseline.
+- **Opt-in ROI exit hysteresis (`RunPolicy.exit_persistence_sec`, default `0.0`,
+  bounds `[0, 5]`)**: when non-zero, an active native vehicle stepping outside
+  the ROI without a stop-line crossing enters `EXIT_PENDING` rather than
+  immediately completing as `EXITED`. Genuine stop-line crossings on exit or on
+  consecutive `EXIT_PENDING` outside frames still complete immediately as
+  `SERVED` (using the same `max_gap_sec` continuity check as exit timing). While
+  `EXIT_PENDING`, no outside intervals or wait are fabricated,
+  `state["exit_candidate"]` protects revisable prefix retention, and tracked
+  outside sightings refresh association-gap expiry while preserving
+  `row["last_seen"]` as the last in-ROI timestamp. If the vehicle returns inside
+  the ROI before `exit_persistence_sec` of consecutive outside observations
+  elapses, the row stays continuous (no `:segment-*` split), crossing continuity
+  is preserved across consecutive same-ID transitions, and the outside dip is
+  recorded honestly as `unknown_sec` (`observation_gap`). Once consecutive
+  outside sightings span at least `exit_persistence_sec`, the row completes as
+  `EXITED` at the first outside timestamp (`completed_at = exit_candidate`). If
+  the track disappears before confirmation, normal `tracking_lost` /
+  `right_censored` handling applies. Native exit timer reads and resets are
+  strictly gated on `RunPolicy.exit_persistence_sec > 0` so they never collide
+  with `PersistentVehicleWaits`'s own `exit_candidate`. Tracks in `EXIT_PENDING`
+  cannot continue onto newborns inside the ROI, and use their latest outside
+  timestamp and box to veto nearby extended occlusion-tail links.
 - No departure is inferred from a vanishing vehicle.
 - Rows carry `native_ids`, `identity_links` and the `identity_continued` flag.
   If a handed-off ID is seen again while the row is unfinished, the row gets
@@ -160,22 +207,45 @@ post-NMS boxes (both 220-frame ROIs) the rule makes two links (#191 -> #213,
 support, #368 -> #534 at f132, is declined: ByteTrack withheld a 0.343
 motorcycle box on the same motorcycle, and the rule cannot tell a duplicate
 box from a neighbour. On the 660-frame junction clip (Ultralytics 8.4.189),
-three links are made: `#626 -> #648` (moving), plus `#291 -> #598` and
-`#746 -> #966` (stationary bottom-edge occlusion tails); on Ultralytics 8.3.0,
-two links are made (`#235 -> #241` moving and `#164 -> #221` occlusion tail).
+bottom-edge crossing resilience prevents premature `SERVED` completions on
+`#232` (f134, later crosses cleanly at f373), `#407` (f135), and `#300` (f142),
+unlocking five verified links: `#626 -> #648` (moving), plus `#291 -> #598`,
+`#746 -> #966`, `#407 -> #733`, and `#300 -> #755` (stationary bottom-edge
+occlusion tails); on Ultralytics 8.3.0, two links are made (`#235 -> #241`
+moving and `#164 -> #221` occlusion tail). Enabling `exit_persistence_sec=0.3`
+on the junction clip eliminates border-wobble `:segment-*` splits on `#1429`,
+`#1468`, `#1484`, `#1924`, and collapses `#350` from 22 fragmented rows to 3.
 None of this validates physical identity in general.
+
+## Tracker profile evaluation (ByteTrack / BoT-SORT)
+
+Sixteen tracker parameterizations (ByteTrack `track_buffer` 15–90,
+`match_thresh` 0.80–0.90, `fuse_score` on/off, `track_high_thresh` 0.25–0.35,
+`low_score` floor 0.10, and BoT-SORT with `gmc_method=none` and `sparseOptFlow`)
+were benchmarked across frozen post-NMS detections on `0SgQn95Q07U` (left
+approach) and `PKVSKsmBNZA` (crowded right approach) on Ultralytics 8.4.189 and
+8.3.0:
+- Relaxing ByteTrack (`match_thresh=0.85/0.90`, `fuse_score=False`, or
+  `track_buffer=45/60/90`) substantially increased cross-vehicle ID jumps
+  (`>1.0x` box height) and class flips on `PKVSKsmBNZA` (`24 -> 47..86` jumps,
+  `25 -> 33..56` class flips) or increased ledger row counts.
+- BoT-SORT with `gmc_method=sparseOptFlow` was ~4x slower (~28 ms median vs
+  ~6.8 ms) for stationary CCTV with no continuity benefit; with
+  `gmc_method=none` it dropped a genuine crossing on `0SgQn95Q07U` (15 -> 14),
+  re-attached across a 27-frame gap in dense flow, and raised `PKVSKsmBNZA`
+  class flips (25 -> 29).
+- Tighter settings (`track_buffer=15`, tighter BoT-SORT) reduced jumps at the
+  cost of more ID fragmentation.
+
+Accordingly, `baseline` (`bytetrack.yaml`) and `low_score` remain the only
+registered tracking profiles; no unsafe tracker profile was added.
 
 ## Known limits
 
 - An ROI that reaches the image border limits witnessed entries: vehicles
   entering there are first seen already inside the region.
-- Occlusion tails across the stop line: on the 660-frame junction preset,
-  bottom-edge occlusion clipped `#407` (at f135) and `#300` (at f142) upward
-  across the preset stop line before track loss, completing those rows as
-  `SERVED` (`crossed_stop_line=True`). Because fragment continuation never
-  reopens completed/served rows, `407→733` and `300→755` remain unlinked
-  (stopping occlusion-induced premature crossing belongs to stop-line logic,
-  not fragment continuation).
-- Single-ID wobble across the ROI boundary and ByteTrack's internal body
-  switches (one native ID moving to another vehicle) are separate
-  follow-ups; continuation neither causes nor repairs them.
+- Prolonged ROI departures exceeding `exit_persistence_sec` (e.g. a vehicle
+  re-entering after >0.30 s outside) intentionally start a new visit segment.
+- ByteTrack's internal body switches (one native ID moving to another vehicle)
+  remain upstream of `VehicleWaits`; continuation neither causes nor repairs
+  them.

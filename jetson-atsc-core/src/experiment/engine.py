@@ -20,17 +20,20 @@ class ObservationEngine:
                  schedule_policy=None, system_roi=None, system_lamp_rois=None):
         self.run_id = run_id; self.policy = policy
         self.lock = threading.RLock(); self.time = 0.; self.closed = False
-        self.phase = SignalPhaseObserver(roi, policy, lamp_rois)
         self.identity_policy = identity_policy or IdentityPolicy()
         self.identities = VehicleIdentityRegistry(self.identity_policy, policy.max_gap_sec,
             ground_trusted=scale_evidence is None or scale_evidence.get('acquisition',{}).get('state')=='verified') if self.identity_policy.mode == 'persistent_v1' else None
+        self._gap_tol = (min(1e-9, 1e-6*policy.max_gap_sec)
+                         if (not self.identities and (policy.fragment_continuation or policy.exit_persistence_sec > 0))
+                         else 0.0)
+        self.phase = SignalPhaseObserver(roi, policy, lamp_rois, gap_tolerance=self._gap_tol)
         self.waits = (PersistentVehicleWaits(run_id, policy, side, self.identity_policy)
             if self.identities else VehicleWaits(run_id, policy, side))
         self.identity_degradation = None
         self.schedule_policy=schedule_policy or SchedulePolicy()
         if self.schedule_policy.enabled and (not self.identities or system_roi is None):
             raise ValueError('A/B comparison requires persistent identities and an A signal ROI')
-        self.system_phase=SignalPhaseObserver(system_roi,policy,system_lamp_rois) if self.schedule_policy.enabled else None
+        self.system_phase=SignalPhaseObserver(system_roi,policy,system_lamp_rois,gap_tolerance=0.0) if self.schedule_policy.enabled else None
         self.schedule=ScheduleEpisodes(run_id,self.schedule_policy,evaluate,lambda:self.time) if self.schedule_policy.enabled else None
         self.predictions = PredictionBook(run_id, policy, evaluate, lambda:self.time, scale_evidence=scale_evidence)
         self.system_snapshot = None
@@ -102,7 +105,7 @@ class ObservationEngine:
                 self.identity_degradation = 'camera_displacement'
                 return
             if (self.phase.last_time is not None and sequence != self.phase.last_sequence and
-                    timestamp-self.phase.last_time > self.policy.max_gap_sec):
+                    timestamp-self.phase.last_time > self.policy.max_gap_sec+self._gap_tol):
                 if self.identities:self.invalidate("observation_gap", self.phase.last_time)
                 else:self.predictions.invalidate("observation_gap", self.phase.last_time)
             result = self.phase.observe(frame, timestamp, sequence)
@@ -175,6 +178,7 @@ class ObservationEngine:
             cycles.append(cycle)
         results = []
         self.comparison_visits = 0
+        native_exit = self.waits.policy.exit_persistence_sec > 0
         for cycle in cycles:
             prediction = records.get(cycle["cycle_id"])
             actual = cycle.get("actual_green_sec")
@@ -182,13 +186,16 @@ class ObservationEngine:
             values = []
             served = 0
             partial = 0
+            end = cycle.get("green_end", self.time)
             for row in self.waits.records.values():
                 self.comparison_visits += 1
-                if cycle["cycle_id"] not in row["cycles"]: continue
+                in_cycle = cycle["cycle_id"] in row["cycles"]
+                if ((in_cycle or native_exit) and
+                        row["crossed_stop_line"] and row["crossing_cycle"]==cycle["cycle_id"] and
+                        cycle["green_start"]<=row["completed_at"]<end):
+                    served += 1
+                if not in_cycle: continue
                 values.append(row["wait_by_cycle"].get(str(cycle["cycle_id"]), {}).get("red_wait_sec", 0.))
-                end=cycle.get("green_end",self.time)
-                served += bool(row["crossed_stop_line"] and row["crossing_cycle"]==cycle["cycle_id"] and
-                               cycle["green_start"]<=row["completed_at"]<end)
                 partial += bool(row["left_censored"] or row["right_censored"] or row["quality_flags"])
             if self.retention:
                 population=self.retention.cycle_population.get(cycle["cycle_id"],{})

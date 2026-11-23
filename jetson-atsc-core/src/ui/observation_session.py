@@ -62,11 +62,20 @@ def source_identity(value):
     return str(Path(value).resolve()) if "://" not in value else value
 
 
+_MAX_PIXEL_COORD = 1e15
+
+
+def _finite_point(point):
+    try:x,y=float(point[0]),float(point[1])
+    except (TypeError,IndexError,ValueError,OverflowError,KeyError):return False
+    return math.isfinite(x) and math.isfinite(y) and abs(x)<=_MAX_PIXEL_COORD and abs(y)<=_MAX_PIXEL_COORD
+
+
 def _finite_box(values):
     if isinstance(values,(str,bytes,Mapping)):return None
     try:box=tuple(float(value) for value in values[:4])
     except (TypeError,IndexError,ValueError,OverflowError,KeyError):return None
-    if len(box)!=4 or not all(map(math.isfinite,box)):return None
+    if len(box)!=4 or not all(math.isfinite(v) and abs(v)<=_MAX_PIXEL_COORD for v in box):return None
     w,h=box[2]-box[0],box[3]-box[1]
     return box if w>0 and h>0 and all(map(math.isfinite,(w,h,(box[0]+box[2])/2,w*h))) else None
 
@@ -74,6 +83,24 @@ def _finite_box(values):
 def _box(track):
     """The raw image box as finite floats, or None (continuation evidence only)."""
     return _finite_box(getattr(track,"bbox",None))
+
+
+def _observed_box(track):
+    """Parsed finite box, None when absent, or empty-tuple sentinel when a supplied box is malformed."""
+    parsed=_box(track)
+    if parsed is not None:return parsed
+    return () if getattr(track,"bbox",None) is not None else None
+
+
+def _bad_box(track):
+    """True when a track carries a malformed bounding box or non-finite/overflowing vertical geometry."""
+    box=_observed_box(track)
+    if box==():return True
+    if box is None:return False
+    point=getattr(track,"bottom_center",None)
+    if not _finite_point(point):return True
+    y1=float(point[1])-(box[3]-box[1])
+    return not (math.isfinite(y1) and abs(y1)<=_MAX_PIXEL_COORD)
 
 
 def _source_box(track):
@@ -208,8 +235,15 @@ class ObservationSession:
             model=Path(self.model_selection["path"]);anfis=ROOT/"models/anfis_sugeno.onnx"
             for role in self.calibrations:
                 self.detectors[role]=detector_factory(str(model),conf_threshold=.28,imgsz=640)
+            gap_tol=(min(1e-9,1e-6*self.policy.max_gap_sec)
+                     if (self.identity_features is None and
+                         (self.policy.fragment_continuation or self.policy.exit_persistence_sec>0))
+                     else 0.0)
             for role in self.detectors:
                 self.detectors[role].max_gap_sec=self.policy.max_gap_sec
+                if gap_tol and hasattr(self.detectors[role],"gap_tolerance"):
+                    try:self.detectors[role].gap_tolerance=gap_tol
+                    except AttributeError:pass
             # Withheld-detection capture is opt-in: only native fragment continuation
             # uses it (persistent identity never continues fragments), so no other run pays for it.
             if self.fragment_continuation:
@@ -304,7 +338,22 @@ class ObservationSession:
             if self.identity_features:
                 identity_evidence=self.identity_features.extract(frame,tracks,calibration.homography.pixel_to_ground,
                     calibration.homography.is_in_approach_corridor)
-            else:detector.update_velocities(tracks,calibration.homography.pixel_to_ground,timestamp=packet.timestamp)
+            else:
+                native_exit=self.policy.exit_persistence_sec>0
+                finite_tracks=tracks
+                if native_exit:
+                    bad_flags=[(not _finite_point(getattr(v,"bottom_center",None))) or _bad_box(v) for v in tracks]
+                    if any(bad_flags):
+                        finite_tracks=[]
+                        for v,bad in zip(tracks,bad_flags):
+                            if not bad:finite_tracks.append(v)
+                            else:v.velocity_valid=False;v.velocity_mps=0.0;v.ground_pos=None
+                elif any(not _finite_point(getattr(v,"bottom_center",None)) for v in tracks):
+                    finite_tracks=[]
+                    for v in tracks:
+                        if _finite_point(getattr(v,"bottom_center",None)):finite_tracks.append(v)
+                        else:v.velocity_valid=False;v.velocity_mps=0.0;v.ground_pos=None
+                detector.update_velocities(finite_tracks,calibration.homography.pixel_to_ground,timestamp=packet.timestamp)
             elapsed=(time.perf_counter()-started)*1000
             self._sample_execution_provenance(packet.timestamp)
             predictor=getattr(getattr(detector,"model",None),"predictor",None)
@@ -331,13 +380,14 @@ class ObservationSession:
                     labels=tuple(labels)
                 else:
                     continuing=getattr(self,"fragment_continuation",False)
+                    native_exit=self.policy.exit_persistence_sec>0
                     observations=[VehicleObservation(v.track_id,v.class_name,
                         v.velocity_mps if getattr(v,"velocity_valid",False) else None,
                         v.bottom_center,stable_id=getattr(v,"stable_id",False),
                         velocity_valid=getattr(v,"velocity_valid",False),
-                        in_region=calibration.homography.is_in_approach_corridor(*v.bottom_center),
+                        in_region=_finite_point(v.bottom_center) and calibration.homography.is_in_approach_corridor(*v.bottom_center),
                         epoch=getattr(v,"epoch",detector.epoch),
-                        bbox=_box(v) if continuing else None,
+                        bbox=_observed_box(v) if (continuing or native_exit) else None,
                         source_bbox=_source_box(v) if continuing else None) for v in tracks]
                     if continuing:
                         self.engine.observe_acquisition(frame,packet.timestamp,packet.sequence,observations,generation=generation,
@@ -557,7 +607,9 @@ class ObservationSession:
         labels=[]
         with self.engine.lock:
             for v in tracks:
-                p=tuple(int(x) for x in v.bbox)
+                box=_finite_box(getattr(v,"bbox",None))
+                if box is None or not all(abs(x)<1_000_000_000 for x in box):continue
+                p=tuple(int(x) for x in box)
                 label=f"#{v.track_id} {v.class_name}" if getattr(v,"stable_id",False) else v.class_name+" (ID unknown)"
                 if role=="acquisition":
                     state=self.engine.waits.active.get((getattr(v,"epoch",0),v.track_id))

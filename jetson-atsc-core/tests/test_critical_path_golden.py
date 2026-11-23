@@ -6,43 +6,69 @@ import cv2
 import numpy as np
 
 
-def without_tracking_profile(value):
-    if isinstance(value,dict):return {k:without_tracking_profile(v) for k,v in value.items() if k!='tracking_profile'}
-    if isinstance(value,list):return [without_tracking_profile(v) for v in value]
-    return value
-
-
-# The baseline predates RunPolicy.fragment_continuation. Only its default
-# (off) value is dropped, from the policy object and from JSON embedded in
-# CSV cells; an enabled switch would still differ. The scripted clip's tracks
-# are compared in full, so the default must leave every row unchanged.
-def without_default_continuation(value):
-    if isinstance(value,dict):
-        return {k:without_default_continuation(v) for k,v in value.items() if not (k=='fragment_continuation' and v is False)}
-    if isinstance(value,list):return [without_default_continuation(v) for v in value]
-    if isinstance(value,str):return value.replace(', ""fragment_continuation"": false','').replace(', "fragment_continuation": false','')
+# The baseline predates tracking_profile, RunPolicy.fragment_continuation, and
+# RunPolicy.exit_persistence_sec. Only additive profile metadata and off-default
+# RunPolicy fields are dropped, from policy dicts and parsed JSON CSV cells; any
+# non-default policy value (such as exit_persistence_sec=0.05) still differs.
+def without_additive_defaults(value, in_policy=False):
+    if isinstance(value, dict):
+        return {
+            k: without_additive_defaults(v, in_policy=(k == 'policy'))
+            for k, v in value.items()
+            if k != 'tracking_profile'
+            and not (in_policy and k == 'fragment_continuation' and v is False)
+            and not (in_policy and k == 'exit_persistence_sec' and type(v) in (int, float) and v == 0)
+        }
+    if isinstance(value, list):
+        return [without_additive_defaults(v) for v in value]
     return value
 
 
 def normalize(value):
-    return _normalize(without_default_continuation(value))
+    return _normalize(value)
 
 
-def _normalize(value):
+def _normalize(value, in_policy=False):
     # Additive profile metadata is checked in test_tracking_profile_sessions;
     # the historical tree predates it. All existing behavior remains compared.
-    if isinstance(value,dict):return {key:_normalize(item) for key,item in value.items() if key not in ('run_id','commit_sequence','source_hashes','package_versions','persist_background_requests','persist_background_commits','persist_coalesced_requests','persist_worker_errors','tracking_profile') and not key.endswith('_utc')}
-    if isinstance(value,list):return [_normalize(item) for item in value]
-    if isinstance(value,str) and '""tracking_profile""' in value:
-        # CSV provenance embeds JSON; keep every other cell/value and the format.
+    if isinstance(value, dict):
+        return {
+            key: _normalize(item, in_policy=(key == 'policy'))
+            for key, item in value.items()
+            if key not in (
+                'run_id', 'commit_sequence', 'source_hashes', 'package_versions',
+                'persist_background_requests', 'persist_background_commits',
+                'persist_coalesced_requests', 'persist_worker_errors', 'tracking_profile',
+            )
+            and not key.endswith('_utc')
+            and not (in_policy and key == 'fragment_continuation' and item is False)
+            and not (in_policy and key == 'exit_persistence_sec' and type(item) in (int, float) and item == 0)
+        }
+    if isinstance(value, list):
+        return [_normalize(item) for item in value]
+    if isinstance(value, str) and any(
+        marker in value for marker in ('""tracking_profile""', '""fragment_continuation""', '""exit_persistence_sec""')
+    ):
+        # CSV provenance embeds JSON; parse each JSON cell and drop only additive defaults.
         import csv
-        rows=list(csv.reader(io.StringIO(value)))
+        rows = list(csv.reader(io.StringIO(value)))
+        changed = False
         for row in rows:
-            for i,cell in enumerate(row):
-                if '"tracking_profile":' not in cell:continue
-                row[i]=json.dumps(without_tracking_profile(json.loads(cell)),allow_nan=False)
-        stream=io.StringIO(newline='');csv.writer(stream).writerows(rows)
-        return stream.getvalue()
+            for i, cell in enumerate(row):
+                if not any(k in cell for k in ('"tracking_profile":', '"fragment_continuation":', '"exit_persistence_sec":')):
+                    continue
+                try:
+                    parsed = json.loads(cell)
+                except json.JSONDecodeError:
+                    continue
+                updated = without_additive_defaults(parsed)
+                if updated != parsed:
+                    row[i] = json.dumps(updated, allow_nan=False)
+                    changed = True
+        if changed:
+            stream = io.StringIO(newline='')
+            csv.writer(stream).writerows(rows)
+            return stream.getvalue()
     return value
 
 
@@ -78,3 +104,26 @@ def test_normalize_csv_removes_only_additive_profile_metadata():
     after['wait']=4.5
     assert normalize(table(after))!=normalize(table(before))
     assert normalize(table(before))==table(before)
+
+
+def test_normalize_csv_removes_only_exact_zero_run_policy_defaults():
+    import csv
+    def table(value):
+        stream=io.StringIO(newline='');writer=csv.writer(stream)
+        writer.writerow(['provenance','observed_wait']);writer.writerow([json.dumps(value),'3.500'])
+        return stream.getvalue()
+    base={'policy':{'max_gap_sec':1},'vehicle_identity':{'exit_persistence_sec':0.0}}
+    with_defaults={'policy':{'max_gap_sec':1,'fragment_continuation':False,'exit_persistence_sec':0.0},
+                   'vehicle_identity':{'exit_persistence_sec':0.0}}
+    with_prefix={'policy':{'max_gap_sec':1,'exit_persistence_sec':0.05},
+                 'vehicle_identity':{'exit_persistence_sec':0.0}}
+    with_other={'policy':{'max_gap_sec':15},
+                'vehicle_identity':{'exit_persistence_sec':0.0}}
+    with_enabled={'policy':{'max_gap_sec':1,'fragment_continuation':True},
+                  'vehicle_identity':{'exit_persistence_sec':0.0}}
+    assert normalize(table(with_defaults))==normalize(table(base))
+    assert normalize(table(with_prefix))!=normalize(table(base))
+    assert normalize(table(with_prefix))!=normalize(table(with_other))
+    assert normalize(table(with_enabled))!=normalize(table(base))
+    # Non-policy exit_persistence_sec=0.0 is preserved intact.
+    assert '"vehicle_identity": {"exit_persistence_sec": 0.0}' in list(csv.reader(io.StringIO(normalize(table(with_defaults)))))[1][0]

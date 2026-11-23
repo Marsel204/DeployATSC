@@ -227,6 +227,11 @@ class Retention:
                 for key,records in (('schedule_episodes',engine.schedule.records),('vehicle_savings',engine.schedule.savings)):
                     for identity in token.get(key,[]):records.pop(identity,None)
                     self.archived_counts[key]+=len(token.get(key,[]))
+        drop={c['cycle_id'] for c in token['cycles']}
+        live_cycles={c['cycle_id'] for c in engine.phase.cycles if c['cycle_id'] not in drop}
+        if engine.phase.green:live_cycles.add(engine.phase.green['cycle_id'])
+        retained_cycles=live_cycles|{engine.phase.cycle_id+1}
+        native_exit=engine.waits.policy.exit_persistence_sec>0
         for identity,change in token['vehicles'].items():
             row=engine.waits.records.get(identity)
             if row is None:continue
@@ -242,12 +247,15 @@ class Retention:
                 recent['history']=self.progress.pop(identity,{'archived_intervals':0,'archived_cycles':0})
                 self.recent.append(recent)
                 for cycle_id in final['cycles']:
+                    if cycle_id not in retained_cycles:continue
                     population=self.cycle_population.setdefault(cycle_id,{'count':0,'wait':0.,'partial':0,'crossings':[]})
                     population['count']+=1
                     population['wait']+=final['wait_by_cycle'].get(str(cycle_id),{}).get('red_wait_sec',0.)
                     population['partial']+=bool(final['left_censored'] or final['right_censored'] or final['quality_flags'])
-                    if final['crossed_stop_line'] and final['crossing_cycle']==cycle_id:
-                        population['crossings'].append(final['completed_at'])
+                if (final['crossed_stop_line'] and final['crossing_cycle'] in live_cycles and
+                        (native_exit or final['crossing_cycle'] in final['cycles'])):
+                    population=self.cycle_population.setdefault(final['crossing_cycle'],{'count':0,'wait':0.,'partial':0,'crossings':[]})
+                    population['crossings'].append(final['completed_at'])
                 engine.waits.work-=len(row['intervals'])+int(row['completed'])
                 del engine.waits.records[identity]
             else:
@@ -262,15 +270,18 @@ class Retention:
                     row['wait_by_cycle'].pop(cycle,None)
                     if int(cycle) in row['cycles']:row['cycles'].remove(int(cycle))
         engine.waits.release()
+        assoc_limit=engine.waits.policy.association_gap_sec+(
+            min(1e-9,1e-6*engine.waits.policy.association_gap_sec)
+            if (not engine.identities and (engine.waits.policy.fragment_continuation or engine.waits.policy.exit_persistence_sec>0))
+            else 0.0)
         for identity,active in list(engine.waits.active.items()):
             if active['row']['vehicle_id'] not in engine.waits.records:
-                if engine.waits.last_time-active.get('_last_seen',active['row']['last_seen'])>engine.waits.policy.association_gap_sec:
+                if engine.waits.last_time-active.get('_last_seen',active['row']['last_seen'])>assoc_limit:
                     del engine.waits.active[identity]
                     continue
                 active['row']= {k:v for k,v in active['row'].items() if k not in ('intervals','wait_by_cycle','cycles')}
                 active['previous']=None
                 active['stop_candidate']=active['move_candidate']=None
-        drop={c['cycle_id'] for c in token['cycles']}
         engine.phase.cycles[:]=[c for c in engine.phase.cycles if c['cycle_id'] not in drop]
         for comparison in token['cycles']:
             stats=summarize([], [comparison],None)
