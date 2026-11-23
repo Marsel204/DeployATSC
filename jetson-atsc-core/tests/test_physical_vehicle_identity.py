@@ -2915,3 +2915,18 @@ def test_crossing_at_exact_max_gap_and_sub_tolerance_exit_persistence():
         waits_sm.observe([car(1, 200., x=150., height=60., speed=0.)], 'RED', t, seq, 1, unassigned=())
     waits_sm.observe([car(2, 200., x=150., height=60., speed=0.)], 'RED', 2.5e-9, 4, 1, unassigned=())
     assert len(waits_sm.records) == 2 and not any(r.get('identity_links') for r in waits_sm.records.values())
+
+    # Sol Round 32: exact association_gap_sec=0.1 at 10 fps (0.30000000000000004 - 0.2) must not
+    # complete an EXIT_PENDING visit as LOST or split its return at 0.4 into :segment-1.
+    waits_assoc = VehicleWaits(
+        'assoc-edge',
+        RunPolicy(max_gap_sec=0.1, association_gap_sec=0.1, exit_persistence_sec=0.3),
+        side=lambda p: -1.,
+    )
+    waits_assoc.observe([car(1, 200., x=150., height=60., speed=0., in_region=True)], 'RED', 0.0, 1, 1)
+    waits_assoc.observe([car(1, 200., x=150., height=60., speed=0., in_region=True)], 'RED', 0.1, 2, 1)
+    waits_assoc.observe([car(1, 200., x=150., height=60., speed=0., in_region=False)], 'RED', 0.2, 3, 1)
+    waits_assoc.observe([], 'RED', 0.30000000000000004, 4, 1)
+    assert not only_row(waits_assoc)['completed'] and only_row(waits_assoc)['tracking_state'] == 'LOST'
+    waits_assoc.observe([car(1, 200., x=150., height=60., speed=0., in_region=True)], 'RED', 0.4, 5, 1)
+    assert len(waits_assoc.records) == 1 and not only_row(waits_assoc)['completed']

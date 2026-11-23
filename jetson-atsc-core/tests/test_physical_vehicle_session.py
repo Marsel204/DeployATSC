@@ -548,3 +548,33 @@ def test_session_exact_max_gap_replay_preserves_detector_velocity_and_red_wait(v
         assert row['unknown_sec'] == pytest.approx(0.2, abs=1e-6)
     finally:
         session.state = session.applied_state = 'stopped'; session._cleanup()
+
+
+@pytest.mark.parametrize('policy_extra', [{}, {'fragment_continuation': True}, {'exit_persistence_sec': 0.3}])
+def test_session_accepts_slotted_custom_detector_without_gap_tolerance(video_factory, tmp_path, policy_extra):
+    """Sol Round 32: custom detectors declaring __slots__ without gap_tolerance must still
+    start and process frames cleanly under default-off and opt-in policies."""
+    class SlottedDetector:
+        __slots__ = ('epoch', 'track_trajectories', 'max_gap_sec')
+        def __init__(self, *args, **kwargs):
+            self.epoch = 0
+            self.track_trajectories = {}
+            self.max_gap_sec = 5.0
+        def track(self, frames, timestamp=None):
+            return [TrackedFrame([], withheld=(), epoch=self.epoch) for _ in frames]
+        def update_velocities(self, vehicles, project, timestamp=None):
+            pass
+        def reset_tracking(self):
+            self.epoch += 1
+
+    settings = run_payload(video_factory)
+    settings['policy'] = {'debounce_frames': 1, 'stop_persistence_sec': 0.1, **policy_extra}
+    class Manual(ObservationSession):
+        def _worker(self):self.ready.set()
+    session = Manual(settings, tmp_path/f"slotted-{len(policy_extra)}-{next(iter(policy_extra), 'off')}",
+                     detector_factory=SlottedDetector, anfis_factory=FakeANFIS)
+    try:
+        session._process_batch()
+        assert session.detectors['acquisition'].max_gap_sec == session.policy.max_gap_sec
+    finally:
+        session.state = session.applied_state = 'stopped'; session._cleanup()

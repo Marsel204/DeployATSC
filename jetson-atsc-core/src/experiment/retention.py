@@ -270,9 +270,13 @@ class Retention:
                     row['wait_by_cycle'].pop(cycle,None)
                     if int(cycle) in row['cycles']:row['cycles'].remove(int(cycle))
         engine.waits.release()
+        assoc_limit=engine.waits.policy.association_gap_sec+(
+            min(1e-9,1e-6*engine.waits.policy.association_gap_sec)
+            if (not engine.identities and (engine.waits.policy.fragment_continuation or engine.waits.policy.exit_persistence_sec>0))
+            else 0.0)
         for identity,active in list(engine.waits.active.items()):
             if active['row']['vehicle_id'] not in engine.waits.records:
-                if engine.waits.last_time-active.get('_last_seen',active['row']['last_seen'])>engine.waits.policy.association_gap_sec:
+                if engine.waits.last_time-active.get('_last_seen',active['row']['last_seen'])>assoc_limit:
                     del engine.waits.active[identity]
                     continue
                 active['row']= {k:v for k,v in active['row'].items() if k not in ('intervals','wait_by_cycle','cycles')}

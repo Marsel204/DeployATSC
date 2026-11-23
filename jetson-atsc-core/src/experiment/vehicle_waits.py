@@ -2166,13 +2166,15 @@ class VehicleWaits:
         if phase == "UNKNOWN":cycle_id = None
         continuing = self.fragment_continuation and self.policy.fragment_continuation
         native_exit = self.policy.exit_persistence_sec > 0
+        assoc_limit = self.policy.association_gap_sec+(min(1e-9, 1e-6*self.policy.association_gap_sec)
+                                                       if (continuing or native_exit) else 0.0)
         if continuing:
             # Read more than once (prepasses, accounting): a one-shot iterator is materialized once.
             observations = observations if isinstance(observations, (list, tuple)) else list(observations)
             # A sighting older than the association timeout no longer makes an ID "not newborn".
             if self.outside_seen:
                 self.outside_seen = {k: t for k, t in self.outside_seen.items()
-                                     if timestamp-t <= self.policy.association_gap_sec}
+                                     if timestamp-t <= assoc_limit}
             # A handed-off ID seen again contests the live link before any row of this
             # frame completes (e.g. the continuing ID crossing the line): order-independent.
             if self.handed_off:
@@ -2347,7 +2349,7 @@ class VehicleWaits:
             self._advance_clip_maintenance(maint_states, compact_budget, sweep_budget)
         for identity, state in list(self.active.items()):
             row = state["row"]
-            if row["vehicle_id"] not in self.records and identity not in present and timestamp-state.get("_last_seen",row["last_seen"])>self.policy.association_gap_sec:
+            if row["vehicle_id"] not in self.records and identity not in present and timestamp-state.get("_last_seen",row["last_seen"])>assoc_limit:
                 del self.active[identity]
                 continue
             if identity not in present and not row["completed"]:
@@ -2355,7 +2357,7 @@ class VehicleWaits:
                 self._clear_clip_state(state)
                 exit_last = state.get("exit_last") if native_exit else None
                 last_observed = max(row["last_seen"], exit_last["time"]) if exit_last is not None else row["last_seen"]
-                if timestamp-last_observed > self.policy.association_gap_sec:
+                if timestamp-last_observed > assoc_limit:
                     row.update(completed=True, completed_at=timestamp);self.work+=1
                     self._flag(row, "tracking_lost")
                     self._clear_native_exit(state)
