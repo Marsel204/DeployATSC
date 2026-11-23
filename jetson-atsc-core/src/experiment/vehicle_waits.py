@@ -169,7 +169,7 @@ _R_NODE_MAX = 16
 class _RNode:
     """Self-balancing 2D R-tree node with height/rear/drift envelopes and strict
     O(log N) split-only insertion (zero whole-subtree rebuilds)."""
-    __slots__ = ("children", "idxs", "count", "ver",
+    __slots__ = ("children", "idxs", "count", "min_slot",
                  "min_x", "max_x", "min_y", "max_y", "min_h", "max_h",
                  "max_rear_lo", "min_rear_hi",
                  "min_x_hi", "max_x_hi", "min_x_lo", "max_x_lo",
@@ -179,14 +179,15 @@ class _RNode:
         self.idxs = idxs
         self.children = children
         self.count = 0
-        self.ver = 0
+        self.min_slot = math.inf
         self.min_x = self.min_y = self.min_h = math.inf
         self.max_x = self.max_y = self.max_h = -math.inf
         self.max_rear_lo = -math.inf; self.min_rear_hi = math.inf
         self.min_x_hi = self.min_x_lo = self.min_y_hi = self.min_y_lo = math.inf
         self.max_x_hi = self.max_x_lo = self.max_y_hi = self.max_y_lo = -math.inf
 
-    def include_point(self, bx, by1, bh, brear, berr):
+    def include_point(self, slot, bx, by1, bh, brear, berr):
+        if slot < self.min_slot: self.min_slot = slot
         r = OCCLUSION_TOP_DRIFT_HEIGHTS*bh
         x_hi = bx+r; x_lo = bx-r; y_hi = by1+r; y_lo = by1-r
         r_lo = brear-berr; r_hi = brear+berr
@@ -212,18 +213,21 @@ class _RNode:
         idxs = self.idxs
         if not idxs:
             self.count = 0
+            self.min_slot = math.inf
             self.min_x = self.min_y = self.min_h = math.inf
             self.max_x = self.max_y = self.max_h = -math.inf
             self.max_rear_lo = -math.inf; self.min_rear_hi = math.inf
             self.min_x_hi = self.min_x_lo = self.min_y_hi = self.min_y_lo = math.inf
             self.max_x_hi = self.max_x_lo = self.max_y_hi = self.max_y_lo = -math.inf
             return
+        min_slot = math.inf
         min_x = min_y = min_h = math.inf
         max_x = max_y = max_h = -math.inf
         max_rear_lo = -math.inf; min_rear_hi = math.inf
         min_x_hi = min_x_lo = min_y_hi = min_y_lo = math.inf
         max_x_hi = max_x_lo = max_y_hi = max_y_lo = -math.inf
         for i in idxs:
+            if i < min_slot: min_slot = i
             bx = xs[i]; by1 = y1s[i]; bh = hs[i]
             r = OCCLUSION_TOP_DRIFT_HEIGHTS*bh
             x_hi = bx+r; x_lo = bx-r; y_hi = by1+r; y_lo = by1-r
@@ -244,6 +248,7 @@ class _RNode:
             if y_hi > max_y_hi: max_y_hi = y_hi
             if y_lo < min_y_lo: min_y_lo = y_lo
             if y_lo > max_y_lo: max_y_lo = y_lo
+        self.min_slot = min_slot
         self.min_x = min_x; self.max_x = max_x
         self.min_y = min_y; self.max_y = max_y
         self.min_h = min_h; self.max_h = max_h
@@ -257,6 +262,7 @@ class _RNode:
     def refresh_internal(self):
         ch = self.children
         c0 = ch[0]
+        min_slot = c0.min_slot
         min_x = c0.min_x; max_x = c0.max_x
         min_y = c0.min_y; max_y = c0.max_y
         min_h = c0.min_h; max_h = c0.max_h
@@ -267,6 +273,7 @@ class _RNode:
         min_y_lo = c0.min_y_lo; max_y_lo = c0.max_y_lo
         count = c0.count
         for c in ch[1:]:
+            if c.min_slot < min_slot: min_slot = c.min_slot
             if c.min_x < min_x: min_x = c.min_x
             if c.max_x > max_x: max_x = c.max_x
             if c.min_y < min_y: min_y = c.min_y
@@ -284,6 +291,7 @@ class _RNode:
             if c.min_y_lo < min_y_lo: min_y_lo = c.min_y_lo
             if c.max_y_lo > max_y_lo: max_y_lo = c.max_y_lo
             count += c.count
+        self.min_slot = min_slot
         self.min_x = min_x; self.max_x = max_x
         self.min_y = min_y; self.max_y = max_y
         self.min_h = min_h; self.max_h = max_h
@@ -494,10 +502,10 @@ class _BoundBlocks:
 
 
 class _HBlock:
-    __slots__ = ("h", "y2", "x", "rear", "err", "slots", "max_rear_hi", "max_rear_slot", "live_count", "min_slot")
+    __slots__ = ("h", "y2", "x", "rear", "err", "slots", "max_rear_hi", "max_rear_slot", "live_count")
 
     def __init__(self, h=None, y2=None, x=None, rear=None, err=None, slots=None,
-                 max_rear_hi=-math.inf, max_rear_slot=-1, live_count=0, min_slot=math.inf):
+                 max_rear_hi=-math.inf, max_rear_slot=-1, live_count=0):
         self.h = array("d") if h is None else h
         self.y2 = array("d") if y2 is None else y2
         self.x = array("d") if x is None else x
@@ -507,31 +515,25 @@ class _HBlock:
         self.max_rear_hi = max_rear_hi
         self.max_rear_slot = max_rear_slot
         self.live_count = live_count
-        self.min_slot = min_slot
 
     def refresh_max_rear_hi(self, alive=None):
         m = -math.inf
         ms = -1
-        lo_s = math.inf
         rear = self.rear; err = self.err; slots = self.slots
         if alive is None:
             for i in range(len(rear)):
-                s = slots[i]
-                if s < lo_s: lo_s = s
                 v = rear[i]+err[i]
                 if v > m:
-                    m = v; ms = s
+                    m = v; ms = slots[i]
         else:
             for i in range(len(rear)):
                 s = slots[i]
                 if alive[s]:
-                    if s < lo_s: lo_s = s
                     v = rear[i]+err[i]
                     if v > m:
                         m = v; ms = s
         self.max_rear_hi = m
         self.max_rear_slot = ms
-        self.min_slot = lo_s
 
 
 class _ClipBaselines:
@@ -555,7 +557,7 @@ class _ClipBaselines:
                  "_blocks", "_blk_max", "_slot_blk", "_rebuild",
                  "_dom_sweep", "_dom_queue", "_dom_pending", "_dom_cache",
                  "_cover_probe", "_cover_pending", "_cover_count", "_cover_scan", "_sweep_turn",
-                 "_std_geom", "_tree_ver")
+                 "_std_geom")
 
     def __init__(self):
         self._x = array("d")
@@ -585,7 +587,6 @@ class _ClipBaselines:
         self._cover_scan = 0
         self._sweep_turn = False
         self._std_geom = True
-        self._tree_ver = 0
 
     def __bool__(self):
         return self.count > 0
@@ -612,7 +613,6 @@ class _ClipBaselines:
         self._cover_scan = 0
         self._sweep_turn = False
         self._std_geom = True
-        self._tree_ver = 0
 
     @staticmethod
     def _find_in_block(blk, h, y2, x):
@@ -666,7 +666,7 @@ class _ClipBaselines:
         r_hi = rear+err
         if not blocks:
             blk = _HBlock(array("d", (h,)), array("d", (y2,)), array("d", (x,)),
-                          array("d", (rear,)), array("d", (err,)), array("I", (slot,)), r_hi, slot, 1, slot)
+                          array("d", (rear,)), array("d", (err,)), array("I", (slot,)), r_hi, slot, 1)
             blocks.append(blk); blk_max.append((h, y2, x))
             self._slot_blk.append(blk)
             return
@@ -680,8 +680,6 @@ class _ClipBaselines:
                 not self._alive[blk.slots[i]] and self._y1[blk.slots[i]] == y1):
             blk.slots[i] = slot
             blk.live_count += 1
-            if slot < blk.min_slot:
-                blk.min_slot = slot
             self._slot_blk.append(blk)
             if r_hi >= blk.max_rear_hi:
                 blk.max_rear_hi = r_hi
@@ -690,8 +688,6 @@ class _ClipBaselines:
         bh.insert(i, h); by2.insert(i, y2); bx_arr.insert(i, x)
         blk.rear.insert(i, rear); blk.err.insert(i, err); blk.slots.insert(i, slot)
         blk.live_count += 1
-        if slot < blk.min_slot:
-            blk.min_slot = slot
         self._slot_blk.append(blk)
         if r_hi > blk.max_rear_hi:
             blk.max_rear_hi = r_hi
@@ -830,7 +826,7 @@ class _ClipBaselines:
         if self._dom_sweep is not None:
             new_dom = mapping.get(self._dom_sweep[0])
             if new_dom is not None and shadow._alive[new_dom]:
-                self._dom_sweep = (new_dom, -2, len(shadow._x), 0.0, 0.0, 0.0)
+                self._dom_sweep = (new_dom, -2, len(shadow._x))
                 shadow._dom_pending[new_dom] = 1
             else:
                 self._dom_sweep = None
@@ -839,7 +835,7 @@ class _ClipBaselines:
                                if (nq := mapping.get(s)) is not None and shadow._alive[nq]]
         if self._cover_probe is not None:
             new_c = mapping.get(self._cover_probe[0])
-            self._cover_probe = ((new_c, None, -1, math.inf, math.inf, math.inf, len(shadow._x))
+            self._cover_probe = ((new_c, None, len(shadow._x))
                                  if (new_c is not None and shadow._alive[new_c]) else None)
         self._dom_queue = q_shadow
         self._dom_pending = shadow._dom_pending
@@ -853,7 +849,6 @@ class _ClipBaselines:
         self._y_hi, self._y_lo = shadow._y_hi, shadow._y_lo
         self._blocks, self._blk_max, self._slot_blk = shadow._blocks, shadow._blk_max, shadow._slot_blk
         self._std_geom = shadow._std_geom
-        self._tree_ver += 1
         self._rebuild = None
         return copied or 1
 
@@ -863,7 +858,7 @@ class _ClipBaselines:
 
     def _queue_cover_probe(self, slot):
         if self._cover_probe is None and self._cover_count == 0:
-            self._cover_probe = (slot, None, -1, math.inf, math.inf, math.inf, len(self._alive))
+            self._cover_probe = (slot, None, len(self._alive))
             return
         if not self._cover_pending[slot]:
             self._cover_pending[slot] = 1
@@ -939,7 +934,7 @@ class _ClipBaselines:
                 return
         dp[slot] = 1
         if self._dom_sweep is None and not q_dq:
-            self._dom_sweep = (slot, -2, len(alive), 0.0, 0.0, 0.0)
+            self._dom_sweep = (slot, -2, len(alive))
         else:
             q_dq.append(slot)
             if rb is not None and rb[5] is not None:
@@ -950,12 +945,88 @@ class _ClipBaselines:
                     nq = -1
                 rb[5].append(nq)
 
+    def _on_leaf_insert(self, leaf, k):
+        ds = self._dom_sweep
+        if ds is not None and isinstance(ds[1], list) and ds[1]:
+            top = ds[1][-1]
+            if top[0] is leaf and top[1] is not None and k <= top[1]:
+                top[1] += 1
+        cp = self._cover_probe
+        if cp is not None and cp[1] is not None and cp[1]:
+            top = cp[1][-1]
+            if top[0] is leaf and top[1] is not None and k < top[1]:
+                top[1] += 1
+
+    def _on_leaf_compact(self, leaf, old_idxs, new_idxs):
+        ds = self._dom_sweep
+        if ds is not None and isinstance(ds[1], list) and ds[1]:
+            top = ds[1][-1]
+            if top[0] is leaf and top[1] is not None:
+                if not new_idxs:
+                    top[1] = -1
+                else:
+                    nset = set(new_idxs)
+                    top[1] = sum(1 for s in old_idxs[:top[1]+1] if s in nset)-1
+        cp = self._cover_probe
+        if cp is not None and cp[1] is not None and cp[1]:
+            top = cp[1][-1]
+            if top[0] is leaf and top[1] is not None:
+                if not new_idxs:
+                    top[1] = 0
+                else:
+                    nset = set(new_idxs)
+                    top[1] = sum(1 for s in old_idxs[:top[1]] if s in nset)
+
+    def _on_leaf_split(self, leaf, sibling, old_idxs):
+        alive = self._alive
+        ds = self._dom_sweep
+        if ds is not None and isinstance(ds[1], list) and ds[1]:
+            stack, sweep_end = ds[1], ds[2]
+            for idx_f, frame in enumerate(stack):
+                if frame[0] is leaf:
+                    if frame[1] is None:
+                        if sibling.min_slot < sweep_end:
+                            stack.insert(idx_f+1, [sibling, None])
+                    else:
+                        rem = array("I", (s for s in old_idxs[:frame[1]+1] if s < sweep_end and alive[s]))
+                        stack[idx_f] = [rem, len(rem)-1]
+                    break
+        cp = self._cover_probe
+        if cp is not None and cp[1] is not None and cp[1]:
+            stack, probe_end = cp[1], cp[2]
+            for idx_f, frame in enumerate(stack):
+                if frame[0] is leaf:
+                    if frame[1] is None:
+                        if sibling.min_slot < probe_end:
+                            stack.insert(idx_f+1, [sibling, None])
+                    else:
+                        rem = array("I", (s for s in old_idxs[frame[1]:] if s < probe_end and alive[s]))
+                        stack[idx_f] = [rem, 0]
+                    break
+
+    def _on_internal_split(self, parent, sibling):
+        ds = self._dom_sweep
+        if ds is not None and isinstance(ds[1], list) and ds[1]:
+            stack, sweep_end = ds[1], ds[2]
+            if sibling.min_slot < sweep_end:
+                for idx_f, frame in enumerate(stack):
+                    if frame[0] is parent:
+                        stack.insert(idx_f+1, [sibling, None])
+                        break
+        cp = self._cover_probe
+        if cp is not None and cp[1] is not None and cp[1]:
+            stack, probe_end = cp[1], cp[2]
+            if sibling.min_slot < probe_end:
+                for idx_f, frame in enumerate(stack):
+                    if frame[0] is parent:
+                        stack.insert(idx_f+1, [sibling, None])
+                        break
+
     def _step_evict_sweep(self, budget):
         if budget <= 0:
             return 0
         alive = self._alive
         dp = self._dom_pending
-        blocks = self._blocks; blk_max = self._blk_max
         std_geom = self._std_geom
         xs, y1s, y2s, hs, rears, errs = self._x, self._y1, self._y2, self._h, self._rear, self._err
         checked = 0
@@ -970,14 +1041,14 @@ class _ClipBaselines:
                     if sq >= 0:
                         self._rebuild[0]._dom_pending[sq] = 0
                 if 0 <= cand < len(alive) and alive[cand]:
-                    self._dom_sweep = (cand, -2, len(alive), 0.0, 0.0, 0.0)
+                    self._dom_sweep = (cand, -2, len(alive))
                 else:
                     if 0 <= cand < len(dp):
                         dp[cand] = 0
                     checked += 1
             if self._dom_sweep is None:
                 break
-            dom_slot, pos, sweep_end, h_cur, y2_cur, x_cur = self._dom_sweep
+            dom_slot, stack, sweep_end = self._dom_sweep
             if dom_slot < 0 or dom_slot >= len(alive) or not alive[dom_slot]:
                 if 0 <= dom_slot < len(dp):
                     dp[dom_slot] = 0
@@ -989,232 +1060,99 @@ class _ClipBaselines:
             arear_lo = arear-aerr
             ra = OCCLUSION_TOP_DRIFT_HEIGHTS*ah
             ax_lo, ax_hi, ay_lo, ay_hi = ax-ra, ax+ra, ay1-ra, ay1+ra
-            init_y2, init_x = (-math.inf, -math.inf) if std_geom else (math.inf, math.inf)
-            if pos == -2:
+            if stack == -2:
                 checked += 1
-                if not self._root_may_be_dominated(ax, ay1, ah, arear_lo, ax_lo, ax_hi, ay_lo, ay_hi, std_geom):
+                root = self._root
+                if (root is None or root.min_slot >= sweep_end or
+                        not self._node_may_be_dominated(root, ax, ay1, ah, arear_lo, ax_lo, ax_hi, ay_lo, ay_hi, std_geom)):
                     dp[dom_slot] = 0
                     self._dom_sweep = None
                     continue
-                if self._root is not None:
-                    pos = ([[self._root, -1, self._root.ver]], self._tree_ver, False)
-                    self._dom_sweep = (dom_slot, pos, sweep_end, ah, init_y2, init_x)
+                if root.idxs is not None:
+                    stack = [[root, None]]
                 else:
-                    pos = 0
-                    h_cur, y2_cur, x_cur = ah, init_y2, init_x
-                    self._dom_sweep = (dom_slot, 0, sweep_end, ah, init_y2, init_x)
-                if checked >= budget:
-                    break
-            if isinstance(pos, tuple):
-                stack, tree_ver, retried = pos
-                if tree_ver == self._tree_ver:
-                    while stack and checked < budget:
-                        frame = stack[-1]
-                        node = frame[0]
-                        if node.idxs is not None:
-                            idxs = node.idxs
-                            if frame[2] != node.ver:
-                                if not retried:
-                                    frame[1] = len(idxs)-1
-                                    frame[2] = node.ver
-                                    retried = True
-                                else:
-                                    tree_ver = -1
-                                    break
-                            idx = len(idxs)-1 if frame[1] < 0 else frame[1]
-                            ev_leaf = False
-                            while idx >= 0 and checked < budget:
-                                s = idxs[idx]
-                                idx -= 1
-                                checked += 1
-                                if s < sweep_end and s != dom_slot and alive[s]:
-                                    if (hs[s] >= ah if std_geom else hs[s] > ah):
-                                        idx = -1
-                                        break
-                                    if _dominates_coords(ax, ay1, ay2, ah, arear, aerr,
-                                                         xs[s], y1s[s], y2s[s], hs[s], rears[s], errs[s]):
-                                        self._kill_slot(s)
-                                        self._cache_dom(dom_slot)
-                                        ev_leaf = True
-                            if ev_leaf and idx < 0:
-                                live_leaf = [i for i in idxs if alive[i]]
-                                if live_leaf:
-                                    node.idxs = array("I", live_leaf)
-                                    node.refresh_leaf(xs, y1s, hs, rears, errs)
-                                    node.ver += 1
-                            if idx < 0:
-                                stack.pop()
-                            else:
-                                frame[1] = idx
-                        else:
-                            stack.pop()
-                            checked += 1
-                            for c in node.children:
-                                if self._node_may_be_dominated(c, ax, ay1, ah, arear_lo, ax_lo, ax_hi, ay_lo, ay_hi, std_geom):
-                                    stack.append([c, len(c.idxs)-1 if c.idxs is not None else -1, c.ver])
-                    if tree_ver == self._tree_ver:
-                        if not stack:
-                            dp[dom_slot] = 0
-                            self._dom_sweep = None
-                            if checked == iter_start:
-                                checked += 1
-                        else:
-                            self._dom_sweep = (dom_slot, (stack, tree_ver, retried), sweep_end, h_cur, y2_cur, x_cur)
+                    stack = [[c, None] for c in root.children
+                             if c.min_slot < sweep_end and
+                             self._node_may_be_dominated(c, ax, ay1, ah, arear_lo, ax_lo, ax_hi, ay_lo, ay_hi, std_geom)]
+                    if not stack:
+                        dp[dom_slot] = 0
+                        self._dom_sweep = None
                         continue
-                pos = 0
-                h_cur, y2_cur, x_cur = ah, init_y2, init_x
+                self._dom_sweep = (dom_slot, stack, sweep_end)
                 if checked >= budget:
-                    self._dom_sweep = (dom_slot, 0, sweep_end, h_cur, y2_cur, x_cur)
                     break
-            if not blocks:
-                dp[dom_slot] = 0
-                self._dom_sweep = None
-                if checked == iter_start:
-                    checked += 1
-                continue
-            b_idx = bisect.bisect_left(blk_max, (h_cur, y2_cur, x_cur))
-            if b_idx == len(blocks):
-                b_idx -= 1
-            if b_idx >= 0 and (blocks[b_idx].h[0], blocks[b_idx].y2[0], blocks[b_idx].x[0]) >= (h_cur, y2_cur, x_cur):
-                b_idx -= 1
-            paused = False
-            while b_idx >= 0 and checked < budget:
-                blk = blocks[b_idx]
-                bh_arr = blk.h; by2_arr = blk.y2; bx_arr = blk.x
-                if blk.live_count == 0 or blk.min_slot >= sweep_end:
-                    checked += 1
-                    h_cur, y2_cur, x_cur = bh_arr[0], by2_arr[0], bx_arr[0]
-                    b_idx -= 1
-                    continue
-                bslots = blk.slots
-                end_i = (len(bh_arr)-1 if (bh_arr[-1], by2_arr[-1], bx_arr[-1]) < (h_cur, y2_cur, x_cur)
-                         else self._find_in_block(blk, h_cur, y2_cur, x_cur)-1)
-                if end_i < 0:
-                    b_idx -= 1
-                    continue
-                jumped = False
-                while end_i >= 0 and checked < budget:
-                    hb = bh_arr[end_i]
-                    h_lo = bisect.bisect_left(bh_arr, hb, 0, end_i+1)
-                    y2b = by2_arr[end_i]
-                    reach = OCCLUSION_TOP_DRIFT_HEIGHTS*(ah-hb)+max(1e-9, 16.0*math.ulp(max(abs(ax), abs(ay1), ah, 1.0)))
-                    if std_geom:
-                        y2_pad = 4.0*math.ulp(max(abs(ay1), abs(hb), abs(arear_lo), 1.0))
-                        y2_lo_b = ay1+hb-reach-y2_pad
-                        y2_hi_b = min(ay1+hb+reach, arear_lo+OCCLUSION_BOTTOM_SHARE*hb)+y2_pad
-                        if y2b > y2_hi_b:
-                            checked += 1
-                            hi_i = bisect.bisect_right(by2_arr, y2_hi_b, h_lo, end_i+1)-1
-                            if hi_i >= h_lo:
-                                h_cur, y2_cur, x_cur = hb, y2_hi_b, math.inf
-                                end_i = hi_i
-                                continue
-                            if h_lo > 0:
-                                h_cur, y2_cur, x_cur = hb, -math.inf, -math.inf
-                                end_i = h_lo-1
-                                continue
-                            h_cur, y2_cur, x_cur = hb, y2_hi_b, math.inf
-                            b_idx = min(b_idx-1, bisect.bisect_left(blk_max, (hb, y2_hi_b, math.inf)))
-                            jumped = True
-                            break
-                        if y2b < y2_lo_b:
-                            checked += 1
-                            h_cur, y2_cur, x_cur = hb, -math.inf, -math.inf
-                            if h_lo > 0:
-                                end_i = h_lo-1
-                                continue
-                            b_idx = min(b_idx-1, bisect.bisect_left(blk_max, (hb, -math.inf, -math.inf)))
-                            jumped = True
-                            break
-                    y_lo = bisect.bisect_left(by2_arr, y2b, h_lo, end_i+1)
-                    if std_geom and blk.rear[y_lo]+blk.err[y_lo] > arear_lo:
+            while stack and checked < budget:
+                frame = stack[-1]
+                node = frame[0]
+                if type(node) is _RNode:
+                    if (node.min_slot >= sweep_end or
+                            not self._node_may_be_dominated(node, ax, ay1, ah, arear_lo, ax_lo, ax_hi, ay_lo, ay_hi, std_geom)):
+                        stack.pop()
                         checked += 1
-                        h_cur, y2_cur, x_cur = hb, y2b, -math.inf
-                        if y_lo > 0:
-                            end_i = y_lo-1
-                            continue
-                        b_idx = min(b_idx-1, bisect.bisect_left(blk_max, (hb, y2b, -math.inf)))
-                        jumped = True
-                        break
-                    x_lo = bisect.bisect_left(bx_arr, ax-reach, y_lo, end_i+1)
-                    x_hi = bisect.bisect_right(bx_arr, ax+reach, x_lo, end_i+1)
-                    if x_lo >= x_hi:
+                        continue
+                    if node.idxs is None:
+                        stack.pop()
                         checked += 1
-                        if y_lo == 0 and x_lo == 0:
-                            x_jump = min(bx_arr[0], math.nextafter(ax+reach, math.inf))
-                            h_cur, y2_cur, x_cur = hb, y2b, x_jump
-                            b_idx = min(b_idx-1, bisect.bisect_left(blk_max, (hb, y2b, x_jump)))
-                            jumped = True
-                            break
-                        h_cur, y2_cur, x_cur = hb, y2b, -math.inf
-                        if y_lo > 0:
-                            end_i = y_lo-1
-                            continue
-                        b_idx = min(b_idx-1, bisect.bisect_left(blk_max, (hb, y2b, -math.inf)))
-                        jumped = True
-                        break
-                    k = x_hi-1
-                    while k >= x_lo and checked < budget:
-                        s = bslots[k]
+                        for c in node.children:
+                            if (c.min_slot < sweep_end and
+                                    self._node_may_be_dominated(c, ax, ay1, ah, arear_lo, ax_lo, ax_hi, ay_lo, ay_hi, std_geom)):
+                                stack.append([c, None])
+                        continue
+                    idxs = node.idxs
+                    idx = len(idxs)-1 if frame[1] is None else frame[1]
+                    if idx < 0:
+                        stack.pop()
+                        checked += 1
+                        continue
+                    ev_leaf = False
+                    while idx >= 0 and checked < budget:
+                        s = idxs[idx]
+                        idx -= 1
                         checked += 1
                         if s < sweep_end and s != dom_slot and alive[s]:
+                            if (hs[s] >= ah if std_geom else hs[s] > ah):
+                                idx = -1
+                                break
                             if _dominates_coords(ax, ay1, ay2, ah, arear, aerr,
                                                  xs[s], y1s[s], y2s[s], hs[s], rears[s], errs[s]):
                                 self._kill_slot(s)
                                 self._cache_dom(dom_slot)
-                        k -= 1
-                    while k >= x_lo and bx_arr[k] == bx_arr[k+1]:
-                        s = bslots[k]
-                        checked += 1
-                        if s < sweep_end and s != dom_slot and alive[s]:
-                            if _dominates_coords(ax, ay1, ay2, ah, arear, aerr,
-                                                 xs[s], y1s[s], y2s[s], hs[s], rears[s], errs[s]):
-                                self._kill_slot(s)
-                                self._cache_dom(dom_slot)
-                        k -= 1
-                    if k >= x_lo:
-                        h_cur, y2_cur, x_cur = hb, y2b, bx_arr[k+1]
-                        paused = True
-                        break
-                    if y_lo == 0 and x_lo == 0:
-                        if not std_geom:
-                            x0 = bx_arr[0]
-                            pb = b_idx-1
-                            while pb >= 0 and blk_max[pb] == (hb, y2b, x0):
-                                pblk = blocks[pb]
-                                pk = len(pblk.slots)-1
-                                while pk >= 0 and pblk.h[pk] == hb and pblk.y2[pk] == y2b and pblk.x[pk] == x0:
-                                    s = pblk.slots[pk]
-                                    checked += 1
-                                    if s < sweep_end and s != dom_slot and alive[s]:
-                                        if _dominates_coords(ax, ay1, ay2, ah, arear, aerr,
-                                                             xs[s], y1s[s], y2s[s], hs[s], rears[s], errs[s]):
-                                            self._kill_slot(s)
-                                            self._cache_dom(dom_slot)
-                                    pk -= 1
-                                pb -= 1
-                        h_cur, y2_cur, x_cur = hb, y2b, bx_arr[0]
-                        b_idx -= 1
-                        jumped = True
-                        break
-                    h_cur, y2_cur, x_cur = hb, y2b, -math.inf
-                    if y_lo > 0:
-                        end_i = y_lo-1
+                                ev_leaf = True
+                    if idx < 0:
+                        stack.pop()
+                        if ev_leaf:
+                            live_leaf = [i for i in idxs if alive[i]]
+                            if live_leaf:
+                                new_idxs = array("I", live_leaf)
+                                node.idxs = new_idxs
+                                node.refresh_leaf(xs, y1s, hs, rears, errs)
+                                self._on_leaf_compact(node, idxs, new_idxs)
                     else:
-                        b_idx = min(b_idx-1, bisect.bisect_left(blk_max, (hb, y2b, -math.inf)))
-                        jumped = True
-                        break
-                if paused:
-                    break
-                if not jumped and end_i < 0:
-                    b_idx -= 1
-            if not paused and b_idx < 0:
+                        frame[1] = idx
+                else:
+                    idx = frame[1]
+                    if idx < 0:
+                        stack.pop()
+                        checked += 1
+                        continue
+                    while idx >= 0 and checked < budget:
+                        s = node[idx]
+                        idx -= 1
+                        checked += 1
+                        if s < sweep_end and s != dom_slot and alive[s]:
+                            if _dominates_coords(ax, ay1, ay2, ah, arear, aerr,
+                                                 xs[s], y1s[s], y2s[s], hs[s], rears[s], errs[s]):
+                                self._kill_slot(s)
+                                self._cache_dom(dom_slot)
+                    if idx < 0:
+                        stack.pop()
+                    else:
+                        frame[1] = idx
+            if not stack:
                 dp[dom_slot] = 0
                 self._dom_sweep = None
                 if checked == iter_start:
                     checked += 1
-            else:
-                self._dom_sweep = (dom_slot, 0, sweep_end, h_cur, y2_cur, x_cur)
         return checked
 
     def _step_cover_probe(self, budget):
@@ -1222,7 +1160,6 @@ class _ClipBaselines:
             return 0
         alive = self._alive
         cp = self._cover_pending
-        blocks = self._blocks; blk_max = self._blk_max
         std_geom = self._std_geom
         xs, y1s, y2s, hs, rears, errs = self._x, self._y1, self._y2, self._h, self._rear, self._err
         checked = 0
@@ -1243,12 +1180,12 @@ class _ClipBaselines:
                         self._rebuild[0]._cover_pending[ns] = 0
                         self._rebuild[0]._cover_count -= 1
                 if alive[cand]:
-                    self._cover_probe = (cand, None, -1, math.inf, math.inf, math.inf, len(alive))
+                    self._cover_probe = (cand, None, len(alive))
                 else:
                     checked += 1
             if self._cover_probe is None:
                 break
-            cand, stack, tree_ver, h_cur, y2_cur, x_cur, probe_end = self._cover_probe
+            cand, stack, probe_end = self._cover_probe
             if cand < 0 or cand >= len(alive) or not alive[cand]:
                 self._cover_probe = None
                 if checked == iter_start:
@@ -1258,246 +1195,89 @@ class _ClipBaselines:
             brear_hi = brear+berr
             rb = OCCLUSION_TOP_DRIFT_HEIGHTS*bh
             bx_lo, bx_hi, by_lo, by_hi = bx-rb, bx+rb, by1-rb, by1+rb
-            if stack is None and h_cur == math.inf:
-                if not self._root_may_cover(bx, by1, bh, brear_hi, bx_lo, bx_hi, by_lo, by_hi, std_geom):
+            if stack is None:
+                root = self._root
+                if (root is None or root.min_slot >= probe_end or
+                        not self._node_may_cover(root, bx, by1, bh, brear_hi, bx_lo, bx_hi, by_lo, by_hi, std_geom)):
                     checked += 1
                     self._cover_probe = None
                     continue
-                if self._root is not None:
-                    stack = ([[self._root, 0, self._root.ver]], False)
-                    tree_ver = self._tree_ver
-            found = -1
-            if stack is not None:
-                if tree_ver == self._tree_ver:
-                    st_list, retried = stack
-                    while st_list and checked < budget:
-                        frame = st_list[-1]
-                        node = frame[0]
-                        if node.idxs is not None:
-                            idxs = node.idxs
-                            if frame[2] != node.ver:
-                                if not retried:
-                                    frame[1] = 0
-                                    frame[2] = node.ver
-                                    retried = True
-                                else:
-                                    tree_ver = -1
-                                    break
-                            idx = frame[1]
-                            n_idx = len(idxs)
-                            while idx < n_idx and checked < budget:
-                                s = idxs[idx]
-                                idx += 1
-                                checked += 1
-                                if s != cand and alive[s]:
-                                    if (hs[s] <= bh if std_geom else hs[s] < bh):
-                                        idx = n_idx
-                                        break
-                                    if _dominates_coords(xs[s], y1s[s], y2s[s], hs[s], rears[s], errs[s],
-                                                         bx, by1, by2, bh, brear, berr):
-                                        found = s
-                                        break
-                            frame[1] = idx
-                            if found >= 0:
-                                break
-                            if idx >= n_idx:
-                                st_list.pop()
-                        else:
-                            st_list.pop()
-                            checked += 1
-                            for c in node.children:
-                                if self._node_may_cover(c, bx, by1, bh, brear_hi, bx_lo, bx_hi, by_lo, by_hi, std_geom):
-                                    st_list.append([c, 0, c.ver])
-                    if found >= 0:
-                        self._kill_slot(cand)
+                if root.idxs is not None:
+                    stack = [[root, None]]
+                else:
+                    checked += 1
+                    stack = [[c, None] for c in root.children
+                             if c.min_slot < probe_end and
+                             self._node_may_cover(c, bx, by1, bh, brear_hi, bx_lo, bx_hi, by_lo, by_hi, std_geom)]
+                    if not stack:
                         self._cover_probe = None
-                        self._cache_dom(found)
-                        ah = hs[found]; ra = OCCLUSION_TOP_DRIFT_HEIGHTS*ah
-                        if self._cover_count > 0 and self.count > 1 and self._root_may_be_dominated(
-                                xs[found], y1s[found], ah, rears[found]-errs[found],
-                                xs[found]-ra, xs[found]+ra, y1s[found]-ra, y1s[found]+ra, std_geom):
-                            self._queue_dom_sweep(found, xs[found], y1s[found], y2s[found], ah, rears[found], errs[found])
                         continue
-                    if tree_ver == self._tree_ver:
-                        if not st_list:
-                            self._cover_probe = None
-                            if checked == iter_start:
-                                checked += 1
-                        else:
-                            self._cover_probe = (cand, (st_list, retried), tree_ver, h_cur, y2_cur, x_cur, probe_end)
-                        continue
-                stack = None
+                self._cover_probe = (cand, stack, probe_end)
                 if checked >= budget:
-                    self._cover_probe = (cand, None, -1, h_cur, y2_cur, x_cur, probe_end)
                     break
-            if not blocks:
-                self._cover_probe = None
-                if checked == iter_start:
-                    checked += 1
-                continue
-            if h_cur == math.inf:
-                b_idx = len(blocks)-1
-            else:
-                b_idx = bisect.bisect_left(blk_max, (h_cur, y2_cur, x_cur))
-                if b_idx == len(blocks):
-                    b_idx -= 1
-                if b_idx >= 0 and (blocks[b_idx].h[0], blocks[b_idx].y2[0], blocks[b_idx].x[0]) >= (h_cur, y2_cur, x_cur):
-                    b_idx -= 1
-            paused = False
-            while b_idx >= 0 and checked < budget:
-                blk = blocks[b_idx]
-                bh_arr = blk.h
-                if (bh_arr[-1] <= bh if std_geom else bh_arr[-1] < bh):
-                    checked += 1
-                    b_idx = -1
-                    break
-                by2_arr = blk.y2; bx_arr = blk.x
-                if blk.live_count == 0 or blk.min_slot >= probe_end:
-                    checked += 1
-                    h_cur, y2_cur, x_cur = bh_arr[0], by2_arr[0], bx_arr[0]
-                    b_idx -= 1
-                    continue
-                if blk.max_rear_hi >= brear_hi and blk.max_rear_slot >= 0 and not alive[blk.max_rear_slot]:
-                    blk.refresh_max_rear_hi(alive)
-                if blk.max_rear_hi < brear_hi:
-                    checked += 1
-                    h_cur, y2_cur, x_cur = bh_arr[0], by2_arr[0], bx_arr[0]
-                    b_idx -= 1
-                    continue
-                bslots = blk.slots
-                end_i = (len(bh_arr)-1 if (h_cur == math.inf or (bh_arr[-1], by2_arr[-1], bx_arr[-1]) < (h_cur, y2_cur, x_cur))
-                         else self._find_in_block(blk, h_cur, y2_cur, x_cur)-1)
-                if end_i < 0:
-                    b_idx -= 1
-                    continue
-                jumped = False
-                while end_i >= 0 and checked < budget:
-                    hd = bh_arr[end_i]
-                    if (hd <= bh if std_geom else hd < bh):
+            found = -1
+            while stack and checked < budget:
+                frame = stack[-1]
+                node = frame[0]
+                if type(node) is _RNode:
+                    if (node.min_slot >= probe_end or
+                            not self._node_may_cover(node, bx, by1, bh, brear_hi, bx_lo, bx_hi, by_lo, by_hi, std_geom)):
+                        stack.pop()
                         checked += 1
-                        b_idx = -1
-                        break
-                    h_lo = bisect.bisect_left(bh_arr, hd, 0, end_i+1)
-                    y2d = by2_arr[end_i]
-                    reach = OCCLUSION_TOP_DRIFT_HEIGHTS*(hd-bh)+max(1e-9, 16.0*math.ulp(max(abs(bx), abs(by1), hd, 1.0)))
-                    if std_geom:
-                        y2_pad = 4.0*math.ulp(max(abs(by1), abs(hd), abs(brear_hi), 1.0))
-                        y2_lo_b = max(by1+hd-reach, brear_hi+OCCLUSION_BOTTOM_SHARE*hd)-y2_pad
-                        y2_hi_b = by1+hd+reach+y2_pad
-                        if y2d > y2_hi_b:
-                            checked += 1
-                            hi_i = bisect.bisect_right(by2_arr, y2_hi_b, h_lo, end_i+1)-1
-                            if hi_i >= h_lo:
-                                h_cur, y2_cur, x_cur = hd, y2_hi_b, math.inf
-                                end_i = hi_i
-                                continue
-                            if h_lo > 0:
-                                h_cur, y2_cur, x_cur = hd, -math.inf, -math.inf
-                                end_i = h_lo-1
-                                continue
-                            h_cur, y2_cur, x_cur = hd, y2_hi_b, math.inf
-                            b_idx = min(b_idx-1, bisect.bisect_left(blk_max, (hd, y2_hi_b, math.inf)))
-                            jumped = True
-                            break
-                        if y2d < y2_lo_b:
-                            checked += 1
-                            h_cur, y2_cur, x_cur = hd, -math.inf, -math.inf
-                            if h_lo > 0:
-                                end_i = h_lo-1
-                                continue
-                            b_idx = min(b_idx-1, bisect.bisect_left(blk_max, (hd, -math.inf, -math.inf)))
-                            jumped = True
-                            break
-                    y_lo = bisect.bisect_left(by2_arr, y2d, h_lo, end_i+1)
-                    if std_geom and blk.rear[y_lo]-blk.err[y_lo] < brear_hi:
+                        continue
+                    if node.idxs is None:
+                        stack.pop()
                         checked += 1
-                        h_cur, y2_cur, x_cur = hd, y2d, -math.inf
-                        if y_lo > 0:
-                            end_i = y_lo-1
-                            continue
-                        b_idx = min(b_idx-1, bisect.bisect_left(blk_max, (hd, y2d, -math.inf)))
-                        jumped = True
-                        break
-                    x_lo = bisect.bisect_left(bx_arr, bx-reach, y_lo, end_i+1)
-                    x_hi = bisect.bisect_right(bx_arr, bx+reach, x_lo, end_i+1)
-                    if x_lo >= x_hi:
+                        for c in node.children:
+                            if (c.min_slot < probe_end and
+                                    self._node_may_cover(c, bx, by1, bh, brear_hi, bx_lo, bx_hi, by_lo, by_hi, std_geom)):
+                                stack.append([c, None])
+                        continue
+                    idxs = node.idxs
+                    idx = 0 if frame[1] is None else frame[1]
+                    n_idx = len(idxs)
+                    if idx >= n_idx:
+                        stack.pop()
                         checked += 1
-                        if y_lo == 0 and x_lo == 0:
-                            x_jump = min(bx_arr[0], math.nextafter(bx+reach, math.inf))
-                            h_cur, y2_cur, x_cur = hd, y2d, x_jump
-                            b_idx = min(b_idx-1, bisect.bisect_left(blk_max, (hd, y2d, x_jump)))
-                            jumped = True
-                            break
-                        h_cur, y2_cur, x_cur = hd, y2d, -math.inf
-                        if y_lo > 0:
-                            end_i = y_lo-1
-                            continue
-                        b_idx = min(b_idx-1, bisect.bisect_left(blk_max, (hd, y2d, -math.inf)))
-                        jumped = True
+                        continue
+                    while idx < n_idx and checked < budget:
+                        s = idxs[idx]
+                        idx += 1
+                        checked += 1
+                        if s < probe_end and s != cand and alive[s]:
+                            if (hs[s] <= bh if std_geom else hs[s] < bh):
+                                idx = n_idx
+                                break
+                            if _dominates_coords(xs[s], y1s[s], y2s[s], hs[s], rears[s], errs[s],
+                                                 bx, by1, by2, bh, brear, berr):
+                                found = s
+                                break
+                    frame[1] = idx
+                    if found >= 0:
                         break
-                    k = x_hi-1
-                    while k >= x_lo and checked < budget:
-                        s = bslots[k]
+                    if idx >= n_idx:
+                        stack.pop()
+                else:
+                    idx = frame[1]
+                    n_idx = len(node)
+                    if idx >= n_idx:
+                        stack.pop()
+                        checked += 1
+                        continue
+                    while idx < n_idx and checked < budget:
+                        s = node[idx]
+                        idx += 1
                         checked += 1
                         if s < probe_end and s != cand and alive[s]:
                             if _dominates_coords(xs[s], y1s[s], y2s[s], hs[s], rears[s], errs[s],
                                                  bx, by1, by2, bh, brear, berr):
                                 found = s
                                 break
-                        k -= 1
+                    frame[1] = idx
                     if found >= 0:
                         break
-                    while k >= x_lo and bx_arr[k] == bx_arr[k+1]:
-                        s = bslots[k]
-                        checked += 1
-                        if s < probe_end and s != cand and alive[s]:
-                            if _dominates_coords(xs[s], y1s[s], y2s[s], hs[s], rears[s], errs[s],
-                                                 bx, by1, by2, bh, brear, berr):
-                                found = s
-                                break
-                        k -= 1
-                    if found >= 0:
-                        break
-                    if k >= x_lo:
-                        h_cur, y2_cur, x_cur = hd, y2d, bx_arr[k+1]
-                        paused = True
-                        break
-                    if y_lo == 0 and x_lo == 0:
-                        if not std_geom:
-                            x0 = bx_arr[0]
-                            pb = b_idx-1
-                            while pb >= 0 and blk_max[pb] == (hd, y2d, x0):
-                                pblk = blocks[pb]
-                                pk = len(pblk.slots)-1
-                                while pk >= 0 and pblk.h[pk] == hd and pblk.y2[pk] == y2d and pblk.x[pk] == x0:
-                                    s = pblk.slots[pk]
-                                    checked += 1
-                                    if s < probe_end and s != cand and alive[s]:
-                                        if _dominates_coords(xs[s], y1s[s], y2s[s], hs[s], rears[s], errs[s],
-                                                             bx, by1, by2, bh, brear, berr):
-                                            found = s
-                                            break
-                                    pk -= 1
-                                if found >= 0:
-                                    break
-                                pb -= 1
-                            if found >= 0:
-                                break
-                        h_cur, y2_cur, x_cur = hd, y2d, bx_arr[0]
-                        b_idx -= 1
-                        jumped = True
-                        break
-                    h_cur, y2_cur, x_cur = hd, y2d, -math.inf
-                    if y_lo > 0:
-                        end_i = y_lo-1
-                    else:
-                        b_idx = min(b_idx-1, bisect.bisect_left(blk_max, (hd, y2d, -math.inf)))
-                        jumped = True
-                        break
-                if found >= 0 or paused or b_idx < 0:
-                    break
-                if not jumped and end_i < 0:
-                    b_idx -= 1
+                    if idx >= n_idx:
+                        stack.pop()
             if found >= 0:
                 self._kill_slot(cand)
                 self._cover_probe = None
@@ -1507,14 +1287,11 @@ class _ClipBaselines:
                         xs[found], y1s[found], ah, rears[found]-errs[found],
                         xs[found]-ra, xs[found]+ra, y1s[found]-ra, y1s[found]+ra, std_geom):
                     self._queue_dom_sweep(found, xs[found], y1s[found], y2s[found], ah, rears[found], errs[found])
-            elif not paused and b_idx < 0:
+            elif not stack:
                 self._cover_probe = None
                 if checked == iter_start:
                     checked += 1
-            else:
-                self._cover_probe = (cand, None, -1, h_cur, y2_cur, x_cur, probe_end)
         return checked
-
     def step_dom_sweep(self, budget):
         if budget <= 0:
             return 0
@@ -1600,7 +1377,7 @@ class _ClipBaselines:
                 self._rebuild = None
         return True
 
-    def _is_covered(self, node, bx, by1, by2, bh, brear, berr, rb, bx_lo, bx_hi, by_lo, by_hi, brear_hi, budget, std_geom=True):
+    def _is_covered(self, node, bx, by1, by2, bh, brear, berr, rb, bx_lo, bx_hi, by_lo, by_hi, brear_hi, budget, std_geom=True, queue_dom=True):
         if (node is None or budget[0] <= 0 or (node.max_h <= bh if std_geom else node.max_h < bh) or
                 node.max_rear_lo < brear_hi or
                 node.min_x_lo > bx_lo or node.max_x_hi < bx_hi or
@@ -1621,7 +1398,7 @@ class _ClipBaselines:
                                          bx, by1, by2, bh, brear, berr):
                         was_hot = i in self._dom_cache
                         self._cache_dom(i)
-                        if not was_hot and self.count > 1:
+                        if queue_dom and not was_hot and self.count > 1:
                             ah = hs[i]; ra = OCCLUSION_TOP_DRIFT_HEIGHTS*ah
                             if self._root_may_be_dominated(xs[i], y1s[i], ah, rears[i]-errs[i],
                                                            xs[i]-ra, xs[i]+ra, y1s[i]-ra, y1s[i]+ra, self._std_geom):
@@ -1634,7 +1411,7 @@ class _ClipBaselines:
         if budget[0] <= 0:
             return False
         for child in node.children:
-            if self._is_covered(child, bx, by1, by2, bh, brear, berr, rb, bx_lo, bx_hi, by_lo, by_hi, brear_hi, budget, std_geom):
+            if self._is_covered(child, bx, by1, by2, bh, brear, berr, rb, bx_lo, bx_hi, by_lo, by_hi, brear_hi, budget, std_geom, queue_dom):
                 return True
             if budget[0] <= 0:
                 return False
@@ -1693,9 +1470,14 @@ class _ClipBaselines:
             if not removed:
                 return node, False, False
             if not kept:
+                empty = array("I")
+                node.idxs = empty
+                node.refresh_leaf(xs, y1s, hs, rears, errs)
+                self._on_leaf_compact(node, idx_list, empty)
                 return None, True, evicted
             node.idxs = kept
             node.refresh_leaf(xs, y1s, hs, rears, errs)
+            self._on_leaf_compact(node, idx_list, kept)
             return node, True, evicted
         budget[0] -= 1
         kept_children = []
@@ -1726,13 +1508,13 @@ class _ClipBaselines:
     def _rtree_insert(self, idx, bx, by1, bh, brear, berr):
         if self._root is None:
             node = _RNode(idxs=array("I", (idx,)))
-            node.include_point(bx, by1, bh, brear, berr)
+            node.include_point(idx, bx, by1, bh, brear, berr)
             self._root = node
             return
         path = []
         node = self._root
         while node.idxs is None:
-            node.include_point(bx, by1, bh, brear, berr)
+            node.include_point(idx, bx, by1, bh, brear, berr)
             best_c = None
             best_enl = math.inf
             best_perim = math.inf
@@ -1755,23 +1537,21 @@ class _ClipBaselines:
         while k > 0 and hs[idxs[k-1]] < bh:
             k -= 1
         idxs.insert(k, idx)
-        if k < len(idxs)-1:
-            node.ver += 1
-        node.include_point(bx, by1, bh, brear, berr)
+        self._on_leaf_insert(node, k)
+        node.include_point(idx, bx, by1, bh, brear, berr)
         if len(idxs) <= _R_LEAF_MAX:
             return
         alive = self._alive
         xs, y1s, rears, errs = self._x, self._y1, self._rear, self._err
         live_leaf = [i for i in idxs if alive[i]]
         if len(live_leaf) <= _R_LEAF_MAX:
-            node.idxs = array("I", live_leaf)
+            new_idxs = array("I", live_leaf)
+            node.idxs = new_idxs
             node.refresh_leaf(xs, y1s, hs, rears, errs)
-            node.ver += 1
+            self._on_leaf_compact(node, idxs, new_idxs)
             for anc in reversed(path):
                 anc.refresh_internal()
             return
-        self._tree_ver += 1
-        node.ver += 1
         if (node.max_x-node.min_x) >= (node.max_y-node.min_y):
             live_leaf.sort(key=lambda i: (xs[i], y1s[i]))
         else:
@@ -1783,6 +1563,7 @@ class _ClipBaselines:
         node.refresh_leaf(xs, y1s, hs, rears, errs)
         sibling = _RNode(idxs=array("I", right_ids))
         sibling.refresh_leaf(xs, y1s, hs, rears, errs)
+        self._on_leaf_split(node, sibling, idxs)
         while path:
             parent = path.pop()
             parent.children.append(sibling)
@@ -1798,6 +1579,7 @@ class _ClipBaselines:
             parent.refresh_internal()
             sibling = _RNode(children=ch[cmid:])
             sibling.refresh_internal()
+            self._on_internal_split(parent, sibling)
         new_root = _RNode(children=[self._root, sibling])
         new_root.refresh_internal()
         self._root = new_root
@@ -1856,18 +1638,17 @@ class _ClipBaselines:
         std_q = self._std_geom and by1 == by2-bh and brear == by2-OCCLUSION_BOTTOM_SHARE*bh and berr == _rear_err(by2, bh)
         may_be_covered = self._root_may_cover(bx, by1, bh, brear_hi, bx_lo, bx_hi, by_lo, by_hi, std_q)
         if may_be_covered and dom_budget[0] > 0 and self._is_covered(
-                self._root, bx, by1, by2, bh, brear, berr, rb, bx_lo, bx_hi, by_lo, by_hi, brear_hi, dom_budget, std_q):
+                self._root, bx, by1, by2, bh, brear, berr, rb, bx_lo, bx_hi, by_lo, by_hi, brear_hi, dom_budget,
+                std_q, queue_dom=(self._cover_count > 0 or self._cover_probe is not None)):
             if compact:
                 self.maybe_compact()
             return
         cover_exhausted = may_be_covered and dom_budget[0] <= 0
         could_evict = self._root_may_be_dominated(bx, by1, bh, brear-berr, bx_lo, bx_hi, by_lo, by_hi, std_q)
         if could_evict and dom_budget[0] > 0:
-            self._root, chg, _ = self._evict_dominated(self._root, bx, by1, by2, bh, brear, berr,
-                                                       bx_lo, bx_hi, by_lo, by_hi, brear-berr, dom_budget,
-                                                       std_geom=std_q)
-            if chg:
-                self._tree_ver += 1
+            self._root, _, _ = self._evict_dominated(self._root, bx, by1, by2, bh, brear, berr,
+                                                     bx_lo, bx_hi, by_lo, by_hi, brear-berr, dom_budget,
+                                                     std_geom=std_q)
             while self._root is not None and self._root.idxs is None and len(self._root.children) == 1:
                 self._root = self._root.children[0]
             if self.count == 0:

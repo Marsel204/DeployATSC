@@ -2019,7 +2019,7 @@ def test_sustained_stationary_jitter_per_frame_cost_stays_bounded():
     cb_p1.prune(165.4, 216.)  # kills first 160 slots, leaving 4 live slots (160..163)
     assert len(cb_p1) == 4 and cb_p1.needs_compact()
     # Keep a dummy active sweep on slot 162 so covered() appends slot 161 to _dom_queue during Phase 1.
-    cb_p1._dom_sweep = (162, -2, len(cb_p1._alive), 0.0, 0.0, 0.0)
+    cb_p1._dom_sweep = (162, -2, len(cb_p1._alive))
     cb_p1._dom_pending[162] = 1
     cb_p1.maybe_compact(1)  # copies slot 160 only; slot 161 is not mapped yet!
     assert cb_p1._rebuild is not None and 161 not in cb_p1._rebuild[3]
@@ -2263,6 +2263,46 @@ def test_sustained_stationary_jitter_per_frame_cost_stays_bounded():
     while cb_syn.has_dom_sweep():
         cb_syn.step_dom_sweep(1)
     assert len(cb_syn) == 2 and cb_syn._alive[0] == 0 and cb_syn._alive[1] == 1 and cb_syn._alive[2] == 1
+
+    # Sol Round 27:
+    # 1. Combined 2D (8x4) x/y grid + 32 distinct heights + drifting short height across 64 tracks
+    #    stays inside split-safe R-tree DFS without accumulating dominated shorter baselines.
+    waits_grid = book(side=lambda p: 270.-p[1])
+    seq_g = 0
+    for a in range(32):
+        for _ in range(2):
+            y1_a = 220.+0.35*(a//8); h_a = 61.+0.015*a
+            obs = [car(1+k, y1_a+h_a, x=150.+24.*k+0.35*(a % 8), height=h_a, speed=0.) for k in range(64)]
+            waits_grid.observe(obs, 'RED', seq_g/FPS, seq_g+1, 1, unassigned=()); seq_g += 1
+    for f in range(1000):
+        a = f % 32
+        y1_f = 220.+0.35*(a//8); h_f = 60.-1e-5*f
+        obs = [car(1+k, y1_f+h_f, x=150.+24.*k+0.35*(a % 8)+1e-5*(f+1), height=h_f, speed=0.) for k in range(64)]
+        waits_grid.observe(obs, 'RED', seq_g/FPS, seq_g+1, 1, unassigned=()); seq_g += 1
+    live_g = sorted(len(waits_grid.active[(0, 1+k)]['clip_baselines']) for k in range(64))
+    assert live_g[32] <= 64, f'64-track 2D+height grid median live {live_g[32]} grew unbounded'
+
+    # 2. Equal-key synthetic scans (513 tuples with identical x, y2, h) strictly obey budget=1
+    #    for BOTH evict sweeps and cover probes even across R-tree splits.
+    cb_eqev = _ClipBaselines()
+    for i in range(513):
+        cb_eqev.add((0., i*1e-6, 60., 60., 42., 1e-12), compact=False, dom_budget=[0])
+    cb_eqev.add((0., 0., 61., 61., 50., 1e-12), compact=False, dom_budget=[0])
+    assert cb_eqev.step_dom_sweep(1) == 1
+    for i in range(4):
+        cb_eqev.add((100.+10.*i, 200., 275., 75., 0., 1e-12), compact=False, dom_budget=[0])
+    assert cb_eqev.step_dom_sweep(1) <= 1
+    assert cb_eqev.step_dom_sweep(1) <= 1
+    cb_eqcv = _ClipBaselines()
+    for i in range(513):
+        cb_eqcv.add((0., i*1e-6, 61., 61., 50., 1e-12), compact=False, dom_budget=[0])
+    cb_eqcv.add((0., 10.0, 60., 60., 42., 1e-12), compact=False, dom_budget=[0])
+    cb_eqcv._queue_cover_probe(513)
+    assert cb_eqcv.step_dom_sweep(1) == 1
+    for i in range(4):
+        cb_eqcv.add((100.+10.*i, 200., 275., 75., 0., 1e-12), compact=False, dom_budget=[0])
+    assert cb_eqcv.step_dom_sweep(1) <= 1
+    assert cb_eqcv.step_dom_sweep(1) <= 1
 
 
 def test_missed_frame_clears_crossing_clip_evidence_but_preserves_fragment_history():
