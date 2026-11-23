@@ -492,3 +492,59 @@ def test_observation_start_rejects_overflowing_exit_persistence_int_with_422(vid
             assert response.status_code == 422, response.text
     if manager.current:
         manager.current.stop()
+
+
+@pytest.mark.parametrize('policy_extra', [
+    {'fragment_continuation': True},
+    {'exit_persistence_sec': 0.3},
+])
+def test_session_exact_max_gap_replay_preserves_detector_velocity_and_red_wait(video_factory, tmp_path, policy_extra):
+    """Sol Round 31: five 10 fps RED frames with max_gap_sec=0.1 (where 0.30000000000000004 - 0.2 > 0.1)
+    must not reset DetectorTracker velocity history when either native option is enabled, preserving
+    STOPPED state and red_wait_sec=0.2 (matching max_gap_sec=0.100000001)."""
+    import cv2
+    import numpy as np
+    from src.perception.detector_tracker import DetectorTracker
+
+    red_path = tmp_path/'red_10fps.avi'
+    writer = cv2.VideoWriter(str(red_path), cv2.VideoWriter_fourcc(*'MJPG'), 10.0, (320, 240))
+    frame = np.full((240, 320, 3), (0, 0, 255), np.uint8)
+    for _ in range(8):
+        writer.write(frame)
+    writer.release()
+
+    class StationaryRealVelocityDetector(ScriptedDetector):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.track_obs_counts = {}
+            self.max_history_len = 10
+            self.last_seen_timestamp = 0.0
+            self.max_gap_sec = 5.0
+            self.gap_tolerance = 0.0
+        def track(self, frames, timestamp=None):
+            bbox = [86., 120., 114., 150.]
+            v = TrackedVehicle(1, 2, 'car', bbox, .9, timestamp, obs_count=1, epoch=self.epoch)
+            v.source_bbox = tuple(bbox)
+            return [TrackedFrame([v], withheld=(), epoch=self.epoch) for _ in frames]
+        def update_velocities(self, vehicles, project, timestamp=None):
+            DetectorTracker.update_velocities(self, vehicles, project, timestamp=timestamp)
+
+    settings = run_payload(video_factory)
+    settings['system']['source'] = str(red_path)
+    settings['acquisition']['source'] = str(red_path)
+    settings['shared_test'] = True
+    settings['policy'] = {'debounce_frames': 1, 'stop_persistence_sec': 0.0, 'max_gap_sec': 0.1, **policy_extra}
+    class Manual(ObservationSession):
+        def _worker(self):self.ready.set()
+    session = Manual(settings, tmp_path/f"gap10-{list(policy_extra)[0]}",
+                     detector_factory=StationaryRealVelocityDetector, anfis_factory=FakeANFIS)
+    try:
+        assert session.detectors['acquisition'].max_gap_sec == 0.1
+        for _ in range(5):
+            session._process_batch()
+        row = next(iter(session.engine.waits.records.values()))
+        assert row['tracking_state'] == 'STOPPED'
+        assert row['red_wait_sec'] == pytest.approx(0.2, abs=1e-6)
+        assert row['unknown_sec'] == pytest.approx(0.2, abs=1e-6)
+    finally:
+        session.state = session.applied_state = 'stopped'; session._cleanup()

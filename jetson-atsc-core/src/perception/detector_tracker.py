@@ -296,6 +296,7 @@ class DetectorTracker:
         self.imgsz = imgsz
         self.device = device
         self.max_gap_sec = max_gap_sec
+        self.gap_tolerance = 0.0
         self.set_tracking_profile(tracking_profile)
 
         self.is_tensorrt: bool = str(model_path).endswith(".engine")
@@ -679,7 +680,8 @@ class DetectorTracker:
                 continue
             # Check on return as well as during pruning: no update may have run
             # during the gap. All continuity decisions use source timestamps.
-            if traj and v.timestamp-traj[-1][0] > getattr(self,"max_gap_sec",5.0):
+            gap_limit = getattr(self,"max_gap_sec",5.0)+getattr(self,"gap_tolerance",0.0)
+            if traj and v.timestamp-traj[-1][0] > gap_limit:
                 traj.clear()
                 self.track_obs_counts.pop(v.track_id, None)
             traj.append((v.timestamp, gx, gy))
@@ -707,8 +709,9 @@ class DetectorTracker:
                 v.velocity_mps = 0.0
 
         # Prune using the same source-time continuity policy as returning tracks.
+        gap_limit = getattr(self,"max_gap_sec",5.0)+getattr(self,"gap_tolerance",0.0)
         for tid in list(self.track_trajectories.keys()):
             if tid not in active_ids:
-                if self.track_trajectories[tid] and (ref_time - self.track_trajectories[tid][-1][0] > getattr(self,"max_gap_sec",5.0)):
+                if self.track_trajectories[tid] and (ref_time - self.track_trajectories[tid][-1][0] > gap_limit):
                     del self.track_trajectories[tid]
                     self.track_obs_counts.pop(tid, None)

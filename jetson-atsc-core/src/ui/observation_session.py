@@ -224,8 +224,13 @@ class ObservationSession:
             model=Path(self.model_selection["path"]);anfis=ROOT/"models/anfis_sugeno.onnx"
             for role in self.calibrations:
                 self.detectors[role]=detector_factory(str(model),conf_threshold=.28,imgsz=640)
+            gap_tol=(min(1e-9,1e-6*self.policy.max_gap_sec)
+                     if (self.identity_features is None and
+                         (self.policy.fragment_continuation or self.policy.exit_persistence_sec>0))
+                     else 0.0)
             for role in self.detectors:
                 self.detectors[role].max_gap_sec=self.policy.max_gap_sec
+                self.detectors[role].gap_tolerance=gap_tol
             # Withheld-detection capture is opt-in: only native fragment continuation
             # uses it (persistent identity never continues fragments), so no other run pays for it.
             if self.fragment_continuation:
