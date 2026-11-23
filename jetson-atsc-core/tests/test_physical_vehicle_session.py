@@ -612,3 +612,82 @@ def test_session_accepts_slotted_custom_detector_with_readonly_gap_tolerance(vid
         assert session.detectors['acquisition'].gap_tolerance == 0.0
     finally:
         session.state = session.applied_state = 'stopped'; session._cleanup()
+
+
+@pytest.mark.parametrize('policy_extra', [
+    {'exit_persistence_sec': 0.3},
+    {'fragment_continuation': True, 'exit_persistence_sec': 0.3},
+])
+def test_session_malformed_outside_box_matches_missing_frame_for_exit_and_red_wait(video_factory, tmp_path, policy_extra):
+    """Sol Round 34:
+    1. With exit_persistence_sec=0.3 alone (fragment_continuation=False), a malformed zero-width
+       outside box at the exit confirmation frame must not confirm EXITED or split the return into :segment-1.
+    2. With either exit_persistence_sec alone or both options enabled and real DetectorTracker velocity
+       tracking, a malformed outside box must not enter velocity history, preserving exact red_wait_sec
+       equal to omitting that frame."""
+    import cv2
+    import numpy as np
+    from src.perception.detector_tracker import DetectorTracker
+
+    red_path = tmp_path/'red_10fps_bad_outside.avi'
+    writer = cv2.VideoWriter(str(red_path), cv2.VideoWriter_fourcc(*'MJPG'), 10.0, (320, 240))
+    frame = np.full((240, 320, 3), (0, 0, 255), np.uint8)
+    for _ in range(20):
+        writer.write(frame)
+    writer.release()
+
+    def run_variant(mode):
+        class RealVelocityVariantDetector(ScriptedDetector):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.track_obs_counts = {}
+                self.max_history_len = 10
+                self.last_seen_timestamp = 0.0
+                self.max_gap_sec = 5.0
+                self.gap_tolerance = 0.0
+            def track(self, frames, timestamp=None):
+                idx = round(timestamp * 10.0)
+                if idx in (0, 1) or idx >= 6:
+                    # Inside approach ROI, stationary
+                    bbox = [86., 120., 114., 150.]
+                elif idx in (2, 3, 4):
+                    # Valid box outside approach ROI
+                    bbox = [10., 30., 20., 60.]
+                elif idx == 5:
+                    if mode == 'missing':
+                        return [TrackedFrame([], withheld=(), epoch=self.epoch) for _ in frames]
+                    # Malformed zero-width box outside approach ROI
+                    bbox = [15., 30., 15., 60.]
+                else:
+                    return [TrackedFrame([], withheld=(), epoch=self.epoch) for _ in frames]
+                v = TrackedVehicle(1, 2, 'car', bbox, .9, timestamp, obs_count=6, epoch=self.epoch)
+                v.source_bbox = tuple(bbox)
+                return [TrackedFrame([v], withheld=(), epoch=self.epoch) for _ in frames]
+            def update_velocities(self, vehicles, project, timestamp=None):
+                DetectorTracker.update_velocities(self, vehicles, project, timestamp=timestamp)
+
+        settings = run_payload(video_factory)
+        settings['system']['source'] = str(red_path)
+        settings['acquisition']['source'] = str(red_path)
+        settings['shared_test'] = True
+        settings['policy'] = {'debounce_frames': 1, 'stop_persistence_sec': 0.0, **policy_extra}
+        class Manual(ObservationSession):
+            def _worker(self):self.ready.set()
+        session = Manual(settings, tmp_path/f"badout-{len(policy_extra)}-{mode}",
+                         detector_factory=RealVelocityVariantDetector, anfis_factory=FakeANFIS)
+        try:
+            for _ in range(18):
+                session._process_batch()
+            return session.engine.waits.rows(limit=10)
+        finally:
+            session.state = session.applied_state = 'stopped'; session._cleanup()
+
+    rows_missing = run_variant('missing')
+    rows_bad = run_variant('malformed')
+    assert len(rows_missing) == 1 and len(rows_bad) == 1
+    row_missing, row_bad = rows_missing[0], rows_bad[0]
+    assert not row_bad['completed'] and not row_missing['completed']
+    assert row_bad['tracking_state'] == row_missing['tracking_state'] == 'STOPPED'
+    assert row_bad['red_wait_sec'] > 0.5
+    assert row_bad['red_wait_sec'] == pytest.approx(row_missing['red_wait_sec'], abs=1e-9)
+    assert row_bad['unknown_sec'] == pytest.approx(row_missing['unknown_sec'], abs=1e-9)

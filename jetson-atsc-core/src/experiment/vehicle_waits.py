@@ -304,7 +304,9 @@ class _RNode:
 
 
 _BBLOCK_MAX = 512
-_HBLOCK_MAX = 256
+_HBLOCK_MAX = 64
+_HNODE_MAX = 16
+_HPOS_DEAD = 0xFFFF
 
 
 _FIFO_BIAS = 1 << 31
@@ -463,7 +465,7 @@ class _BoundBlocks:
             blocks.insert(b_idx+1, right)
             max_vals.insert(b_idx+1, right[0][-1])
 
-    def pop_below(self, threshold, alive, slot_blk, dom_pending, cover_pending):
+    def pop_below(self, threshold, alive, slot_blk, dom_pending, cover_pending, rears, errs, hpos):
         blocks = self.blocks; max_vals = self.max_vals
         if not blocks or blocks[0][0][0] >= threshold:
             return 0, 0
@@ -474,7 +476,7 @@ class _BoundBlocks:
                 for s in blocks[b_i][1]:
                     if alive[s]:
                         alive[s] = 0
-                        slot_blk[s].live_count -= 1
+                        slot_blk[s].heap_remove(s, rears, errs, hpos)
                         dom_pending[s] = 0
                         if cover_pending[s]:
                             cover_pending[s] = 0
@@ -488,7 +490,7 @@ class _BoundBlocks:
                 s = slots[j]
                 if alive[s]:
                     alive[s] = 0
-                    slot_blk[s].live_count -= 1
+                    slot_blk[s].heap_remove(s, rears, errs, hpos)
                     dom_pending[s] = 0
                     if cover_pending[s]:
                         cover_pending[s] = 0
@@ -501,39 +503,172 @@ class _BoundBlocks:
         return killed, cov_killed
 
 
+def _h_propagate_rear_up(node, val):
+    while node is not None and val > node.max_rear_hi:
+        node.max_rear_hi = val
+        node = node.parent
+
+
+def _h_propagate_rear_down(node, old_val):
+    while node is not None and node.max_rear_hi == old_val:
+        m = -math.inf
+        for c in node.children:
+            v = c.max_rear_hi
+            if v > m:
+                m = v
+        if m == old_val:
+            return
+        node.max_rear_hi = m
+        node = node.parent
+
+
 class _HBlock:
-    __slots__ = ("h", "y2", "x", "rear", "err", "slots", "max_rear_hi", "max_rear_slot", "live_count")
+    __slots__ = ("h", "y2", "x", "rear", "err", "slots",
+                 "rear_heap", "max_rear_hi", "live_count", "parent", "next_blk")
 
     def __init__(self, h=None, y2=None, x=None, rear=None, err=None, slots=None,
-                 max_rear_hi=-math.inf, max_rear_slot=-1, live_count=0):
+                 rear_heap=None, max_rear_hi=-math.inf, live_count=0, parent=None, next_blk=None):
         self.h = array("d") if h is None else h
         self.y2 = array("d") if y2 is None else y2
         self.x = array("d") if x is None else x
         self.rear = array("d") if rear is None else rear
         self.err = array("d") if err is None else err
         self.slots = array("I") if slots is None else slots
+        self.rear_heap = array("I") if rear_heap is None else rear_heap
         self.max_rear_hi = max_rear_hi
-        self.max_rear_slot = max_rear_slot
         self.live_count = live_count
+        self.parent = parent
+        self.next_blk = next_blk
 
-    def refresh_max_rear_hi(self, alive=None):
-        m = -math.inf
-        ms = -1
-        rear = self.rear; err = self.err; slots = self.slots
-        if alive is None:
-            for i in range(len(rear)):
-                v = rear[i]+err[i]
-                if v > m:
-                    m = v; ms = slots[i]
+    def heap_push(self, slot, rears, errs, hpos):
+        heap = self.rear_heap
+        pos = len(heap)
+        heap.append(slot)
+        val = rears[slot]+errs[slot]
+        while pos > 0:
+            p = (pos-1) >> 1
+            ps = heap[p]
+            if rears[ps]+errs[ps] >= val:
+                break
+            heap[pos] = ps
+            hpos[ps] = pos
+            pos = p
+        heap[pos] = slot
+        hpos[slot] = pos
+        self.live_count = len(heap)
+        if pos == 0:
+            old = self.max_rear_hi
+            self.max_rear_hi = val
+            if val > old:
+                _h_propagate_rear_up(self.parent, val)
+
+    def heap_remove(self, slot, rears, errs, hpos):
+        heap = self.rear_heap
+        pos = hpos[slot]
+        hpos[slot] = _HPOS_DEAD
+        was_root = (pos == 0)
+        last_idx = len(heap)-1
+        last = heap.pop()
+        self.live_count = last_idx
+        if pos < last_idx:
+            val = rears[last]+errs[last]
+            sifted_up = False
+            if pos > 0:
+                p = (pos-1) >> 1
+                ps = heap[p]
+                if val > rears[ps]+errs[ps]:
+                    while pos > 0:
+                        p = (pos-1) >> 1
+                        ps = heap[p]
+                        if rears[ps]+errs[ps] >= val:
+                            break
+                        heap[pos] = ps
+                        hpos[ps] = pos
+                        pos = p
+                    heap[pos] = last
+                    hpos[last] = pos
+                    sifted_up = True
+            if not sifted_up:
+                n = last_idx
+                while True:
+                    l = (pos << 1)+1
+                    if l >= n:
+                        break
+                    r = l+1
+                    best = l; best_s = heap[l]; best_v = rears[best_s]+errs[best_s]
+                    if r < n:
+                        rs = heap[r]; rv = rears[rs]+errs[rs]
+                        if rv > best_v:
+                            best = r; best_s = rs; best_v = rv
+                    if val >= best_v:
+                        break
+                    heap[pos] = best_s
+                    hpos[best_s] = pos
+                    pos = best
+                heap[pos] = last
+                hpos[last] = pos
+        if was_root:
+            old = self.max_rear_hi
+            new_max = (rears[heap[0]]+errs[heap[0]]) if last_idx > 0 else -math.inf
+            self.max_rear_hi = new_max
+            if new_max < old:
+                _h_propagate_rear_down(self.parent, old)
+
+    def heap_rebuild(self, alive, rears, errs, hpos):
+        heap = array("I", (s for s in self.slots if alive[s]))
+        n = len(heap)
+        for start in range((n >> 1)-1, -1, -1):
+            pos = start
+            s = heap[pos]
+            val = rears[s]+errs[s]
+            while True:
+                l = (pos << 1)+1
+                if l >= n:
+                    break
+                r = l+1
+                best = l; best_s = heap[l]; best_v = rears[best_s]+errs[best_s]
+                if r < n:
+                    rs = heap[r]; rv = rears[rs]+errs[rs]
+                    if rv > best_v:
+                        best = r; best_s = rs; best_v = rv
+                if val >= best_v:
+                    break
+                heap[pos] = best_s
+                pos = best
+            heap[pos] = s
+        for idx, s in enumerate(heap):
+            hpos[s] = idx
+        self.rear_heap = heap
+        self.live_count = n
+        self.max_rear_hi = (rears[heap[0]]+errs[heap[0]]) if n > 0 else -math.inf
+
+
+class _HNode:
+    __slots__ = ("children", "parent", "max_rear_hi", "min_h", "max_h", "max_y2", "max_x")
+
+    def __init__(self, children, parent=None):
+        self.children = children
+        self.parent = parent
+        self.max_rear_hi = -math.inf
+        self.min_h = math.inf
+        self.max_h = self.max_y2 = self.max_x = -math.inf
+        self.refresh()
+
+    def refresh(self):
+        ch = self.children
+        c0 = ch[0]; c1 = ch[-1]
+        self.min_h = c0.h[0] if type(c0) is _HBlock else c0.min_h
+        if type(c1) is _HBlock:
+            self.max_h = c1.h[-1]; self.max_y2 = c1.y2[-1]; self.max_x = c1.x[-1]
         else:
-            for i in range(len(rear)):
-                s = slots[i]
-                if alive[s]:
-                    v = rear[i]+err[i]
-                    if v > m:
-                        m = v; ms = s
+            self.max_h = c1.max_h; self.max_y2 = c1.max_y2; self.max_x = c1.max_x
+        m = -math.inf
+        for c in ch:
+            c.parent = self
+            v = c.max_rear_hi
+            if v > m:
+                m = v
         self.max_rear_hi = m
-        self.max_rear_slot = ms
 
 
 class _ClipBaselines:
@@ -542,19 +677,20 @@ class _ClipBaselines:
     - Baselines live in contiguous ``array('d')`` columns plus a 1-byte ``_alive``
       bitmap (minimal memory and O(1) teardown).
     - Four ``_BoundBlocks`` boundary indexes perform O(1) stationary drift checks,
-      O(1) whole-track eviction, and O(k) bulk-prefix partial pruning without
+      O(1) whole-track eviction, and O(k log N) bulk-prefix partial pruning without
       visiting surviving entries or refreshing tree leaves.
     - A self-balancing 2D (x, y1) R-tree (``_RNode``) carrying height, rear, and
       drift envelopes answers dominance/duplicate checks and live dominance
       eviction with strict O(log N) split-only inserts (zero subtree rebuilds).
-    - A 2-level blocked sorted ``(h, y2)`` index (``_HBlock``) tracking per-block
-      live counts answers crossing queries in descending ``(h, y2)`` order with
-      O(1) straight-line shortcuts and O(log B) equal-height jumps.
+    - An augmented B-tree of sorted ``(h, y2, x)`` ``_HBlock`` leaves with
+      eager-delete indexed per-block rear max-heaps maintains exact live
+      ``max_rear_hi`` envelopes across kills and splits, answering crossing queries
+      in descending ``(h, y2)`` order in O(log N) without rescanning blocks.
     """
     __slots__ = ("_x", "_y1", "_y2", "_h", "_rear", "_err", "_alive", "count",
                  "_root",
                  "_x_hi", "_x_lo", "_y_hi", "_y_lo",
-                 "_blocks", "_blk_max", "_slot_blk", "_rebuild",
+                 "_hroot", "_slot_blk", "_hpos", "_rebuild",
                  "_dom_sweep", "_dom_queue", "_dom_pending", "_dom_cache",
                  "_cover_probe", "_cover_pending", "_cover_count", "_cover_scan", "_sweep_turn",
                  "_std_geom")
@@ -573,9 +709,9 @@ class _ClipBaselines:
         self._x_lo = _BoundBlocks()
         self._y_hi = _BoundBlocks()
         self._y_lo = _BoundBlocks()
-        self._blocks = []
-        self._blk_max = []
+        self._hroot = None
         self._slot_blk = []
+        self._hpos = array("H")
         self._rebuild = None
         self._dom_sweep = None
         self._dom_queue = _SlotFIFO()
@@ -594,6 +730,19 @@ class _ClipBaselines:
     def __len__(self):
         return self.count
 
+    @property
+    def _blocks(self):
+        node = self._hroot
+        if node is None:
+            return []
+        while type(node) is _HNode:
+            node = node.children[0]
+        out = []
+        while node is not None:
+            out.append(node)
+            node = node.next_blk
+        return out
+
     def clear(self):
         self._x = array("d"); self._y1 = array("d"); self._y2 = array("d")
         self._h = array("d"); self._rear = array("d"); self._err = array("d")
@@ -601,7 +750,7 @@ class _ClipBaselines:
         self.count = 0
         self._root = None
         self._x_hi.clear(); self._x_lo.clear(); self._y_hi.clear(); self._y_lo.clear()
-        self._blocks.clear(); self._blk_max.clear(); self._slot_blk.clear()
+        self._hroot = None; self._slot_blk.clear(); self._hpos = array("H")
         self._rebuild = None
         self._dom_sweep = None
         self._dom_queue.clear()
@@ -613,6 +762,46 @@ class _ClipBaselines:
         self._cover_scan = 0
         self._sweep_turn = False
         self._std_geom = True
+
+    def _h_locate(self, h, y2, x):
+        node = self._hroot
+        if node is None:
+            return None
+        while type(node) is _HNode:
+            ch = node.children
+            chosen = ch[-1]
+            for c in ch:
+                if type(c) is _HBlock:
+                    if (c.h[-1], c.y2[-1], c.x[-1]) >= (h, y2, x):
+                        chosen = c
+                        break
+                elif (c.max_h, c.max_y2, c.max_x) >= (h, y2, x):
+                    chosen = c
+                    break
+            node = chosen
+        return node
+
+    def _h_insert_sibling(self, left, right):
+        parent = left.parent
+        if parent is None:
+            self._hroot = _HNode([left, right])
+            return
+        ch = parent.children
+        idx = ch.index(left)
+        ch.insert(idx+1, right)
+        right.parent = parent
+        if len(ch) <= _HNODE_MAX:
+            parent.refresh()
+            cur = parent.parent
+            while cur is not None:
+                cur.refresh()
+                cur = cur.parent
+            return
+        mid = len(ch)//2
+        parent.children = ch[:mid]
+        parent.refresh()
+        sibling = _HNode(ch[mid:])
+        self._h_insert_sibling(parent, sibling)
 
     @staticmethod
     def _find_in_block(blk, h, y2, x):
@@ -628,15 +817,11 @@ class _ClipBaselines:
         return lo
 
     def _has_exact(self, bx, by1, by2, bh):
-        blocks = self._blocks
-        if not blocks or self.count == 0:
+        if self._hroot is None or self.count == 0:
             return False
-        b_idx = bisect.bisect_left(self._blk_max, (bh, by2, bx))
-        if b_idx == len(blocks):
-            return False
+        blk = self._h_locate(bh, by2, bx)
         alive = self._alive; y1s = self._y1
-        while b_idx < len(blocks):
-            blk = blocks[b_idx]
+        while blk is not None:
             h_arr = blk.h
             lo = bisect.bisect_left(h_arr, bh)
             if lo == len(h_arr) or h_arr[lo] != bh:
@@ -657,66 +842,63 @@ class _ClipBaselines:
                 k += 1
             if k < len(h_arr):
                 return False
-            b_idx += 1
+            blk = blk.next_blk
         return False
 
     def _blocks_add(self, h, y2, x, y1, rear, err, slot):
-        blocks = self._blocks
-        blk_max = self._blk_max
-        r_hi = rear+err
-        if not blocks:
+        self._hpos.append(_HPOS_DEAD)
+        if self._hroot is None:
             blk = _HBlock(array("d", (h,)), array("d", (y2,)), array("d", (x,)),
-                          array("d", (rear,)), array("d", (err,)), array("I", (slot,)), r_hi, slot, 1)
-            blocks.append(blk); blk_max.append((h, y2, x))
+                          array("d", (rear,)), array("d", (err,)), array("I", (slot,)))
+            self._hroot = blk
             self._slot_blk.append(blk)
+            blk.heap_push(slot, self._rear, self._err, self._hpos)
             return
-        b_idx = bisect.bisect_left(blk_max, (h, y2, x))
-        if b_idx == len(blocks):
-            b_idx -= 1
-        blk = blocks[b_idx]
+        blk = self._h_locate(h, y2, x)
         bh = blk.h; by2 = blk.y2; bx_arr = blk.x
         i = self._find_in_block(blk, h, y2, x)
         if (i < len(bh) and bh[i] == h and by2[i] == y2 and bx_arr[i] == x and
                 not self._alive[blk.slots[i]] and self._y1[blk.slots[i]] == y1):
             blk.slots[i] = slot
-            blk.live_count += 1
+            blk.rear[i] = rear
+            blk.err[i] = err
             self._slot_blk.append(blk)
-            if r_hi >= blk.max_rear_hi:
-                blk.max_rear_hi = r_hi
-                blk.max_rear_slot = slot
+            blk.heap_push(slot, self._rear, self._err, self._hpos)
             return
         bh.insert(i, h); by2.insert(i, y2); bx_arr.insert(i, x)
         blk.rear.insert(i, rear); blk.err.insert(i, err); blk.slots.insert(i, slot)
-        blk.live_count += 1
         self._slot_blk.append(blk)
-        if r_hi > blk.max_rear_hi:
-            blk.max_rear_hi = r_hi
-            blk.max_rear_slot = slot
+        blk.heap_push(slot, self._rear, self._err, self._hpos)
+        if i == 0:
+            cur = blk.parent
+            while cur is not None and h < cur.min_h:
+                cur.min_h = h
+                cur = cur.parent
         if i == len(bh)-1:
-            blk_max[b_idx] = (h, y2, x)
+            cur = blk.parent
+            while cur is not None and (h, y2, x) > (cur.max_h, cur.max_y2, cur.max_x):
+                cur.max_h = h; cur.max_y2 = y2; cur.max_x = x
+                cur = cur.parent
         if len(bh) > _HBLOCK_MAX:
             mid = len(bh)//2
             alive = self._alive; slot_blk = self._slot_blk
-            right = _HBlock(bh[mid:], by2[mid:], bx_arr[mid:], blk.rear[mid:], blk.err[mid:], blk.slots[mid:])
-            r_live = 0
+            rears = self._rear; errs = self._err; hpos = self._hpos
+            right = _HBlock(bh[mid:], by2[mid:], bx_arr[mid:], blk.rear[mid:], blk.err[mid:], blk.slots[mid:],
+                            next_blk=blk.next_blk)
+            blk.next_blk = right
             for s in right.slots:
                 slot_blk[s] = right
-                r_live += alive[s]
-            right.live_count = r_live
-            blk.live_count -= r_live
-            right.refresh_max_rear_hi(alive)
             del bh[mid:]; del by2[mid:]; del bx_arr[mid:]; del blk.rear[mid:]; del blk.err[mid:]; del blk.slots[mid:]
-            blk.refresh_max_rear_hi(alive)
-            blk_max[b_idx] = (bh[-1], by2[-1], bx_arr[-1])
-            blocks.insert(b_idx+1, right)
-            blk_max.insert(b_idx+1, (right.h[-1], right.y2[-1], right.x[-1]))
+            blk.heap_rebuild(alive, rears, errs, hpos)
+            right.heap_rebuild(alive, rears, errs, hpos)
+            self._h_insert_sibling(blk, right)
 
     def _kill_slot(self, i):
         alive = self._alive
         if not alive[i]:
             return
         alive[i] = 0
-        self._slot_blk[i].live_count -= 1
+        self._slot_blk[i].heap_remove(i, self._rear, self._err, self._hpos)
         self.count -= 1
         self._dom_pending[i] = 0
         if self._cover_pending[i]:
@@ -727,7 +909,7 @@ class _ClipBaselines:
             new_i = mapping.pop(i, None)
             if new_i is not None and shadow._alive[new_i]:
                 shadow._alive[new_i] = 0
-                shadow._slot_blk[new_i].live_count -= 1
+                shadow._slot_blk[new_i].heap_remove(new_i, shadow._rear, shadow._err, shadow._hpos)
                 shadow.count -= 1
                 shadow._dom_pending[new_i] = 0
                 if shadow._cover_pending[new_i]:
@@ -847,7 +1029,7 @@ class _ClipBaselines:
         self._alive, self.count, self._root = shadow._alive, shadow.count, shadow._root
         self._x_hi, self._x_lo = shadow._x_hi, shadow._x_lo
         self._y_hi, self._y_lo = shadow._y_hi, shadow._y_lo
-        self._blocks, self._blk_max, self._slot_blk = shadow._blocks, shadow._blk_max, shadow._slot_blk
+        self._hroot, self._slot_blk, self._hpos = shadow._hroot, shadow._slot_blk, shadow._hpos
         self._std_geom = shadow._std_geom
         self._rebuild = None
         return copied or 1
@@ -1347,25 +1529,26 @@ class _ClipBaselines:
             return False
         alive = self._alive; slot_blk = self._slot_blk
         dp = self._dom_pending; cp = self._cover_pending
-        killed, ck = x_hi.pop_below(px, alive, slot_blk, dp, cp)
+        rears = self._rear; errs = self._err; hpos = self._hpos
+        killed, ck = x_hi.pop_below(px, alive, slot_blk, dp, cp, rears, errs, hpos)
         if killed:
             self.count -= killed; self._cover_count -= ck
             if self.count == 0:
                 self.clear()
                 return False
-        k2, ck2 = x_lo.pop_below(neg_px, alive, slot_blk, dp, cp)
+        k2, ck2 = x_lo.pop_below(neg_px, alive, slot_blk, dp, cp, rears, errs, hpos)
         if k2:
             killed += k2; self.count -= k2; self._cover_count -= ck2
             if self.count == 0:
                 self.clear()
                 return False
-        k3, ck3 = y_hi.pop_below(y1, alive, slot_blk, dp, cp)
+        k3, ck3 = y_hi.pop_below(y1, alive, slot_blk, dp, cp, rears, errs, hpos)
         if k3:
             killed += k3; self.count -= k3; self._cover_count -= ck3
             if self.count == 0:
                 self.clear()
                 return False
-        k4, ck4 = y_lo.pop_below(neg_y1, alive, slot_blk, dp, cp)
+        k4, ck4 = y_lo.pop_below(neg_y1, alive, slot_blk, dp, cp, rears, errs, hpos)
         if k4:
             killed += k4; self.count -= k4; self._cover_count -= ck4
             if self.count == 0:
@@ -1680,50 +1863,60 @@ class _ClipBaselines:
 
     def best_for_crossing(self, height_eligible, rear_eligible, rear_floor, height, y1, px, side, best_key):
         """Return highest qualifying live ``(h_base, y2_base)`` beating ``best_key`` (or ``best_key``
-        unchanged) without scanning dead blocks, equal-height rear failures, or shorter heights once
-        monotonic height predicates fail or the tallest eligible baseline clears a straight stop line."""
-        blocks = self._blocks
-        if not blocks or self.count == 0:
+        unchanged) via exact right-to-left traversal of the ``(h, y2, x)`` B-tree with live
+        ``max_rear_hi`` subtree pruning, straight-line shortcuts, and equal-height skips."""
+        root = self._hroot
+        if root is None or self.count == 0 or root.max_rear_hi < rear_floor:
             return best_key
-        blk_max = self._blk_max
         alive = self._alive
+        std_geom = self._std_geom
         skip_h = math.inf
-        b_idx = len(blocks)-1
-        while b_idx >= 0:
-            blk = blocks[b_idx]
-            if blk.live_count == 0:
-                b_idx -= 1
+        stack = [root]
+        while stack:
+            node = stack.pop()
+            if node.max_rear_hi < rear_floor:
                 continue
-            bh = blk.h; by2 = blk.y2
+            if type(node) is _HNode:
+                if node.min_h >= skip_h:
+                    continue
+                if not height_eligible(node.max_h):
+                    return best_key
+                if best_key is not None and (node.max_h, node.max_y2) <= best_key:
+                    return best_key
+                for c in node.children:
+                    if c.max_rear_hi < rear_floor:
+                        continue
+                    c_min_h = c.h[0] if type(c) is _HBlock else c.min_h
+                    if c_min_h >= skip_h:
+                        continue
+                    c_max_h = c.h[-1] if type(c) is _HBlock else c.max_h
+                    if not height_eligible(c_max_h):
+                        continue
+                    c_max_y2 = c.y2[-1] if type(c) is _HBlock else c.max_y2
+                    if best_key is not None and (c_max_h, c_max_y2) <= best_key:
+                        continue
+                    stack.append(c)
+                continue
+            bh = node.h; by2 = node.y2
+            if bh[0] >= skip_h:
+                continue
             last_i = len(bh)-1 if bh[-1] < skip_h else bisect.bisect_left(bh, skip_h)-1
             if last_i < 0:
-                b_idx -= 1
                 continue
             top_h = bh[last_i]
             if not height_eligible(top_h):
-                break
+                return best_key
             if best_key is not None and (top_h, by2[last_i]) <= best_key:
-                break
-            if blk.max_rear_hi >= rear_floor and blk.max_rear_slot >= 0 and not alive[blk.max_rear_slot]:
-                blk.refresh_max_rear_hi(alive)
-            if blk.max_rear_hi < rear_floor:
-                if bh[0] == top_h and (blk.rear[last_i]+blk.err[last_i] < rear_floor or not rear_eligible(by2[last_i], top_h)):
-                    skip_h = top_h
-                    b_idx = min(b_idx-1, bisect.bisect_left(blk_max, (top_h, -math.inf, -math.inf)))
-                else:
-                    b_idx -= 1
-                continue
-            if bh[0] == top_h and (blk.rear[last_i]+blk.err[last_i] < rear_floor or not rear_eligible(by2[last_i], top_h)):
+                return best_key
+            if bh[0] == top_h and not rear_eligible(by2[last_i], top_h):
                 skip_h = top_h
-                b_idx = min(b_idx-1, bisect.bisect_left(blk_max, (top_h, -math.inf, -math.inf)))
                 continue
             top_y2 = y1+top_h
             top_behind = side((px, top_y2)) < 0 if (top_h >= height and math.isfinite(top_y2)) else None
-            if top_behind is False:
+            if top_behind is False and not height_eligible(height):
                 return best_key
-            brear = blk.rear; berr = blk.err; bslots = blk.slots
+            brear = node.rear; berr = node.err; bslots = node.slots
             i = last_i
-            jumped = False
             while i >= 0:
                 if not alive[bslots[i]]:
                     i -= 1
@@ -1735,14 +1928,12 @@ class _ClipBaselines:
                 if best_key is not None and (h_base, y2_base) <= best_key:
                     return best_key
                 if brear[i]+berr[i] < rear_floor or not rear_eligible(y2_base, h_base):
-                    skip_h = h_base
-                    next_i = bisect.bisect_left(bh, h_base)-1
-                    if next_i >= 0:
-                        i = next_i
-                        continue
-                    b_idx = min(b_idx-1, bisect.bisect_left(blk_max, (h_base, -math.inf, -math.inf)))
-                    jumped = True
-                    break
+                    if std_geom or not rear_eligible(y2_base, h_base):
+                        skip_h = h_base
+                        i = bisect.bisect_left(bh, h_base)-1
+                    else:
+                        i -= 1
+                    continue
                 if i == last_i and top_behind is not None:
                     behind = top_behind
                 else:
@@ -1756,8 +1947,6 @@ class _ClipBaselines:
                 if h_base >= height:
                     return best_key
                 i -= 1
-            if not jumped:
-                b_idx -= 1
         return best_key
 
 

@@ -3003,3 +3003,126 @@ def test_malformed_outside_box_does_not_confirm_exit_and_disabled_path_skips_box
                                           in_region=False, epoch=0, bbox=spy_exit, height=None)], 'RED', 0.5, 6, 1)
         assert geom_calls == 0
         assert spy_exit.slices == 0
+
+
+def test_sparse_prune_of_block_maxima_does_not_rescan_stationary_history():
+    """Sol Round 34: pruning the cached rear maximum from hundreds of blocks out of >33k
+    stationary baselines must keep crossing queries O(log N) and lossless (zero full-block rescans)."""
+    import random
+    from src.experiment.vehicle_waits import _ClipBaselines, _HBlock, _HNode, _rear_err, OCCLUSION_BOTTOM_SHARE
+
+    cb = _ClipBaselines()
+    # 512 distinct height bands x 65 entries = 33,280 baselines across >500 _HBlock leaves.
+    # In each band, 64 entries sit at x=150 with low rear (y2=272) and 1 entry sits at x=142
+    # with high rear (y2=282) so a small +x drift prunes ONLY the 512 high-rear block maxima.
+    for band in range(512):
+        h = 60.0 + 0.01 * band
+        y2_low = 272.0 + 0.7 * (h - 60.0)
+        y1_low = y2_low - h
+        r_low = y2_low - OCCLUSION_BOTTOM_SHARE * h
+        e_low = _rear_err(y2_low, h)
+        for j in range(64):
+            cb._insert_raw(150.0 + 1e-4 * j, y1_low, y2_low, h, r_low, e_low)
+        y2_hi = 282.0 + 0.7 * (h - 60.0)
+        y1_hi = y2_hi - h
+        r_hi = y2_hi - OCCLUSION_BOTTOM_SHARE * h
+        e_hi = _rear_err(y2_hi, h)
+        # band 0 stays at x=150 (survives prune); bands 1..511 sit at x=141 (pruned at px=150.2).
+        x_hi = 150.0 if band == 0 else 141.0
+        cb._insert_raw(x_hi, y1_hi, y2_hi, h, r_hi, e_hi)
+
+    assert len(cb) == 33280 and len(cb._blocks) >= 512
+    # Prune ONLY the 511 high-rear entries at x=141 (r = 0.15 * h <= 9.8, 141 + 9.8 = 150.8 < 151.0).
+    assert cb.prune(151.0, 216.0, compact=False)
+    assert len(cb) == 33280 - 511
+
+    py_q, h_q = 269.0, 48.0
+    rear_floor = py_q - OCCLUSION_BOTTOM_SHARE * h_q - 1e-9 - _rear_err(py_q, h_q)
+    rear_ok = lambda y2b, hb: (y2b - py_q) >= OCCLUSION_BOTTOM_SHARE * (hb - h_q) - 1e-9
+    h_ok = lambda hb: h_q <= 0.85 * hb + 1e-9
+
+    # Query 1: only band 0's surviving high-rear entry qualifies (must find it in O(log N)).
+    side_calls = [0]
+    def counted_side(p):
+        side_calls[0] += 1
+        return 270.0 - p[1]
+    t0 = time.perf_counter()
+    hit = cb.best_for_crossing(h_ok, rear_ok, rear_floor, h_q, py_q - h_q, 151.0, counted_side, None)
+    dt_hit_ms = (time.perf_counter() - t0) * 1000.0
+    assert hit == (60.0, 282.0) and side_calls[0] <= 2 and dt_hit_ms < 5.0
+
+    # Query 2: raise rear_floor above all 32,769 survivors -> O(1) root prune (0 side calls).
+    side_calls[0] = 0
+    high_py = 290.0
+    high_floor = high_py - OCCLUSION_BOTTOM_SHARE * h_q - 1e-9 - _rear_err(high_py, h_q)
+    high_ok = lambda y2b, hb: (y2b - high_py) >= OCCLUSION_BOTTOM_SHARE * (hb - h_q) - 1e-9
+    t1 = time.perf_counter()
+    miss = cb.best_for_crossing(h_ok, high_ok, high_floor, h_q, high_py - h_q, 151.0, counted_side, None)
+    dt_miss_ms = (time.perf_counter() - t1) * 1000.0
+    assert miss is None and side_calls[0] == 0 and dt_miss_ms < 2.0
+
+    # Verify B-tree + indexed heap invariants and randomized brute-force crossing equivalence.
+    def check_h_invariants(store):
+        if store._hroot is None:
+            assert store.count == 0
+            return
+        seen_live = 0
+        def walk(node, parent):
+            nonlocal seen_live
+            assert node.parent is parent
+            if type(node) is _HBlock:
+                assert len(node.rear_heap) == node.live_count
+                seen_live += node.live_count
+                for pos, s in enumerate(node.rear_heap):
+                    assert store._alive[s] and store._hpos[s] == pos and store._slot_blk[s] is node
+                    if pos > 0:
+                        ps = node.rear_heap[(pos - 1) >> 1]
+                        assert store._rear[ps] + store._err[ps] >= store._rear[s] + store._err[s]
+                exp_max = max((store._rear[s] + store._err[s] for s in node.slots if store._alive[s]), default=-float('inf'))
+                assert node.max_rear_hi == exp_max
+                return node.h[0], node.h[-1], node.y2[-1], node.x[-1], node.max_rear_hi
+            c_stats = [walk(c, node) for c in node.children]
+            assert node.min_h == c_stats[0][0]
+            assert (node.max_h, node.max_y2, node.max_x) == c_stats[-1][1:4]
+            assert node.max_rear_hi == max(cs[4] for cs in c_stats)
+            return node.min_h, node.max_h, node.max_y2, node.max_x, node.max_rear_hi
+        walk(store._hroot, None)
+        assert seen_live == store.count
+
+    check_h_invariants(cb)
+
+    rng = random.Random(34)
+    cb_r = _ClipBaselines()
+    live_ref = []
+    for step in range(800):
+        h = round(rng.uniform(50.0, 90.0), 2)
+        y2 = round(rng.uniform(268.0, 295.0), 2)
+        x = round(rng.uniform(145.0, 155.0), 2)
+        y1 = y2 - h
+        rec = (x, y1, y2, h, y2 - OCCLUSION_BOTTOM_SHARE * h, _rear_err(y2, h))
+        cb_r.add(rec, compact=False, dom_budget=[64])
+        live_ref.append(rec)
+        if step % 40 == 39:
+            px_p = rng.uniform(146.0, 154.0)
+            y1_p = rng.uniform(200.0, 230.0)
+            cb_r.prune(px_p, y1_p, compact=False)
+            live_ref = [b for b in live_ref
+                        if abs(px_p - b[0]) <= 0.15 * b[3] and abs(y1_p - b[1]) <= 0.15 * b[3]]
+            if cb_r.needs_compact():
+                cb_r.maybe_compact(budget=128)
+            check_h_invariants(cb_r)
+            for _ in range(10):
+                hq = rng.uniform(35.0, 75.0)
+                pyq = rng.uniform(255.0, 285.0)
+                y1q = pyq - hq
+                pxq = rng.uniform(145.0, 155.0)
+                line_y = pyq + rng.uniform(0.0, 10.0)
+                side_fn = lambda p, ly=line_y: ly - p[1]
+                h_pred = lambda hb, hq=hq: hq <= 0.85 * hb + 1e-9
+                r_pred = lambda y2b, hb, pyq=pyq, hq=hq: (y2b - pyq) >= OCCLUSION_BOTTOM_SHARE * (hb - hq) - 1e-9
+                rf = pyq - OCCLUSION_BOTTOM_SHARE * hq - 1e-9 - _rear_err(pyq, hq)
+                got = cb_r.best_for_crossing(h_pred, r_pred, rf, hq, y1q, pxq, side_fn, None)
+                cands = [(b[3], b[2]) for b in live_ref
+                         if h_pred(b[3]) and r_pred(b[2], b[3]) and side_fn((pxq, y1q + b[3])) < 0]
+                want = max(cands) if cands else None
+                assert got == want

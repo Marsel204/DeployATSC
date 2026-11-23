@@ -92,6 +92,17 @@ def _observed_box(track):
     return () if getattr(track,"bbox",None) is not None else None
 
 
+def _bad_box(track):
+    """True when a track carries a malformed bounding box or non-finite/overflowing vertical geometry."""
+    box=_observed_box(track)
+    if box==():return True
+    if box is None:return False
+    point=getattr(track,"bottom_center",None)
+    if not _finite_point(point):return True
+    y1=float(point[1])-(box[3]-box[1])
+    return not (math.isfinite(y1) and abs(y1)<=_MAX_PIXEL_COORD)
+
+
 def _source_box(track):
     """The detector's raw box behind a tracked box, or None."""
     return _finite_box(getattr(track,"source_bbox",None))
@@ -328,8 +339,20 @@ class ObservationSession:
                 identity_evidence=self.identity_features.extract(frame,tracks,calibration.homography.pixel_to_ground,
                     calibration.homography.is_in_approach_corridor)
             else:
+                native_exit=self.policy.exit_persistence_sec>0
                 finite_tracks=tracks
-                if any(not _finite_point(getattr(v,"bottom_center",None)) for v in tracks):
+                if native_exit:
+                    bad_flags=[
+                        (not _finite_point(getattr(v,"bottom_center",None))) or
+                        (not calibration.homography.is_in_approach_corridor(*v.bottom_center) and _bad_box(v))
+                        for v in tracks
+                    ]
+                    if any(bad_flags):
+                        finite_tracks=[]
+                        for v,bad in zip(tracks,bad_flags):
+                            if not bad:finite_tracks.append(v)
+                            else:v.velocity_valid=False;v.velocity_mps=0.0;v.ground_pos=None
+                elif any(not _finite_point(getattr(v,"bottom_center",None)) for v in tracks):
                     finite_tracks=[]
                     for v in tracks:
                         if _finite_point(getattr(v,"bottom_center",None)):finite_tracks.append(v)
@@ -361,13 +384,14 @@ class ObservationSession:
                     labels=tuple(labels)
                 else:
                     continuing=getattr(self,"fragment_continuation",False)
+                    native_exit=self.policy.exit_persistence_sec>0
                     observations=[VehicleObservation(v.track_id,v.class_name,
                         v.velocity_mps if getattr(v,"velocity_valid",False) else None,
                         v.bottom_center,stable_id=getattr(v,"stable_id",False),
                         velocity_valid=getattr(v,"velocity_valid",False),
                         in_region=_finite_point(v.bottom_center) and calibration.homography.is_in_approach_corridor(*v.bottom_center),
                         epoch=getattr(v,"epoch",detector.epoch),
-                        bbox=_observed_box(v) if continuing else None,
+                        bbox=_observed_box(v) if (continuing or native_exit) else None,
                         source_bbox=_source_box(v) if continuing else None) for v in tracks]
                     if continuing:
                         self.engine.observe_acquisition(frame,packet.timestamp,packet.sequence,observations,generation=generation,
