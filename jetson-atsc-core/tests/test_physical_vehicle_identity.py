@@ -3143,7 +3143,9 @@ def test_round35_pending_recheck_cutoff_pruning_and_live_drift_eviction(monkeypa
     from fractions import Fraction
     import math
     import random
-    from src.experiment.vehicle_waits import _ClipBaselines, _HBlock, _exact_rear, _exact_floor, OCCLUSION_BOTTOM_SHARE
+    from src.experiment.vehicle_waits import (
+        _ClipBaselines, _HBlock, _exact_rear, _exact_floor, _REAR_SCALE, OCCLUSION_BOTTOM_SHARE,
+    )
 
     # 1. Pending crossing rechecks taller eligible baseline before confirming SERVED.
     #    Line at y=270 (side = 270 - y; >=0 is past the line).
@@ -3178,19 +3180,21 @@ def test_round35_pending_recheck_cutoff_pruning_and_live_drift_eviction(monkeypa
     waits_p.observe([car(1, 225.0, x=150.0, height=42.0, speed=0.0)], 'RED', 1.2, 13, 1, unassigned=())
     assert only_row(waits_p)['crossed_stop_line'] and only_row(waits_p)['tracking_state'] == 'SERVED'
 
-    # 2. Exact 3-term/4-term rear expansion accuracy vs Fraction + O(1) cutoff rejection (sole owner).
+    # 2. Exact 3-term/4-term scaled rear expansion accuracy vs Fraction + O(1) cutoff rejection (sole owner).
     rng = random.Random(35)
     f07 = Fraction(OCCLUSION_BOTTOM_SHARE)
     f1e9 = Fraction(1e-9)
+    scale_int = 1 << _REAR_SCALE
     for _ in range(2000):
-        scale = rng.choice([1.0, 1e3, 1e9, 1e14])
+        scale = rng.choice([1e-305, 1e-12, 1.0, 1e3, 1e9, 1e14])
         y2 = rng.uniform(-scale, scale)
-        h = rng.uniform(1e-3, min(scale, 1e14))
+        h = rng.uniform(scale * 1e-3, min(scale, 1e14))
         c0, c1, c2 = _exact_rear(y2, h)
-        exact = Fraction(y2) - f07 * Fraction(h)
+        exact = (Fraction(y2) - f07 * Fraction(h)) * scale_int
         assert Fraction(c0) + Fraction(c1) + Fraction(c2) == exact
-        f0, f1, f2, f3 = _exact_floor(y2, h, 1e-9)
-        assert Fraction(f0) + Fraction(f1) + Fraction(f2) + Fraction(f3) == exact - f1e9
+        eps = min(1e-9, 1e-6 * h)
+        f0, f1, f2, f3 = _exact_floor(y2, h, eps)
+        assert Fraction(f0) + Fraction(f1) + Fraction(f2) + Fraction(f3) == exact - Fraction(eps) * scale_int
 
     waits_cut = book(side=lambda p: 270.0 - p[1])
     for seq in range(1, 5):
@@ -3200,7 +3204,7 @@ def test_round35_pending_recheck_cutoff_pruning_and_live_drift_eviction(monkeypa
     # Inject 16,384 distinct-height baselines all sitting ~1e-13 below rear_floor of (py=269, h=48).
     py_q, h_q = 269.0, 48.0
     rf = _exact_floor(py_q, h_q, 1e-9)
-    target = rf[0] + rf[1] - 2e-13
+    target = math.ldexp(rf[0] + rf[1], -_REAR_SCALE) - 2e-13
     cb_cut.clear()
     for i in range(16384):
         hb = 60.0 + 1e-4 * i
@@ -3261,7 +3265,9 @@ def test_round36_handoff_fail_closed_exact_rear_incremental_teardown_and_scale_s
     4. P3: Relative shrink tolerance rejects growing microscopic boxes (1e-12 -> 1.1e-12) and
        preserves O(1) side() early stopping across 16,384 microscopic baselines."""
     import math
-    from src.experiment.vehicle_waits import _ClipBaselines, _HBlock, _exact_rear, _exact_floor, OCCLUSION_BOTTOM_SHARE
+    from src.experiment.vehicle_waits import (
+        _ClipBaselines, _HBlock, _exact_rear, _exact_floor, _REAR_SCALE, OCCLUSION_BOTTOM_SHARE,
+    )
 
     # 1. P1: Malformed competitor with exit_persistence_sec=0.3 must fail closed.
     for bad_other in (
@@ -3307,7 +3313,7 @@ def test_round36_handoff_fail_closed_exact_rear_incremental_teardown_and_scale_s
     cb_64k = waits_64k.active[(0, 1)]['clip_baselines']
     py_q, h_q = 269.0, 48.0
     rf = _exact_floor(py_q, h_q, 1e-9)
-    target = rf[0] + rf[1] - 2e-13
+    target = math.ldexp(rf[0] + rf[1], -_REAR_SCALE) - 2e-13
     cb_64k.clear()
     waits_64k._retired.clear()
     for i in range(65536):
@@ -3403,3 +3409,70 @@ def test_round36_handoff_fail_closed_exact_rear_incremental_teardown_and_scale_s
     waits_mt.observe([car(1, -2.0e-12, x=0.0, height=1.0e-12, speed=0.0)], 'GREEN', 4 / FPS, 5, 1, unassigned=())
     assert only_row(waits_mt)['crossed_stop_line']
     assert side_t[0] <= 6  # straight-line early stop fires on the very first block!
+
+
+def test_round37_bounded_retirement_under_loss_and_tiny_height_o1_pruning():
+    """Sol Round 37:
+    1. P2: Repeated tracking loss across 100 stationary tracks (both 3-on/1-off small indices
+       and 36-on/1-off deferred indices) must never accumulate unbounded retired _HBlock objects
+       or starve older retirement jobs.
+    2. P3: Sub-1e-300 heights (u=1e-305 across 16,384 baselines) must prune in O(1) via exact
+       power-of-two scaled rear expansions (<= 4 side() calls, identical to u=1e-12, zero leaf scans)."""
+    import gc
+    from src.experiment.vehicle_waits import _HBlock
+
+    # 1a. Sol's exact Round 37 P2 repro: 100 stationary tracks, 3 frames + 1 empty frame x 100 cycles (400 frames).
+    waits_loss = book(exit_persistence_sec=0.3, side=lambda p: 100.0 - p[1])
+    obs_100 = [
+        VehicleObservation(i + 1, 'car', 0.0, (10.0 * i, 140.0), stable_id=True, velocity_valid=True,
+                           in_region=True, epoch=0, bbox=(10.0 * i - 3.0, 100.0, 10.0 * i + 3.0, 140.0))
+        for i in range(100)
+    ]
+    for f in range(400):
+        frame_obs = () if (f % 4 == 3) else obs_100
+        waits_loss.observe(frame_obs, 'RED', f / 20.0, f + 1, 1, unassigned=())
+    assert len(waits_loss._retired) == 0
+    gc.collect()
+    assert sum(1 for obj in gc.get_objects() if type(obj) is _HBlock) == 0
+
+    # 1b. Deferred-retirement regime (> 32 distinct heights per track x 64 tracks, repeated loss):
+    #     queue drains in FIFO order faster than allocation and never grows unboundedly.
+    waits_big = book(exit_persistence_sec=0.3, side=lambda p: 100.0 - p[1])
+    for cyc in range(6):
+        base_f = cyc * 38
+        for step in range(37):
+            h_cur = 60.0 + 0.05 * step
+            obs_step = [
+                VehicleObservation(i + 1, 'car', 0.0, (20.0 * i, 100.0 + h_cur), stable_id=True, velocity_valid=True,
+                                   in_region=True, epoch=0, height=h_cur,
+                                   bbox=(20.0 * i - 5.0, 100.0, 20.0 * i + 5.0, 100.0 + h_cur))
+                for i in range(64)
+            ]
+            waits_big.observe(obs_step, 'RED', (base_f + step) / 20.0, base_f + step + 1, 1, unassigned=())
+        # Empty frame drops all 64 large baseline indices simultaneously -> deferred FIFO jobs.
+        waits_big.observe((), 'RED', (base_f + 37) / 20.0, base_f + 38, 1, unassigned=())
+    # Drain at most a few frames -> all older jobs finish cleanly (zero starvation / accumulation).
+    for extra in range(12):
+        waits_big.observe((), 'RED', (6 * 38 + extra) / 20.0, 6 * 38 + extra + 1, 1, unassigned=())
+    assert len(waits_big._retired) == 0
+
+    # 2. Sol's exact Round 37 P3 repro: u=1e-305 with n=16,384 baselines prunes at root (<= 4 side() calls).
+    u = 1e-305
+    n = 16384
+    side_calls = [0]
+    def tiny_side(p):
+        side_calls[0] += 1
+        return 1.05 * u - p[1]
+    waits_tiny = VehicleWaits('tiny-305', RunPolicy(fragment_continuation=True, max_gap_sec=0.2), side=tiny_side)
+    for i in range(n + 2):
+        h_i = (1.4 + 0.15 * i / n) * u
+        y_i = (0.28 - 0.01 * i / n) * u + 0.7 * h_i
+        obs_i = VehicleObservation(1, 'car', 0.0, (0.0, y_i), stable_id=True, velocity_valid=True,
+                                   in_region=True, epoch=0, height=h_i, bbox=None)
+        waits_tiny.observe([obs_i], 'GREEN', i * 0.1, i + 1, 1, unassigned=())
+    side_calls[0] = 0
+    obs_cross = VehicleObservation(1, 'car', 0.0, (0.0, u), stable_id=True, velocity_valid=True,
+                                   in_region=True, epoch=0, height=u, bbox=None)
+    waits_tiny.observe([obs_cross], 'GREEN', (n + 2) * 0.1, n + 3, 1, unassigned=())
+    assert only_row(waits_tiny)['crossed_stop_line'] and only_row(waits_tiny)['tracking_state'] == 'SERVED'
+    assert side_calls[0] <= 4

@@ -3,7 +3,6 @@ from __future__ import annotations
 from array import array
 from collections import deque
 from collections.abc import Mapping
-from fractions import Fraction
 import bisect
 import math
 
@@ -147,46 +146,43 @@ def _overlap_of_smaller(a, b):
 _DD_SPLIT = 134217729.0
 _BSHARE_HI = (lambda t: t-(t-OCCLUSION_BOTTOM_SHARE))(_DD_SPLIT*OCCLUSION_BOTTOM_SHARE)
 _BSHARE_LO = OCCLUSION_BOTTOM_SHARE-_BSHARE_HI
-_FRAC_BSHARE = Fraction(OCCLUSION_BOTTOM_SHARE)
-_EXACT_MIN_H = 1e-270
-
-
-def _two_prod_bshare(h):
-    """Exact Dekker TwoProd ``(p_hi, p_lo)`` for ``OCCLUSION_BOTTOM_SHARE * h``."""
-    if h < _EXACT_MIN_H:
-        hs = math.ldexp(h, 200)
-        p_hi = OCCLUSION_BOTTOM_SHARE*hs
-        ht = _DD_SPLIT*hs
-        h_hi = ht-(ht-hs)
-        h_lo = hs-h_hi
-        p_lo = ((_BSHARE_HI*h_hi-p_hi)+_BSHARE_HI*h_lo+_BSHARE_LO*h_hi)+_BSHARE_LO*h_lo
-        return math.ldexp(p_hi, -200), math.ldexp(p_lo, -200)
-    p_hi = OCCLUSION_BOTTOM_SHARE*h
-    ht = _DD_SPLIT*h
-    h_hi = ht-(ht-h)
-    h_lo = h-h_hi
-    p_lo = ((_BSHARE_HI*h_hi-p_hi)+_BSHARE_HI*h_lo+_BSHARE_LO*h_hi)+_BSHARE_LO*h_lo
-    return p_hi, p_lo
+# Power-of-two scale (2**200) keeps Dekker TwoProd and greedy math.fsum expansions
+# strictly normal with zero overflow (<= 2**251 << 2**1024) and zero subnormal
+# underflow (>= 2**-979 >> 2**-1022) across the entire float64 domain down to 5e-324.
+_REAR_SCALE = 200
 
 
 def _exact_rear(y2, h):
-    """Exact 3-term expansion ``(c0, c1, c2)`` of ``y2 - OCCLUSION_BOTTOM_SHARE * h``
-    with zero residual for all normal ``h >= _EXACT_MIN_H``."""
-    p_hi, p_lo = _two_prod_bshare(h)
-    c0 = math.fsum((y2, -p_hi, -p_lo))
-    c1 = math.fsum((y2, -p_hi, -p_lo, -c0))
-    c2 = math.fsum((y2, -p_hi, -p_lo, -c0, -c1))
+    """Exact 3-term expansion ``(c0, c1, c2)`` of ``2**200 * (y2 - OCCLUSION_BOTTOM_SHARE * h)``
+    with zero residual for all finite ``|y2| <= _MAX_PIXEL_COORD``, ``0 < h <= 2*_MAX_PIXEL_COORD``."""
+    ys = math.ldexp(y2, _REAR_SCALE)
+    hs = math.ldexp(h, _REAR_SCALE)
+    p_hi = OCCLUSION_BOTTOM_SHARE*hs
+    ht = _DD_SPLIT*hs
+    h_hi = ht-(ht-hs)
+    h_lo = hs-h_hi
+    p_lo = ((_BSHARE_HI*h_hi-p_hi)+_BSHARE_HI*h_lo+_BSHARE_LO*h_hi)+_BSHARE_LO*h_lo
+    c0 = math.fsum((ys, -p_hi, -p_lo))
+    c1 = math.fsum((ys, -p_hi, -p_lo, -c0))
+    c2 = math.fsum((ys, -p_hi, -p_lo, -c0, -c1))
     return c0, c1, c2
 
 
 def _exact_floor(py, h, eps):
-    """Exact 4-term expansion ``(f0, f1, f2, f3)`` of ``py - OCCLUSION_BOTTOM_SHARE * h - eps``
-    so ``(c0, c1, c2, 0.0) >= (f0, f1, f2, f3)`` matches infinite-precision arithmetic."""
-    p_hi, p_lo = _two_prod_bshare(h)
-    f0 = math.fsum((py, -p_hi, -p_lo, -eps))
-    f1 = math.fsum((py, -p_hi, -p_lo, -eps, -f0))
-    f2 = math.fsum((py, -p_hi, -p_lo, -eps, -f0, -f1))
-    f3 = math.fsum((py, -p_hi, -p_lo, -eps, -f0, -f1, -f2))
+    """Exact 4-term expansion ``(f0, f1, f2, f3)`` of ``2**200 * (py - OCCLUSION_BOTTOM_SHARE * h - eps)``
+    so ``(c0, c1, c2, 0.0) >= (f0, f1, f2, f3)`` matches infinite-precision arithmetic everywhere."""
+    ys = math.ldexp(py, _REAR_SCALE)
+    hs = math.ldexp(h, _REAR_SCALE)
+    es = math.ldexp(eps, _REAR_SCALE)
+    p_hi = OCCLUSION_BOTTOM_SHARE*hs
+    ht = _DD_SPLIT*hs
+    h_hi = ht-(ht-hs)
+    h_lo = hs-h_hi
+    p_lo = ((_BSHARE_HI*h_hi-p_hi)+_BSHARE_HI*h_lo+_BSHARE_LO*h_hi)+_BSHARE_LO*h_lo
+    f0 = math.fsum((ys, -p_hi, -p_lo, -es))
+    f1 = math.fsum((ys, -p_hi, -p_lo, -es, -f0))
+    f2 = math.fsum((ys, -p_hi, -p_lo, -es, -f0, -f1))
+    f3 = math.fsum((ys, -p_hi, -p_lo, -es, -f0, -f1, -f2))
     return f0, f1, f2, f3
 
 
@@ -933,11 +929,15 @@ class _HNode:
         self.max_y_hi = m_yh; self.max_neg_y_lo = m_nyl
 
 
-def _step_retire(stack, budget):
-    """Incrementally unlink and release retired index structures within a fixed per-frame
-    budget so clearing or completing a track with large baseline history stays O(1)."""
+def _step_retire(queue, budget):
+    """Incrementally unlink and release retired index jobs in FIFO order within a
+    per-frame budget so large teardown stays O(1) and no retired job can starve."""
     worked = 0
-    while stack and worked < budget:
+    while queue and worked < budget:
+        stack = queue[0]
+        if not stack:
+            queue.popleft()
+            continue
         item = stack.pop()
         t = type(item)
         if t is _RNode:
@@ -996,6 +996,8 @@ def _step_retire(stack, budget):
                     stack.append(item)
         else:
             worked += 1
+        if not stack:
+            queue.popleft()
     return worked
 
 
@@ -1012,7 +1014,7 @@ class _ClipBaselines:
       eviction with strict O(log N) split-only inserts (zero subtree rebuilds).
     - An augmented B-tree of sorted ``(h, y2, x)`` ``_HBlock`` leaves with
       eager-delete indexed per-block rear max-heaps maintains exact live
-      double-double rear maxima across kills and splits, answering crossing queries
+      3-term rear maxima across kills and splits, answering crossing queries
       in descending ``(h, y2)`` order in O(log N) with zero cutoff dead zone.
     """
     __slots__ = ("_x", "_y1", "_y2", "_h", "_rear", "_err", "_rlo", "_rlo2", "_alive", "count",
@@ -1021,7 +1023,7 @@ class _ClipBaselines:
                  "_hroot", "_blk_by_id", "_slot_bid", "_hpos", "_rebuild",
                  "_dom_sweep", "_dom_queue", "_dom_pending", "_dom_cache",
                  "_cover_probe", "_cover_pending", "_cover_count", "_cover_scan", "_sweep_turn",
-                 "_std_geom", "_exact_rear", "_has_tiny", "_retired", "_own_retired")
+                 "_std_geom", "_exact_rear", "_retired", "_own_retired")
 
     def __init__(self, *, exact_rear=False, retire=None):
         self._x = array("d")
@@ -1055,9 +1057,8 @@ class _ClipBaselines:
         self._sweep_turn = False
         self._std_geom = True
         self._exact_rear = exact_rear
-        self._has_tiny = False
         self._own_retired = retire is None
-        self._retired = [] if retire is None else retire
+        self._retired = deque() if retire is None else retire
 
     def __bool__(self):
         return self.count > 0
@@ -1083,36 +1084,52 @@ class _ClipBaselines:
                 self._root is None and self._hroot is None and not self._blk_by_id and
                 (self._retired is sink or not self._retired)):
             return
-        if self._rebuild is not None:
-            shadow, _, _, mapping, _, q_shadow = self._rebuild
-            self._rebuild = None
-            shadow.retire_to(sink)
-            if q_shadow is not None:
-                q_shadow.retire_to(sink)
-            if len(mapping) >= 2048:
-                sink.append((2, [mapping]))
-        if self._blk_by_id:
-            sink.append(self._blk_by_id)
-            self._blk_by_id = []
-        if self._hroot is not None:
-            sink.append(self._hroot)
+        if (len(self._x) <= 32 and len(self._blk_by_id) <= 2 and
+                self._rebuild is None and not self._dom_queue and
+                (self._retired is sink or not self._retired)):
+            if type(self._hroot) is _HNode:
+                self._hroot.children = None
+            for blk in self._blk_by_id:
+                blk.parent = None
+                blk.next_blk = None
+            self._blk_by_id.clear()
             self._hroot = None
-        if self._root is not None:
-            sink.append(self._root)
             self._root = None
-        for bb in (self._x_hi, self._x_lo, self._y_hi, self._y_lo):
-            if bb.blocks:
-                sink.append(bb.blocks)
-                bb.blocks = []
-            bb.max_vals = array("d")
-        self._dom_queue.retire_to(sink)
-        if self._retired is not sink and self._retired:
-            sink.append((1, self._retired))
-            self._retired = [] if self._own_retired else sink
-        if len(self._x) >= 2048:
-            sink.append((2, [self._x, self._y1, self._y2, self._h, self._rear, self._err,
-                             self._rlo, self._rlo2, self._alive, self._slot_bid, self._hpos,
-                             self._dom_pending, self._cover_pending]))
+            self._x_hi.clear(); self._x_lo.clear(); self._y_hi.clear(); self._y_lo.clear()
+        else:
+            job = []
+            if self._rebuild is not None:
+                shadow, _, _, mapping, _, q_shadow = self._rebuild
+                self._rebuild = None
+                shadow.retire_to(sink)
+                if q_shadow is not None:
+                    q_shadow.retire_to(job)
+                if len(mapping) >= 2048:
+                    job.append((2, [mapping]))
+            if self._blk_by_id:
+                job.append(self._blk_by_id)
+                self._blk_by_id = []
+            if self._hroot is not None:
+                job.append(self._hroot)
+                self._hroot = None
+            if self._root is not None:
+                job.append(self._root)
+                self._root = None
+            for bb in (self._x_hi, self._x_lo, self._y_hi, self._y_lo):
+                if bb.blocks:
+                    job.append(bb.blocks)
+                    bb.blocks = []
+                bb.max_vals = array("d")
+            self._dom_queue.retire_to(job)
+            if self._retired is not sink and self._retired:
+                job.append((1, self._retired))
+                self._retired = deque() if self._own_retired else sink
+            if len(self._x) >= 2048:
+                job.append((2, [self._x, self._y1, self._y2, self._h, self._rear, self._err,
+                                self._rlo, self._rlo2, self._alive, self._slot_bid, self._hpos,
+                                self._dom_pending, self._cover_pending]))
+            if job:
+                sink.append(job)
         self._x = array("d"); self._y1 = array("d"); self._y2 = array("d")
         self._h = array("d"); self._rear = array("d"); self._err = array("d")
         self._rlo = array("d"); self._rlo2 = array("d")
@@ -1128,7 +1145,6 @@ class _ClipBaselines:
         self._cover_scan = 0
         self._sweep_turn = False
         self._std_geom = True
-        self._has_tiny = False
 
     def clear(self):
         self.retire_to(self._retired)
@@ -1294,10 +1310,13 @@ class _ClipBaselines:
                         if shadow.count == 0:
                             self._rebuild = None
                             shadow.retire_to(self._retired)
+                            extra = []
                             if q_shadow is not None:
-                                q_shadow.retire_to(self._retired)
+                                q_shadow.retire_to(extra)
                             if len(mapping) >= 2048:
-                                self._retired.append((2, [mapping]))
+                                extra.append((2, [mapping]))
+                            if extra:
+                                self._retired.append(extra)
 
     def _cache_dom(self, slot):
         dc = self._dom_cache
@@ -1331,8 +1350,6 @@ class _ClipBaselines:
 
     def _insert_raw(self, bx, by1, by2, bh, brear, berr, brlo=0.0, brlo2=0.0):
         if self._exact_rear:
-            if bh < _EXACT_MIN_H:
-                self._has_tiny = True
             if self._std_geom and (by1 != by2-bh or berr != 0.0):
                 self._std_geom = False
         elif self._std_geom and (by1 != by2-bh or brear != by2-OCCLUSION_BOTTOM_SHARE*bh or berr != _rear_err(by2, bh)):
@@ -1395,23 +1412,25 @@ class _ClipBaselines:
         if q_scan > q_head:
             rb[4] = q_scan
             return copied
-        sink = self._retired
+        job = []
         if self._blk_by_id:
-            sink.append(self._blk_by_id)
+            job.append(self._blk_by_id)
         if self._hroot is not None:
-            sink.append(self._hroot)
+            job.append(self._hroot)
         if self._root is not None:
-            sink.append(self._root)
+            job.append(self._root)
         for bb in (self._x_hi, self._x_lo, self._y_hi, self._y_lo):
             if bb.blocks:
-                sink.append(bb.blocks)
-        self._dom_queue.retire_to(sink)
+                job.append(bb.blocks)
+        self._dom_queue.retire_to(job)
         if len(self._x) >= 2048:
-            sink.append((2, [self._x, self._y1, self._y2, self._h, self._rear, self._err,
-                             self._rlo, self._rlo2, self._alive, self._slot_bid, self._hpos,
-                             self._dom_pending, self._cover_pending]))
+            job.append((2, [self._x, self._y1, self._y2, self._h, self._rear, self._err,
+                            self._rlo, self._rlo2, self._alive, self._slot_bid, self._hpos,
+                            self._dom_pending, self._cover_pending]))
         if len(mapping) >= 2048:
-            sink.append((2, [mapping]))
+            job.append((2, [mapping]))
+        if job:
+            self._retired.append(job)
         if self._dom_sweep is not None:
             ds0 = self._dom_sweep[0]
             new_dom = mapping[ds0] if 0 <= ds0 < map_len else -1
@@ -1442,7 +1461,6 @@ class _ClipBaselines:
         self._hroot, self._blk_by_id, self._slot_bid, self._hpos = (
             shadow._hroot, shadow._blk_by_id, shadow._slot_bid, shadow._hpos)
         self._std_geom = shadow._std_geom
-        self._has_tiny = shadow._has_tiny
         self._rebuild = None
         return copied or 1
 
@@ -2023,10 +2041,13 @@ class _ClipBaselines:
             q_shadow = self._rebuild[5]
             if not shadow.prune(px, y1, compact=False):
                 self._rebuild = None
+                extra = []
                 if q_shadow is not None:
-                    q_shadow.retire_to(self._retired)
+                    q_shadow.retire_to(extra)
                 if len(mapping) >= 2048:
-                    self._retired.append((2, [mapping]))
+                    extra.append((2, [mapping]))
+                if extra:
+                    self._retired.append(extra)
         return True
 
     def _is_covered(self, node, bx, by1, by2, bh, brear, berr, rb, bx_lo, bx_hi, by_lo, by_hi, brear_hi,
@@ -2086,7 +2107,7 @@ class _ClipBaselines:
             brlo = brlo2 = 0.0
         if self._exact_rear:
             brear, brlo, brlo2 = _exact_rear(by2, bh)
-            berr = 0.0 if bh >= _EXACT_MIN_H else max(1e-300, 4.0*math.ulp(abs(by2)))
+            berr = 0.0
         if self._has_exact(bx, by1, by2, bh) or self._covered_by_hot(bx, by1, by2, bh, brear, berr, brlo, brlo2):
             return True
         if dom_budget is None:
@@ -2314,11 +2335,7 @@ class _ClipBaselines:
             brlo = brlo2 = 0.0
         if self._exact_rear:
             brear, brlo, brlo2 = _exact_rear(by2, bh)
-            if bh < _EXACT_MIN_H:
-                berr = max(1e-300, 4.0*math.ulp(abs(by2)))
-                self._has_tiny = True
-            else:
-                berr = 0.0
+            berr = 0.0
         if self._has_exact(bx, by1, by2, bh) or self._covered_by_hot(bx, by1, by2, bh, brear, berr, brlo, brlo2):
             if compact:
                 self.maybe_compact()
@@ -2389,7 +2406,7 @@ class _ClipBaselines:
         if isinstance(rear_floor, tuple):
             if len(rear_floor) == 4:
                 rf_hi, rf_lo, rf_lo2, rf_lo3 = rear_floor
-                exact_q = self._exact_rear and not self._has_tiny and height >= _EXACT_MIN_H
+                exact_q = self._exact_rear
             else:
                 rf_hi, rf_lo = rear_floor
                 rf_lo2 = rf_lo3 = -math.inf
@@ -2537,7 +2554,7 @@ class VehicleWaits:
         self.continuation_unavailable_frames = 0
         self._maint_cursor = 0
         self._dom_cursor = 0
-        self._retired = []
+        self._retired = deque()
         # Persistent identities record per-interval tracking continuity for
         # acquisition collection; legacy exports keep their historical schema.
         self.record_tracking = False
@@ -2670,8 +2687,7 @@ class VehicleWaits:
             y2 = a[2] if a[2] <= b[2] else b[2]
             h = a[3] if a[3] <= b[3] else b[3]
             r_hi, r_lo, r_lo2 = _exact_rear(y2, h)
-            err = 0.0 if h >= _EXACT_MIN_H else max(1e-300, 4.0*math.ulp(abs(y2)))
-            out.append((b[1], y2-h, y2, h, r_hi, err, r_lo, r_lo2))
+            out.append((b[1], y2-h, y2, h, r_hi, 0.0, r_lo, r_lo2))
         return out
 
     def _prune_clip_baselines(self, state, px, y1):
@@ -2783,28 +2799,12 @@ class VehicleWaits:
                     y1_span <= OCCLUSION_TOP_DRIFT_HEIGHTS*h_base and
                     x_span <= OCCLUSION_TOP_DRIFT_HEIGHTS*h_base and
                     top_speed < OCCLUSION_STATIC_TOP_SPEED*h_base)
-        if height >= _EXACT_MIN_H:
-            rear_floor = _exact_floor(py, height, rear_tol)
-            rhs_frac = None
-        else:
-            rf0 = math.fsum((py, -OCCLUSION_BOTTOM_SHARE*height, -rear_tol))
-            rf_err = max(1e-300, 4.0*math.ulp(max(abs(py), 1e-300)))
-            rear_floor = (rf0-rf_err, -math.inf, -math.inf, -math.inf)
-            rhs_frac = Fraction(py)-_FRAC_BSHARE*Fraction(height)-Fraction(rear_tol)
+        rear_floor = _exact_floor(py, height, rear_tol)
         def rear_eligible(y2_base, h_base):
-            if height >= _EXACT_MIN_H and h_base >= _EXACT_MIN_H:
-                return (*_exact_rear(y2_base, h_base), 0.0) >= rear_floor
-            rhs = (rhs_frac if rhs_frac is not None else
-                   Fraction(py)-_FRAC_BSHARE*Fraction(height)-Fraction(rear_tol))
-            return Fraction(y2_base)-_FRAC_BSHARE*Fraction(h_base) >= rhs
+            return (*_exact_rear(y2_base, h_base), 0.0) >= rear_floor
         for b in self._corroborated_pairs(earlier):
             y2_base, h_base = b[2], b[3]
-            if not height_eligible(h_base):
-                continue
-            if height >= _EXACT_MIN_H and h_base >= _EXACT_MIN_H:
-                if (b[4], b[6], b[7], 0.0) < rear_floor:
-                    continue
-            elif not rear_eligible(y2_base, h_base):
+            if not (height_eligible(h_base) and (b[4], b[6], b[7], 0.0) >= rear_floor):
                 continue
             unclipped_y2 = y1+h_base
             if not math.isfinite(unclipped_y2):
@@ -2971,7 +2971,9 @@ class VehicleWaits:
         if n_obs > dom_window:
             self._dom_cursor += 1
         dom_rem = min(n_obs, dom_window)
+        obs_seen = 0
         for obs_idx, observation in enumerate(observations):
+            obs_seen = obs_idx+1
             in_dom = (n_obs <= dom_window) or ((obs_idx-dom_start) % n_obs < dom_window)
             obs_dom_rem = dom_rem if in_dom else 0
             if in_dom and dom_rem > 0:
@@ -3140,7 +3142,7 @@ class VehicleWaits:
                     self._flag(row, "tracking_lost")
                     self._clear_native_exit(state)
         if self._retired:
-            _step_retire(self._retired, 256)
+            _step_retire(self._retired, max(256, 4*(obs_seen+len(self.active))))
 
     def _own_segments(self, identity, state):
         """Rows this raw ID itself started; an alias of another row started none."""
@@ -3440,7 +3442,7 @@ class VehicleWaits:
                 if "history" in state:state["history"].clear()
                 row["tracking_state"] = "UNKNOWN"
         if self._retired:
-            _step_retire(self._retired, 256)
+            _step_retire(self._retired, max(256, 4*len(self.active)))
 
     def close(self, timestamp, reason="recording_end"):
         self.invalidate(timestamp, reason)
