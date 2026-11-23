@@ -1882,9 +1882,10 @@ class VehicleWaits:
         return px, py, height
 
     def _step_continuous(self, prev, timestamp, sequence):
+        gap_tol = min(1e-9, 1e-6*self.policy.max_gap_sec)
         return bool(prev is not None and not prev.get("handoff") and
                     prev["sequence"] == sequence-1 and
-                    0 < timestamp-prev["time"] <= self.policy.max_gap_sec+1e-9)
+                    0 < timestamp-prev["time"] <= self.policy.max_gap_sec+gap_tol)
 
     @staticmethod
     def _clear_clip_state(state):
@@ -1895,8 +1896,9 @@ class VehicleWaits:
     def _record_history(self, state, prev_obs, observation, timestamp, consecutive):
         history = state.setdefault("history", deque(maxlen=MAX_HISTORY_SAMPLES))
         clip_history = state.setdefault("clip_history", deque(maxlen=MAX_HISTORY_SAMPLES))
+        gap_tol = min(1e-9, 1e-6*self.policy.max_gap_sec)
         recent = (prev_obs is not None and not prev_obs.get("handoff") and
-                  0 < timestamp-prev_obs["time"] <= self.policy.max_gap_sec+1e-9)
+                  0 < timestamp-prev_obs["time"] <= self.policy.max_gap_sec+gap_tol)
         height = _height(observation)
         try:px, py = float(observation.point[0]), float(observation.point[1])
         except (TypeError, ValueError, IndexError, OverflowError, KeyError):px = py = float("nan")
@@ -2222,7 +2224,7 @@ class VehicleWaits:
                     row=state["row"];previous=state["previous"]
                     in_native_exit = native_exit and state.get("exit_candidate") is not None
                     prev_obs = state.get("exit_last") if in_native_exit else previous
-                    step_continuous = (self._step_continuous(prev_obs, timestamp, sequence) if native_exit else
+                    step_continuous = (self._step_continuous(prev_obs, timestamp, sequence) if (continuing or native_exit) else
                         bool(previous is not None and not previous.get("handoff") and
                              previous["sequence"] == sequence-1 and 0 < timestamp-previous["time"] <= self.policy.max_gap_sec))
                     crossed_now = False
@@ -2254,7 +2256,8 @@ class VehicleWaits:
                                 state["last_valid_box"] = (timestamp, geom[0], geom[1], geom[2])
                             self._record_history(state, prev_obs, observation, timestamp, step_continuous)
                         state["stop_candidate"] = state["move_candidate"] = None
-                        if timestamp-state["exit_candidate"] >= self.policy.exit_persistence_sec-1e-8:
+                        exit_tol = min(1e-8, 1e-6*self.policy.exit_persistence_sec)
+                        if timestamp > state["exit_candidate"] and timestamp-state["exit_candidate"] >= self.policy.exit_persistence_sec-exit_tol:
                             row.update(completed=True,completed_at=state["exit_candidate"],tracking_state="EXITED",right_censored=False);self.work+=1
                             self._clear_clip_state(state)
                             self._clear_native_exit(state)
@@ -2276,7 +2279,7 @@ class VehicleWaits:
             # Wait accounting is continuous only across consecutive in-ROI frames (never across handoffs or outside dips).
             continuous = (not was_exit_pending and previous is not None and not previous.get("handoff") and
                           previous["sequence"] == sequence-1 and 0 < timestamp-previous["time"] <= self.policy.max_gap_sec)
-            crossing_continuous = self._step_continuous(prev_obs, timestamp, sequence) if was_exit_pending else continuous
+            crossing_continuous = self._step_continuous(prev_obs, timestamp, sequence) if (continuing or native_exit) else continuous
             geom = self._valid_box_geometry(observation) if continuing else None
             crossing_broken = bool(continuing and (self._invalid_crossing_geometry(observation) or
                                                    (geom is None and state.get("pending_crossing") is not None)))
@@ -2409,7 +2412,7 @@ class VehicleWaits:
         static_vetoes = []
         occlusion_count = 0
         native_exit = self.policy.exit_persistence_sec > 0
-        veto_window = min(self.policy.max_gap_sec, OCCLUSION_MAX_GAP_SEC)+1e-9
+        veto_window = min(self.policy.max_gap_sec, OCCLUSION_MAX_GAP_SEC)+min(1e-9, 1e-6*self.policy.max_gap_sec)
         for identity, state in self.active.items():
             row, previous, history = state["row"], state["previous"], state.get("history")
             if identity in present or row["completed"] or row["vehicle_id"] not in self.records:continue

@@ -2837,3 +2837,43 @@ def test_delayed_vehicle_eviction_does_not_leak_archived_crossing_cycle_populati
     assert upcoming_cycle in book.retention.cycle_population
     assert book.retention.cycle_population[upcoming_cycle]['count'] == 1
     book.close()
+
+
+def test_crossing_at_exact_max_gap_and_sub_tolerance_exit_persistence():
+    """Sol Round 29:
+    1. A genuine pending crossing confirmation at dt == max_gap_sec (e.g. 0.4 - 0.3 = 0.1 + 2.8e-17)
+       must confirm SERVED in-ROI identically to outside-ROI rather than dropping pending_crossing.
+    2. A tiny valid exit_persistence_sec (e.g. 1e-9) must enter EXIT_PENDING on the first outside
+       sighting and never confirm EXITED on zero elapsed time or split the return into :segment-1."""
+    for exit_sec in (0.0, 0.3):
+        waits = VehicleWaits(
+            'gap-edge',
+            RunPolicy(max_gap_sec=0.1, fragment_continuation=True, exit_persistence_sec=exit_sec),
+            side=lambda p: 270.-p[1],
+        )
+        for seq, (t, y, h) in enumerate([(0.0, 280., 60.), (0.1, 280., 60.), (0.2, 280., 60.),
+                                         (0.3, 265., 45.), (0.4, 253., 45.)], start=1):
+            waits.observe([car(1, y, x=150., height=h, speed=0.)], 'RED', t, seq, 1, unassigned=())
+            if seq == 4:
+                assert not only_row(waits)['crossed_stop_line']
+        row = only_row(waits)
+        assert row['crossed_stop_line'] and row['tracking_state'] == 'SERVED'
+
+    waits_tiny = VehicleWaits(
+        'tiny-exit',
+        RunPolicy(exit_persistence_sec=1e-9),
+        side=lambda p: -1.,
+    )
+    waits_tiny.observe([car(1, 200., x=150., height=60., speed=0., in_region=True)], 'RED', 0.0, 1, 1)
+    waits_tiny.observe([car(1, 200., x=150., height=60., speed=0., in_region=False)], 'RED', 1/FPS, 2, 1)
+    row_tiny = only_row(waits_tiny)
+    assert not row_tiny['completed'] and row_tiny['tracking_state'] == 'EXIT_PENDING'
+    waits_tiny.observe([car(1, 200., x=150., height=60., speed=0., in_region=True)], 'RED', 2/FPS, 3, 1)
+    assert len(waits_tiny.records) == 1
+    assert not only_row(waits_tiny)['completed'] and only_row(waits_tiny)['tracking_state'] != 'EXITED'
+    # Two consecutive outside sightings spanning >= 1e-9 DO confirm EXITED at the first outside timestamp.
+    waits_tiny.observe([car(1, 200., x=150., height=60., speed=0., in_region=False)], 'RED', 3/FPS, 4, 1)
+    assert only_row(waits_tiny)['tracking_state'] == 'EXIT_PENDING'
+    waits_tiny.observe([car(1, 200., x=150., height=60., speed=0., in_region=False)], 'RED', 4/FPS, 5, 1)
+    assert only_row(waits_tiny)['completed'] and only_row(waits_tiny)['tracking_state'] == 'EXITED'
+    assert only_row(waits_tiny)['completed_at'] == pytest.approx(3/FPS)
