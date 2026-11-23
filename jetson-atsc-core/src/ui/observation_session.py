@@ -342,11 +342,7 @@ class ObservationSession:
                 native_exit=self.policy.exit_persistence_sec>0
                 finite_tracks=tracks
                 if native_exit:
-                    bad_flags=[
-                        (not _finite_point(getattr(v,"bottom_center",None))) or
-                        (not calibration.homography.is_in_approach_corridor(*v.bottom_center) and _bad_box(v))
-                        for v in tracks
-                    ]
+                    bad_flags=[(not _finite_point(getattr(v,"bottom_center",None))) or _bad_box(v) for v in tracks]
                     if any(bad_flags):
                         finite_tracks=[]
                         for v,bad in zip(tracks,bad_flags):

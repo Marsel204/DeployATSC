@@ -2432,20 +2432,23 @@ def test_missed_frame_clears_crossing_clip_evidence_but_preserves_fragment_histo
 
 
 def test_bottom_clip_rear_share_cutoff_uses_original_float_comparison():
-    """Sol S15: conservative skyline bounds must retain boundary candidates and apply the
-    exact original ``(y2_base - py) >= 0.7 * (h_base - height) - 1e-9`` comparison."""
+    """Sol S15 + Round 35: exact 106-bit double-double rear scoring matches exact real
+    ``(y2_base - py) >= 0.7 * (h_base - height) - 1e-9`` down to 2e-17 where naive float64
+    rearrangement ``(y2_base - 0.7*h_base) >= (py - 0.7*height) - 1e-9`` fails, with zero
+    cutoff dead zone between short clip_history and indexed _ClipBaselines."""
     import struct
     f32 = lambda v: struct.unpack('f', struct.pack('f', v))[0]
-    y2_base, h_base = 275.0, f32(61.1)
-    py_cross, h_cross = 265.8860023508535, f32(48.08)
-    # Confirm this coordinate set distinguishes original vs rearranged float evaluation.
+    y2_base, h_base = 275.0, f32(69.48)
+    py_cross, h_cross = 262.17599754433496, f32(51.16)
+    # Exact real diff is +2.03e-17 (>= 0): exact/original passes while naive float64 rearrangement fails.
     assert (y2_base-py_cross) >= 0.7*(h_base-h_cross)-1e-9
     assert not ((y2_base-0.7*h_base) >= (py_cross-0.7*h_cross)-1e-9)
     waits = book(side=lambda p: 270.-p[1])
     y1_mid = py_cross-h_cross
     # Establish baseline (y2_base, h_base), then age it out of clip_history into _ClipBaselines.
+    # Middle height 60.0 fails height_eligible (51.16 > 0.85*60), so only the indexed 69.48 baseline can hold.
     seq = ([[car(1, y2_base, x=150., height=h_base, speed=0.)] for _ in range(10)]
-           + [[car(1, y1_mid+55., x=150., height=55., speed=0.)] for _ in range(12)]
+           + [[car(1, y1_mid+60., x=150., height=60., speed=0.)] for _ in range(12)]
            + [[car(1, py_cross, x=150., height=h_cross, speed=0.)]])
     play(waits, seq, phase='RED')
     row = only_row(waits)
@@ -3126,3 +3129,118 @@ def test_sparse_prune_of_block_maxima_does_not_rescan_stationary_history():
                          if h_pred(b[3]) and r_pred(b[2], b[3]) and side_fn((pxq, y1q + b[3])) < 0]
                 want = max(cands) if cands else None
                 assert got == want
+
+
+def test_round35_pending_recheck_cutoff_pruning_and_live_drift_eviction(monkeypatch):
+    """Sol Round 35:
+    1. A pending crossing must recheck eligible baselines before completing SERVED so a taller
+       baseline (85 px) that becomes eligible on the confirmation frame keeps the crossing held
+       while its reconstructed rear (y=287) remains behind the stop line (y=270).
+    2. Exact double-double rear scoring eliminates the cutoff dead zone so 16,384 baselines sitting
+       1e-13 below rear_floor complete crossing lookup in O(1) via VehicleWaits.observe.
+    3. Exact live 4-axis drift envelopes on _HNode guarantee O(1) whole-track eviction (0 heap
+       deletions) after cross-axis pruning leaves dead entries in the orthogonal index."""
+    from fractions import Fraction
+    import math
+    import random
+    from src.experiment.vehicle_waits import _ClipBaselines, _HBlock, _dd_rear, _dd_sub, OCCLUSION_BOTTOM_SHARE
+
+    # 1. Pending crossing rechecks taller eligible baseline before confirming SERVED.
+    #    Line at y=270 (side = 270 - y; >=0 is past the line).
+    waits_p = book(side=lambda p: 270.0 - p[1])
+    # Seed 85 px baseline at y1=201 (y2=286, rear=226.5) and 65 px baseline at y1=208 (y2=273, rear=227.5).
+    frames_p = [
+        (0.0, 286.0, 85.0),
+        (0.1, 286.0, 85.0),
+        (0.2, 273.0, 65.0),
+        (0.3, 273.0, 65.0),
+        (0.4, 273.0, 65.0),
+        (0.5, 273.0, 65.0),
+        (0.6, 273.0, 65.0),
+        (0.7, 273.0, 65.0),
+        (0.8, 273.0, 65.0),
+        (0.9, 273.0, 65.0),
+        # Frame 10 (first clipped frame across y=270): py=264.8, h=54 (y1=210.8).
+        # rear_floor = 264.8 - 0.7*54 = 227.0 -> 65 px (rear=227.5) IS eligible; 85 px (rear=226.5) is NOT yet eligible!
+        (1.0, 264.8, 54.0),
+        # Frame 11: py=244, h=42 (y1=202).
+        # Old h_base=65 gives y1+65 = 267 < 270 (would falsely confirm SERVED!).
+        # Newly eligible 85 px (rear=226.5 >= 214.6) gives y1+85 = 287 > 270 (still behind stop line!).
+        (1.1, 244.0, 42.0),
+    ]
+    for seq, (t, y, h) in enumerate(frames_p, start=1):
+        waits_p.observe([car(1, y, x=150.0, height=h, speed=0.0)], 'RED', t, seq, 1, unassigned=())
+        if seq == 11:
+            assert waits_p.active[(0, 1)].get('pending_crossing')['h_base'] == pytest.approx(65.0)
+    assert not only_row(waits_p)['crossed_stop_line']
+    assert waits_p.active[(0, 1)].get('pending_crossing')['h_base'] == pytest.approx(85.0)
+    # Frame 12: vehicle truly moves forward so even y1+85 = 268 < 270 clears the stop line -> SERVED!
+    waits_p.observe([car(1, 225.0, x=150.0, height=42.0, speed=0.0)], 'RED', 1.2, 13, 1, unassigned=())
+    assert only_row(waits_p)['crossed_stop_line'] and only_row(waits_p)['tracking_state'] == 'SERVED'
+
+    # 2. Double-double accuracy vs exact Fraction + O(1) cutoff rejection across 16,384 baselines in observe().
+    rng = random.Random(35)
+    f07 = Fraction(OCCLUSION_BOTTOM_SHARE)
+    f1e9 = Fraction(1e-9)
+    for _ in range(2000):
+        scale = rng.choice([1.0, 1e3, 1e9, 1e14])
+        y2 = rng.uniform(-scale, scale)
+        h = rng.uniform(1e-3, min(scale, 1e14))
+        hi, lo = _dd_rear(y2, h)
+        exact = Fraction(y2) - f07 * Fraction(h)
+        assert abs((Fraction(hi) + Fraction(lo)) - exact) <= max(1e-16, 1e-30 * max(abs(y2), abs(h)))
+        shi, slo = _dd_sub(hi, lo, 1e-9)
+        assert abs((Fraction(shi) + Fraction(slo)) - (exact - f1e9)) <= max(1e-16, 1e-30 * max(abs(y2), abs(h)))
+
+    waits_cut = book(side=lambda p: 270.0 - p[1])
+    for seq in range(1, 5):
+        waits_cut.observe([car(1, 275.0, x=150.0, height=60.0, speed=0.0)], 'RED', (seq - 1) / FPS, seq, 1, unassigned=())
+    cb_cut = waits_cut.active[(0, 1)]['clip_baselines']
+    assert cb_cut is not None and cb_cut._exact_rear
+    # Inject 16,384 distinct-height baselines all sitting ~1e-13 below rear_floor of (py=269, h=48).
+    py_q, h_q = 269.0, 48.0
+    rf_hi, rf_lo = _dd_sub(*_dd_rear(py_q, h_q), 1e-9)
+    target = rf_hi + rf_lo - 2e-13
+    cb_cut.clear()
+    for i in range(16384):
+        hb = 60.0 + 1e-4 * i
+        y2b = target + OCCLUSION_BOTTOM_SHARE * hb
+        rhi, rlo = _dd_rear(y2b, hb)
+        if (rhi, rlo) >= (rf_hi, rf_lo):
+            y2b = math.nextafter(y2b, -math.inf)
+            rhi, rlo = _dd_rear(y2b, hb)
+        assert (rhi, rlo) < (rf_hi, rf_lo)
+        cb_cut._insert_raw(150.0, y2b - hb, y2b, hb, rhi, 0.0, rlo)
+    assert len(cb_cut) == 16384
+    t0 = time.perf_counter()
+    waits_cut.observe([car(1, py_q, x=150.0, height=h_q, speed=0.0)], 'RED', 4 / FPS, 5, 1, unassigned=())
+    dt_ms = (time.perf_counter() - t0) * 1000.0
+    assert only_row(waits_cut)['crossed_stop_line'] and dt_ms < 2.0
+
+    # 3. Cross-axis pruning updates live _HNode drift bounds so subsequent whole-track eviction
+    #    clears in O(1) with 0 individual heap_remove calls.
+    cb_ev = _ClipBaselines(exact_rear=True)
+    for i in range(16384):
+        hb = 60.0 + 1e-4 * i
+        y2b = 200.0 + hb
+        rhi, rlo = _dd_rear(y2b, hb)
+        cb_ev._insert_raw(150.0, 200.0, y2b, hb, rhi, 0.0, rlo)
+    # Outliers with smaller x (pruned horizontally) and huge y1 (would leave stale y_hi max).
+    for j in range(4):
+        hb = 60.0 + 0.01 * j
+        y2b = 300.0 + hb
+        rhi, rlo = _dd_rear(y2b, hb)
+        cb_ev._insert_raw(140.0, 300.0, y2b, hb, rhi, 0.0, rlo)
+    assert len(cb_ev) == 16388
+    assert cb_ev.prune(151.0, 200.0, compact=False)
+    assert len(cb_ev) == 16384
+    removes = [0]
+    orig_rem = _HBlock.heap_remove
+    def spy_rem(self, *args, **kwargs):
+        removes[0] += 1
+        return orig_rem(self, *args, **kwargs)
+    monkeypatch.setattr(_HBlock, 'heap_remove', spy_rem)
+    t1 = time.perf_counter()
+    alive_after = cb_ev.prune(151.0, 225.0, compact=False)
+    dt_ev_ms = (time.perf_counter() - t1) * 1000.0
+    assert not alive_after and len(cb_ev) == 0 and removes[0] == 0 and dt_ev_ms < 8.0
