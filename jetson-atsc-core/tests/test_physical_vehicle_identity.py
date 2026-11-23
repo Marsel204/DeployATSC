@@ -3476,3 +3476,72 @@ def test_round37_bounded_retirement_under_loss_and_tiny_height_o1_pruning():
     waits_tiny.observe([obs_cross], 'GREEN', (n + 2) * 0.1, n + 3, 1, unassigned=())
     assert only_row(waits_tiny)['crossed_stop_line'] and only_row(waits_tiny)['tracking_state'] == 'SERVED'
     assert side_calls[0] <= 4
+
+
+def test_round38_queued_dom_retirement_bounded_and_o1_sparse_compaction():
+    """Sol Round 38:
+    1. P2: Repeated tracking loss on 300 tracks with queued _dom_queue entries must take
+       the synchronous fast path for small indices and never charge radix None slots on
+       deferred cleanup (0 retained _HBlocks / 0 growing backlog across 16 cycles).
+    2. P3: maybe_compact(1) after pruning 131,071 of 131,072 slots must neither allocate
+       an O(N) mapping upfront nor scan the dead bitmap prefix (peak traced alloc < 16 KB
+       and runtime < 1 ms regardless of historical slot count)."""
+    import gc
+    import tracemalloc
+    from src.experiment.vehicle_waits import _ClipBaselines, _HBlock, _exact_rear
+
+    # 1. Sol's exact Round 38 P2 repro (300 tracks x 16 cycles of 6 active + 1 empty frame).
+    waits_r = VehicleWaits('r38-repro', RunPolicy(fragment_continuation=True), lambda p: 100.0 - p[1])
+    pattern = [(0.0, 60.0)] * 2 + [(-0.12, 61.0)] * 2 + [(0.12, 61.0)] * 2
+    frames = [tuple(
+        VehicleObservation(i, 'car', 0.0, (5.0 * i + dx, 100.0 + h), velocity_valid=True,
+                           bbox=(5.0 * i + dx - 2.0, 100.0, 5.0 * i + dx + 2.0, 100.0 + h))
+        for i in range(1, 301)
+    ) for dx, h in pattern] + [()]
+    for f in range(16 * len(frames)):
+        waits_r.observe(frames[f % len(frames)], 'RED', f / 20.0, f + 1, 1, unassigned=())
+    assert len(waits_r._retired) == 0
+    gc.collect()
+    assert sum(1 for obj in gc.get_objects() if type(obj) is _HBlock) == 0
+
+    # Also verify deferred cleanup (> 32 slots WITH queued _dom_queue entries) stays bounded across cycles.
+    waits_big = VehicleWaits('r38-big', RunPolicy(fragment_continuation=True), lambda p: 100.0 - p[1])
+    for cyc in range(4):
+        base = cyc * 38
+        for s in range(37):
+            dx = -0.12 if s == 34 else (0.12 if s == 35 else 0.0)
+            h_s = 60.0 + 0.04 * s
+            obs_s = [
+                VehicleObservation(i, 'car', 0.0, (20.0 * i + dx, 100.0 + h_s), velocity_valid=True,
+                                   bbox=(20.0 * i + dx - 2.0, 100.0, 20.0 * i + dx + 2.0, 100.0 + h_s))
+                for i in range(1, 101)
+            ]
+            waits_big.observe(obs_s, 'RED', (base + s) / 20.0, base + s + 1, 1, unassigned=())
+        waits_big.observe((), 'RED', (base + 37) / 20.0, base + 38, 1, unassigned=())
+    assert len(waits_big._retired) <= 100
+    for extra in range(15):
+        waits_big.observe((), 'RED', (4 * 38 + extra) / 20.0, 4 * 38 + extra + 1, 1, unassigned=())
+    assert len(waits_big._retired) == 0
+
+    # 2. Sol's exact Round 38 P3 repro: sparse maybe_compact(1) at 16,384 vs 131,072 historical slots.
+    peaks = {}
+    for n in (16384, 131072):
+        cb = _ClipBaselines(exact_rear=True)
+        r0, r1, r2 = _exact_rear(60.0, 60.0)
+        for i in range(n):
+            cb._insert_raw(i / n, 0.0, 60.0, 60.0, r0, 0.0, r1, r2)
+        assert cb.prune(9.0 + (n - 1.5) / n, 0.0, compact=False)
+        assert len(cb) == 1
+        tracemalloc.start()
+        t0 = time.perf_counter()
+        copied = cb.maybe_compact(1)
+        dt_ms = (time.perf_counter() - t0) * 1000.0
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        peaks[n] = (peak, dt_ms)
+        assert copied == 1 and peak < 16384 and dt_ms < 2.0
+        # Complete compaction and verify the sole survivor is preserved identically.
+        assert cb.maybe_compact(4) >= 1 and cb._rebuild is None
+        assert len(cb) == 1 and cb._x[0] == (n - 1) / n
+    # Peak memory must stay O(1) (no linear jump from 16k to 131k).
+    assert peaks[131072][0] < 2 * peaks[16384][0] + 4096

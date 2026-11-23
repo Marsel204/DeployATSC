@@ -401,8 +401,9 @@ class _SlotFIFO:
 
     def retire_to(self, sink):
         if self._root is not None:
-            sink.append((0, self._root))
-        self._root = None
+            if self._hi-self._lo > 512:
+                sink.append((0, self._root))
+            self._root = None
         self._lo = self._hi = self.base = 0
 
     def _set_pos(self, pos, val):
@@ -974,19 +975,26 @@ def _step_retire(queue, budget):
             tag = item[0]
             if tag == 0:
                 lst = item[1]
-                while lst and worked < budget:
-                    el = lst.pop()
-                    worked += 1
-                    if type(el) is list:
-                        stack.append((0, el))
-                if lst:
-                    stack.append(item)
+                for el in lst:
+                    if el is not None:
+                        if type(el) is list:
+                            stack.append((0, el))
+                        worked += 1
+                lst.clear()
+                worked += 1
             elif tag == 2:
                 bufs = item[1]
                 while bufs and worked < budget:
                     bufs.pop()
                     worked += 128
                 if bufs:
+                    stack.append(item)
+            elif tag == 3:
+                d = item[1]
+                while d and worked < budget:
+                    d.popitem()
+                    worked += 1
+                if d:
                     stack.append(item)
             else:
                 sub = item[1]
@@ -1085,7 +1093,7 @@ class _ClipBaselines:
                 (self._retired is sink or not self._retired)):
             return
         if (len(self._x) <= 32 and len(self._blk_by_id) <= 2 and
-                self._rebuild is None and not self._dom_queue and
+                self._rebuild is None and len(self._dom_queue) <= 256 and
                 (self._retired is sink or not self._retired)):
             if type(self._hroot) is _HNode:
                 self._hroot.children = None
@@ -1096,6 +1104,7 @@ class _ClipBaselines:
             self._hroot = None
             self._root = None
             self._x_hi.clear(); self._x_lo.clear(); self._y_hi.clear(); self._y_lo.clear()
+            self._dom_queue.clear()
         else:
             job = []
             if self._rebuild is not None:
@@ -1104,8 +1113,8 @@ class _ClipBaselines:
                 shadow.retire_to(sink)
                 if q_shadow is not None:
                     q_shadow.retire_to(job)
-                if len(mapping) >= 2048:
-                    job.append((2, [mapping]))
+                if len(mapping) > 64:
+                    job.append((3, mapping))
             if self._blk_by_id:
                 job.append(self._blk_by_id)
                 self._blk_by_id = []
@@ -1124,7 +1133,7 @@ class _ClipBaselines:
             if self._retired is not sink and self._retired:
                 job.append((1, self._retired))
                 self._retired = deque() if self._own_retired else sink
-            if len(self._x) >= 2048:
+            if len(self._x) >= 8192:
                 job.append((2, [self._x, self._y1, self._y2, self._h, self._rear, self._err,
                                 self._rlo, self._rlo2, self._alive, self._slot_bid, self._hpos,
                                 self._dom_pending, self._cover_pending]))
@@ -1167,6 +1176,26 @@ class _ClipBaselines:
             node = chosen
         return node
 
+    def _on_hblock_split(self, blk, right):
+        rb = self._rebuild
+        if rb is None or right.max_rear_hi == -math.inf:
+            return
+        cstack = rb[1]
+        for idx_f, item in enumerate(cstack):
+            if item is blk:
+                cstack.insert(idx_f+1, right)
+                return
+
+    def _on_hnode_split(self, parent, sibling):
+        rb = self._rebuild
+        if rb is None or sibling.max_rear_hi == -math.inf:
+            return
+        cstack = rb[1]
+        for idx_f, item in enumerate(cstack):
+            if item is parent:
+                cstack.insert(idx_f+1, sibling)
+                return
+
     def _h_insert_sibling(self, left, right):
         parent = left.parent
         if parent is None:
@@ -1187,6 +1216,7 @@ class _ClipBaselines:
         parent.children = ch[:mid]
         parent.refresh()
         sibling = _HNode(ch[mid:])
+        self._on_hnode_split(parent, sibling)
         self._h_insert_sibling(parent, sibling)
 
     @staticmethod
@@ -1277,6 +1307,7 @@ class _ClipBaselines:
             del bh[mid:]; del by2[mid:]; del bx_arr[mid:]; del blk.slots[mid:]
             blk.heap_rebuild(alive, xs, y1s, hs, rears, errs, rlos, rlo2s, hpos)
             right.heap_rebuild(alive, xs, y1s, hs, rears, errs, rlos, rlo2s, hpos)
+            self._on_hblock_split(blk, right)
             self._h_insert_sibling(blk, right)
 
     def _kill_slot(self, i):
@@ -1293,30 +1324,27 @@ class _ClipBaselines:
             self._cover_count -= 1
         if self._rebuild is not None:
             shadow, _, _, mapping, _, q_shadow = self._rebuild
-            if i < len(mapping):
-                new_i = mapping[i]
-                if new_i >= 0:
-                    mapping[i] = -1
-                    if shadow._alive[new_i]:
-                        shadow._alive[new_i] = 0
-                        shadow._blk_by_id[shadow._slot_bid[new_i]].heap_remove(
-                            new_i, shadow._rear, shadow._err, shadow._rlo, shadow._rlo2, shadow._hpos,
-                            shadow._x, shadow._y1, shadow._h)
-                        shadow.count -= 1
-                        shadow._dom_pending[new_i] = 0
-                        if shadow._cover_pending[new_i]:
-                            shadow._cover_pending[new_i] = 0
-                            shadow._cover_count -= 1
-                        if shadow.count == 0:
-                            self._rebuild = None
-                            shadow.retire_to(self._retired)
-                            extra = []
-                            if q_shadow is not None:
-                                q_shadow.retire_to(extra)
-                            if len(mapping) >= 2048:
-                                extra.append((2, [mapping]))
-                            if extra:
-                                self._retired.append(extra)
+            new_i = mapping.pop(i, None)
+            if new_i is not None and shadow._alive[new_i]:
+                shadow._alive[new_i] = 0
+                shadow._blk_by_id[shadow._slot_bid[new_i]].heap_remove(
+                    new_i, shadow._rear, shadow._err, shadow._rlo, shadow._rlo2, shadow._hpos,
+                    shadow._x, shadow._y1, shadow._h)
+                shadow.count -= 1
+                shadow._dom_pending[new_i] = 0
+                if shadow._cover_pending[new_i]:
+                    shadow._cover_pending[new_i] = 0
+                    shadow._cover_count -= 1
+                if shadow.count == 0:
+                    self._rebuild = None
+                    shadow.retire_to(self._retired)
+                    extra = []
+                    if q_shadow is not None:
+                        q_shadow.retire_to(extra)
+                    if len(mapping) > 64:
+                        extra.append((3, mapping))
+                    if extra:
+                        self._retired.append(extra)
 
     def _cache_dom(self, slot):
         dc = self._dom_cache
@@ -1371,26 +1399,48 @@ class _ClipBaselines:
 
     def _step_compact(self, budget):
         rb = self._rebuild
-        shadow, pos, end, mapping, q_scan, q_shadow = rb
+        shadow, cstack, end, mapping, q_scan, q_shadow = rb
         alive = self._alive
         xs, y1s, y2s, hs = self._x, self._y1, self._y2, self._h
         rears, errs, rlos, rlo2s = self._rear, self._err, self._rlo, self._rlo2
         copied = 0
-        if pos < end:
-            i = alive.find(1, pos, end)
-            while i != -1 and copied < budget:
-                new_i = shadow._insert_raw(xs[i], y1s[i], y2s[i], hs[i], rears[i], errs[i], rlos[i], rlo2s[i])
-                mapping[i] = new_i
-                if self._cover_pending[i]:
-                    shadow._cover_pending[new_i] = 1
-                    shadow._cover_count += 1
-                copied += 1
-                pos = i+1
-                i = alive.find(1, pos, end)
-            if i != -1:
-                rb[1] = i
-                return copied
-            rb[1] = end
+        if cstack:
+            step_limit = max(64, budget << 3)
+            steps = 0
+            while cstack and copied < budget and steps < step_limit:
+                item = cstack.pop()
+                t = type(item)
+                if t is _HNode:
+                    steps += 1
+                    if item.max_rear_hi == -math.inf:
+                        continue
+                    for c in reversed(item.children):
+                        if c.max_rear_hi != -math.inf:
+                            cstack.append(c)
+                elif t is _HBlock:
+                    steps += 1
+                    if item.max_rear_hi == -math.inf:
+                        continue
+                    snap = array("I", sorted(s for s in item.rear_heap if s < end))
+                    if snap:
+                        cstack.append((snap, 0))
+                else:
+                    snap, idx = item
+                    n_snap = len(snap)
+                    while idx < n_snap and copied < budget:
+                        s = snap[idx]
+                        idx += 1
+                        if alive[s] and s not in mapping:
+                            new_i = shadow._insert_raw(xs[s], y1s[s], y2s[s], hs[s], rears[s], errs[s], rlos[s], rlo2s[s])
+                            mapping[s] = new_i
+                            if self._cover_pending[s]:
+                                shadow._cover_pending[new_i] = 1
+                                shadow._cover_count += 1
+                            copied += 1
+                    if idx < n_snap:
+                        cstack.append((snap, idx))
+            if cstack or copied >= budget:
+                return copied or 1
         q_dq = self._dom_queue
         q_head = q_dq.base
         if q_shadow is None:
@@ -1398,11 +1448,10 @@ class _ClipBaselines:
             q_shadow = _SlotFIFO()
             rb[4] = q_scan
             rb[5] = q_shadow
-        map_len = len(mapping)
         while q_scan > q_head and copied < budget:
             q_scan -= 1
             q = q_dq[q_scan-q_head]
-            nq = mapping[q] if 0 <= q < map_len else -1
+            nq = mapping.get(q, -1)
             if nq >= 0 and shadow._alive[nq] and not shadow._dom_pending[nq]:
                 shadow._dom_pending[nq] = 1
             else:
@@ -1423,17 +1472,16 @@ class _ClipBaselines:
             if bb.blocks:
                 job.append(bb.blocks)
         self._dom_queue.retire_to(job)
-        if len(self._x) >= 2048:
+        if len(self._x) >= 8192:
             job.append((2, [self._x, self._y1, self._y2, self._h, self._rear, self._err,
                             self._rlo, self._rlo2, self._alive, self._slot_bid, self._hpos,
                             self._dom_pending, self._cover_pending]))
-        if len(mapping) >= 2048:
-            job.append((2, [mapping]))
+        if len(mapping) > 64:
+            job.append((3, mapping))
         if job:
             self._retired.append(job)
         if self._dom_sweep is not None:
-            ds0 = self._dom_sweep[0]
-            new_dom = mapping[ds0] if 0 <= ds0 < map_len else -1
+            new_dom = mapping.get(self._dom_sweep[0], -1)
             if new_dom >= 0 and shadow._alive[new_dom]:
                 self._dom_sweep = (new_dom, -2, len(shadow._x))
                 shadow._dom_pending[new_dom] = 1
@@ -1441,10 +1489,9 @@ class _ClipBaselines:
                 self._dom_sweep = None
         if self._dom_cache:
             self._dom_cache = [nq for s in self._dom_cache
-                               if 0 <= s < map_len and (nq := mapping[s]) >= 0 and shadow._alive[nq]]
+                               if (nq := mapping.get(s)) is not None and shadow._alive[nq]]
         if self._cover_probe is not None:
-            cp0 = self._cover_probe[0]
-            new_c = mapping[cp0] if 0 <= cp0 < map_len else -1
+            new_c = mapping.get(self._cover_probe[0], -1)
             self._cover_probe = ((new_c, None, len(shadow._x))
                                  if (new_c >= 0 and shadow._alive[new_c]) else None)
         self._dom_queue = q_shadow
@@ -1478,8 +1525,7 @@ class _ClipBaselines:
             if slot < self._cover_scan:
                 self._cover_scan = slot
             if self._rebuild is not None:
-                m = self._rebuild[3]
-                ns = m[slot] if 0 <= slot < len(m) else -1
+                ns = self._rebuild[3].get(slot, -1)
                 if ns >= 0 and self._rebuild[0]._alive[ns] and not self._rebuild[0]._cover_pending[ns]:
                     self._rebuild[0]._cover_pending[ns] = 1
                     self._rebuild[0]._cover_count += 1
@@ -1554,8 +1600,7 @@ class _ClipBaselines:
         else:
             q_dq.append(slot)
             if rb is not None and rb[5] is not None:
-                m = rb[3]
-                nq = m[slot] if 0 <= slot < len(m) else -1
+                nq = rb[3].get(slot, -1)
                 if nq >= 0 and rb[0]._alive[nq] and not rb[0]._dom_pending[nq]:
                     rb[0]._dom_pending[nq] = 1
                 else:
@@ -1798,8 +1843,7 @@ class _ClipBaselines:
                 self._cover_count -= 1
                 self._cover_scan = cand+1
                 if self._rebuild is not None:
-                    m = self._rebuild[3]
-                    ns = m[cand] if 0 <= cand < len(m) else -1
+                    ns = self._rebuild[3].get(cand, -1)
                     if ns >= 0 and self._rebuild[0]._cover_pending[ns]:
                         self._rebuild[0]._cover_pending[ns] = 0
                         self._rebuild[0]._cover_count -= 1
@@ -1966,9 +2010,9 @@ class _ClipBaselines:
             if not (len(self._x) > 2*max(self.count, 64) or
                     (not self.has_dom_sweep() and len(self._x) > max(8, 8*self.count))):
                 return 0
-            n_cur = len(self._x)
+            cstack = [self._hroot] if self._hroot is not None else []
             self._rebuild = [_ClipBaselines(exact_rear=self._exact_rear, retire=self._retired),
-                             0, n_cur, array("i", (-1,))*n_cur, -1, None]
+                             cstack, len(self._x), {}, -1, None]
         return self._step_compact(budget)
 
     def prune(self, px, y1, *, compact=True):
@@ -2044,8 +2088,8 @@ class _ClipBaselines:
                 extra = []
                 if q_shadow is not None:
                     q_shadow.retire_to(extra)
-                if len(mapping) >= 2048:
-                    extra.append((2, [mapping]))
+                if len(mapping) > 64:
+                    extra.append((3, mapping))
                 if extra:
                     self._retired.append(extra)
         return True
@@ -2380,13 +2424,7 @@ class _ClipBaselines:
         self._rtree_insert(slot, bx, by1, bh, brear, berr)
         if self._rebuild is not None:
             shadow, _, _, mapping, _, _ = self._rebuild
-            new_i = shadow._insert_raw(bx, by1, by2, bh, brear, berr, brlo, brlo2)
-            if len(mapping) < slot:
-                mapping.extend((-1,)*(slot-len(mapping)))
-            if len(mapping) == slot:
-                mapping.append(new_i)
-            else:
-                mapping[slot] = new_i
+            mapping[slot] = shadow._insert_raw(bx, by1, by2, bh, brear, berr, brlo, brlo2)
         if cover_exhausted and self.count > 1:
             self._queue_cover_probe(slot)
         if could_evict:
