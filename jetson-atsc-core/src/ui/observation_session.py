@@ -231,7 +231,8 @@ class ObservationSession:
             for role in self.detectors:
                 self.detectors[role].max_gap_sec=self.policy.max_gap_sec
                 if gap_tol and hasattr(self.detectors[role],"gap_tolerance"):
-                    self.detectors[role].gap_tolerance=gap_tol
+                    try:self.detectors[role].gap_tolerance=gap_tol
+                    except AttributeError:pass
             # Withheld-detection capture is opt-in: only native fragment continuation
             # uses it (persistent identity never continues fragments), so no other run pays for it.
             if self.fragment_continuation:

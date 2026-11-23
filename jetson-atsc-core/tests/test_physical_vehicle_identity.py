@@ -1188,8 +1188,6 @@ def test_exit_persistence_validation_default_off_and_persistent_isolation():
     assert RunPolicy(exit_persistence_sec=0.3).exit_persistence_sec == pytest.approx(0.3)
 
     # PersistentVehicleWaits zeroes RunPolicy.exit_persistence_sec (uses IdentityPolicy only).
-    from src.experiment.identity_contracts import IdentityPolicy
-    from src.experiment.persistent_vehicle_waits import PersistentVehicleWaits
     pwaits = PersistentVehicleWaits('run', RunPolicy(exit_persistence_sec=0.5), lambda p: -1., IdentityPolicy(mode='persistent_v1'))
     assert pwaits.policy.exit_persistence_sec == 0.0
 
@@ -2930,3 +2928,78 @@ def test_crossing_at_exact_max_gap_and_sub_tolerance_exit_persistence():
     assert not only_row(waits_assoc)['completed'] and only_row(waits_assoc)['tracking_state'] == 'LOST'
     waits_assoc.observe([car(1, 200., x=150., height=60., speed=0., in_region=True)], 'RED', 0.4, 5, 1)
     assert len(waits_assoc.records) == 1 and not only_row(waits_assoc)['completed']
+
+
+def test_malformed_outside_box_does_not_confirm_exit_and_disabled_path_skips_box_parsing(monkeypatch):
+    """Sol Round 33:
+    1. Under exit_persistence_sec=0.3 (with fragment_continuation False or True), a malformed
+       outside box (e.g. zero-width [15, 30, 15, 60]) must not confirm a false EXITED or split
+       the subsequent return into :segment-1; it must behave like a missing sample.
+    2. With continuation disabled (default RunPolicy() and PersistentVehicleWaits), crossing checks
+       must never call _valid_box_geometry or slice supplied observation boxes."""
+    from dataclasses import replace
+
+    for fc in (False, True):
+        waits = VehicleWaits(
+            f'bad-outside-{fc}',
+            RunPolicy(fragment_continuation=fc, exit_persistence_sec=0.3),
+            side=lambda p: -1.,
+        )
+        waits.observe([car(1, 200., x=150., height=60., speed=0., in_region=True)], 'RED', 0.0, 1, 1)
+        waits.observe([car(1, 200., x=150., height=60., speed=0., in_region=True)], 'RED', 0.1, 2, 1)
+        for seq, t in ((3, 0.2), (4, 0.3), (5, 0.4)):
+            waits.observe([car(1, 200., x=150., height=60., speed=0., in_region=False)], 'RED', t, seq, 1)
+        bad_obs = replace(car(1, 60., x=15., height=30., speed=0., in_region=False), bbox=[15., 30., 15., 60.])
+        waits.observe([bad_obs], 'RED', 0.5, 6, 1)
+        row = only_row(waits)
+        assert not row['completed'] and row['tracking_state'] == 'LOST'
+        waits.observe([car(1, 200., x=150., height=60., speed=0., in_region=True)], 'RED', 0.6, 7, 1)
+        assert len(waits.records) == 1
+        assert not only_row(waits)['completed']
+
+        # A valid outside sighting after the malformed outside sample restarts exit persistence.
+        waits.observe([car(1, 200., x=150., height=60., speed=0., in_region=False)], 'RED', 0.7, 8, 1)
+        waits.observe([bad_obs], 'RED', 0.8, 9, 1)
+        waits.observe([car(1, 200., x=150., height=60., speed=0., in_region=False)], 'RED', 0.9, 10, 1)
+        assert not only_row(waits)['completed'] and only_row(waits)['tracking_state'] == 'EXIT_PENDING'
+
+    class SpyBox:
+        def __init__(self, coords):
+            self._coords = tuple(coords)
+            self.slices = 0
+        def __getitem__(self, key):
+            self.slices += 1
+            return self._coords[key]
+
+    geom_calls = 0
+    orig_geom = VehicleWaits._valid_box_geometry
+    def spy_geom(observation):
+        nonlocal geom_calls
+        geom_calls += 1
+        return orig_geom(observation)
+    monkeypatch.setattr(VehicleWaits, '_valid_box_geometry', staticmethod(spy_geom))
+
+    for waits in (
+        VehicleWaits('default-off', RunPolicy(), side=lambda p: 270.-p[1]),
+        PersistentVehicleWaits('persist-off', RunPolicy(fragment_continuation=True, exit_persistence_sec=0.3),
+                               side=lambda p: 270.-p[1], identity_policy=IdentityPolicy(mode='persistent_v1')),
+    ):
+        spy_box = SpyBox((140., 220., 160., 280.))
+        for seq, (t, y, in_roi) in enumerate([(0.0, 280., True), (0.1, 280., True), (0.2, 280., True), (0.3, 260., True)], start=1):
+            obs = VehicleObservation(
+                local_id=1, class_name='car', point=(150., y), in_region=in_roi,
+                speed_mps=0., velocity_valid=True, stable_id=True, epoch=0,
+                bbox=spy_box, height=None,
+            )
+            waits.observe([obs], 'GREEN', t, seq, 1)
+        assert geom_calls == 0
+        assert spy_box.slices == 0
+        assert only_row(waits)['crossed_stop_line']
+        # Outside exit observation under default-off / persistent must also never slice boxes.
+        spy_exit = SpyBox((140., 220., 160., 280.))
+        waits.observe([VehicleObservation(2, 'car', 0., (150., 280.), stable_id=True, velocity_valid=True,
+                                          in_region=True, epoch=0, bbox=spy_exit, height=None)], 'RED', 0.4, 5, 1)
+        waits.observe([VehicleObservation(2, 'car', 0., (150., 280.), stable_id=True, velocity_valid=True,
+                                          in_region=False, epoch=0, bbox=spy_exit, height=None)], 'RED', 0.5, 6, 1)
+        assert geom_calls == 0
+        assert spy_exit.slices == 0

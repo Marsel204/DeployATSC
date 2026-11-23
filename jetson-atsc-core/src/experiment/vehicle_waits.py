@@ -2093,8 +2093,8 @@ class VehicleWaits:
     def _evaluate_crossing(self, state, prev_obs, observation, phase, timestamp, sequence, cycle_id,
                            valid_motion, continuing, keep_pending, dom_budget):
         row = state["row"]
-        geom = self._valid_box_geometry(observation)
         pending = state.get("pending_crossing")
+        geom = self._valid_box_geometry(observation) if (continuing or pending is not None) else None
         if continuing:
             if self._invalid_crossing_geometry(observation) or (geom is None and pending is not None):
                 self._clear_clip_state(state)
@@ -2202,6 +2202,7 @@ class VehicleWaits:
                 dom_rem -= 1
             if observation.local_id is None or not observation.stable_id or not _finite_point(observation.point): continue
             identity = (observation.epoch, observation.local_id)
+            was_present = identity in present
             present.add(identity)
             state = self.active.get(identity)
             segment = 0; seen_before = False
@@ -2223,6 +2224,9 @@ class VehicleWaits:
             if not observation.in_region:
                 if state is None and continuing:self.outside_seen[identity] = timestamp
                 if state and not state["row"]["completed"]:
+                    if native_exit and self._invalid_crossing_geometry(observation):
+                        if not was_present:present.discard(identity)
+                        continue
                     row=state["row"];previous=state["previous"]
                     in_native_exit = native_exit and state.get("exit_candidate") is not None
                     prev_obs = state.get("exit_last") if in_native_exit else previous

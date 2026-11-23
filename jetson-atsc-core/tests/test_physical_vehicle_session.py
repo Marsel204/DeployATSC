@@ -578,3 +578,37 @@ def test_session_accepts_slotted_custom_detector_without_gap_tolerance(video_fac
         assert session.detectors['acquisition'].max_gap_sec == session.policy.max_gap_sec
     finally:
         session.state = session.applied_state = 'stopped'; session._cleanup()
+
+
+@pytest.mark.parametrize('policy_extra', [{'fragment_continuation': True}, {'exit_persistence_sec': 0.3}])
+def test_session_accepts_slotted_custom_detector_with_readonly_gap_tolerance(video_factory, tmp_path, policy_extra):
+    """Sol Round 33: custom detectors exposing a getter-only gap_tolerance property must start
+    cleanly without raising AttributeError under either native opt-in."""
+    class ReadOnlyGapTolDetector:
+        __slots__ = ('epoch', 'track_trajectories', 'max_gap_sec')
+        def __init__(self, *args, **kwargs):
+            self.epoch = 0
+            self.track_trajectories = {}
+            self.max_gap_sec = 5.0
+        @property
+        def gap_tolerance(self):
+            return 0.0
+        def track(self, frames, timestamp=None):
+            return [TrackedFrame([], withheld=(), epoch=self.epoch) for _ in frames]
+        def update_velocities(self, vehicles, project, timestamp=None):
+            pass
+        def reset_tracking(self):
+            self.epoch += 1
+
+    settings = run_payload(video_factory)
+    settings['policy'] = {'debounce_frames': 1, 'stop_persistence_sec': 0.1, **policy_extra}
+    class Manual(ObservationSession):
+        def _worker(self):self.ready.set()
+    session = Manual(settings, tmp_path/f"ro-gaptol-{next(iter(policy_extra))}",
+                     detector_factory=ReadOnlyGapTolDetector, anfis_factory=FakeANFIS)
+    try:
+        session._process_batch()
+        assert session.detectors['acquisition'].max_gap_sec == session.policy.max_gap_sec
+        assert session.detectors['acquisition'].gap_tolerance == 0.0
+    finally:
+        session.state = session.applied_state = 'stopped'; session._cleanup()
