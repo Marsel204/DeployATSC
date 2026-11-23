@@ -3077,7 +3077,7 @@ def test_sparse_prune_of_block_maxima_does_not_rescan_stationary_history():
                 assert len(node.rear_heap) == node.live_count
                 seen_live += node.live_count
                 for pos, s in enumerate(node.rear_heap):
-                    assert store._alive[s] and store._hpos[s] == pos and store._slot_blk[s] is node
+                    assert store._alive[s] and store._hpos[s] == pos and store._blk_by_id[store._slot_bid[s]] is node
                     if pos > 0:
                         ps = node.rear_heap[(pos - 1) >> 1]
                         assert store._rear[ps] + store._err[ps] >= store._rear[s] + store._err[s]
@@ -3143,7 +3143,7 @@ def test_round35_pending_recheck_cutoff_pruning_and_live_drift_eviction(monkeypa
     from fractions import Fraction
     import math
     import random
-    from src.experiment.vehicle_waits import _ClipBaselines, _HBlock, _dd_rear, _dd_sub, OCCLUSION_BOTTOM_SHARE
+    from src.experiment.vehicle_waits import _ClipBaselines, _HBlock, _exact_rear, _exact_floor, OCCLUSION_BOTTOM_SHARE
 
     # 1. Pending crossing rechecks taller eligible baseline before confirming SERVED.
     #    Line at y=270 (side = 270 - y; >=0 is past the line).
@@ -3178,7 +3178,7 @@ def test_round35_pending_recheck_cutoff_pruning_and_live_drift_eviction(monkeypa
     waits_p.observe([car(1, 225.0, x=150.0, height=42.0, speed=0.0)], 'RED', 1.2, 13, 1, unassigned=())
     assert only_row(waits_p)['crossed_stop_line'] and only_row(waits_p)['tracking_state'] == 'SERVED'
 
-    # 2. Double-double accuracy vs exact Fraction + O(1) cutoff rejection across 16,384 baselines in observe().
+    # 2. Exact 3-term/4-term rear expansion accuracy vs Fraction + O(1) cutoff rejection (sole owner).
     rng = random.Random(35)
     f07 = Fraction(OCCLUSION_BOTTOM_SHARE)
     f1e9 = Fraction(1e-9)
@@ -3186,11 +3186,11 @@ def test_round35_pending_recheck_cutoff_pruning_and_live_drift_eviction(monkeypa
         scale = rng.choice([1.0, 1e3, 1e9, 1e14])
         y2 = rng.uniform(-scale, scale)
         h = rng.uniform(1e-3, min(scale, 1e14))
-        hi, lo = _dd_rear(y2, h)
+        c0, c1, c2 = _exact_rear(y2, h)
         exact = Fraction(y2) - f07 * Fraction(h)
-        assert abs((Fraction(hi) + Fraction(lo)) - exact) <= max(1e-16, 1e-30 * max(abs(y2), abs(h)))
-        shi, slo = _dd_sub(hi, lo, 1e-9)
-        assert abs((Fraction(shi) + Fraction(slo)) - (exact - f1e9)) <= max(1e-16, 1e-30 * max(abs(y2), abs(h)))
+        assert Fraction(c0) + Fraction(c1) + Fraction(c2) == exact
+        f0, f1, f2, f3 = _exact_floor(y2, h, 1e-9)
+        assert Fraction(f0) + Fraction(f1) + Fraction(f2) + Fraction(f3) == exact - f1e9
 
     waits_cut = book(side=lambda p: 270.0 - p[1])
     for seq in range(1, 5):
@@ -3199,19 +3199,21 @@ def test_round35_pending_recheck_cutoff_pruning_and_live_drift_eviction(monkeypa
     assert cb_cut is not None and cb_cut._exact_rear
     # Inject 16,384 distinct-height baselines all sitting ~1e-13 below rear_floor of (py=269, h=48).
     py_q, h_q = 269.0, 48.0
-    rf_hi, rf_lo = _dd_sub(*_dd_rear(py_q, h_q), 1e-9)
-    target = rf_hi + rf_lo - 2e-13
+    rf = _exact_floor(py_q, h_q, 1e-9)
+    target = rf[0] + rf[1] - 2e-13
     cb_cut.clear()
     for i in range(16384):
         hb = 60.0 + 1e-4 * i
         y2b = target + OCCLUSION_BOTTOM_SHARE * hb
-        rhi, rlo = _dd_rear(y2b, hb)
-        if (rhi, rlo) >= (rf_hi, rf_lo):
+        r0, r1, r2 = _exact_rear(y2b, hb)
+        if (r0, r1, r2, 0.0) >= rf:
             y2b = math.nextafter(y2b, -math.inf)
-            rhi, rlo = _dd_rear(y2b, hb)
-        assert (rhi, rlo) < (rf_hi, rf_lo)
-        cb_cut._insert_raw(150.0, y2b - hb, y2b, hb, rhi, 0.0, rlo)
+            r0, r1, r2 = _exact_rear(y2b, hb)
+        assert (r0, r1, r2, 0.0) < rf
+        cb_cut._insert_raw(150.0, y2b - hb, y2b, hb, r0, 0.0, r1, r2)
     assert len(cb_cut) == 16384
+    # Drop local reference so VehicleWaits is the sole owner of the baseline index during teardown.
+    del cb_cut
     t0 = time.perf_counter()
     waits_cut.observe([car(1, py_q, x=150.0, height=h_q, speed=0.0)], 'RED', 4 / FPS, 5, 1, unassigned=())
     dt_ms = (time.perf_counter() - t0) * 1000.0
@@ -3223,14 +3225,14 @@ def test_round35_pending_recheck_cutoff_pruning_and_live_drift_eviction(monkeypa
     for i in range(16384):
         hb = 60.0 + 1e-4 * i
         y2b = 200.0 + hb
-        rhi, rlo = _dd_rear(y2b, hb)
-        cb_ev._insert_raw(150.0, 200.0, y2b, hb, rhi, 0.0, rlo)
+        r0, r1, r2 = _exact_rear(y2b, hb)
+        cb_ev._insert_raw(150.0, 200.0, y2b, hb, r0, 0.0, r1, r2)
     # Outliers with smaller x (pruned horizontally) and huge y1 (would leave stale y_hi max).
     for j in range(4):
         hb = 60.0 + 0.01 * j
         y2b = 300.0 + hb
-        rhi, rlo = _dd_rear(y2b, hb)
-        cb_ev._insert_raw(140.0, 300.0, y2b, hb, rhi, 0.0, rlo)
+        r0, r1, r2 = _exact_rear(y2b, hb)
+        cb_ev._insert_raw(140.0, 300.0, y2b, hb, r0, 0.0, r1, r2)
     assert len(cb_ev) == 16388
     assert cb_ev.prune(151.0, 200.0, compact=False)
     assert len(cb_ev) == 16384
@@ -3243,4 +3245,161 @@ def test_round35_pending_recheck_cutoff_pruning_and_live_drift_eviction(monkeypa
     t1 = time.perf_counter()
     alive_after = cb_ev.prune(151.0, 225.0, compact=False)
     dt_ev_ms = (time.perf_counter() - t1) * 1000.0
-    assert not alive_after and len(cb_ev) == 0 and removes[0] == 0 and dt_ev_ms < 8.0
+    assert not alive_after and len(cb_ev) == 0 and removes[0] == 0 and dt_ev_ms < 2.0
+
+
+def test_round36_handoff_fail_closed_exact_rear_incremental_teardown_and_scale_shrink(monkeypatch):
+    """Sol Round 36:
+    1. P1: Malformed competitor boxes (e.g. truncated_competitor_bbox) must still fail closed
+       with exit_persistence_sec > 0 (no 1 -> 2 link, continuation_unavailable_frames == 1),
+       while remaining excluded from ledger updates.
+    2. P2: Exact 3-term/4-term rear arithmetic holds pending_crossing even on a 4.93e-31 cutoff
+       margin (y=86.5, (86.73534301973801, 2.9775606652610387) -> (86.13113975771972, 2.1144131466634843)),
+       both from clip_history and after aging into _ClipBaselines.
+    3. P2: Sole-owner index teardown on crossing and whole-track drift eviction at 65,536 baselines
+       runs in O(1) (< 2 ms) via incremental retirement, draining cleanly across subsequent frames.
+    4. P3: Relative shrink tolerance rejects growing microscopic boxes (1e-12 -> 1.1e-12) and
+       preserves O(1) side() early stopping across 16,384 microscopic baselines."""
+    import math
+    from src.experiment.vehicle_waits import _ClipBaselines, _HBlock, _exact_rear, _exact_floor, OCCLUSION_BOTTOM_SHARE
+
+    # 1. P1: Malformed competitor with exit_persistence_sec=0.3 must fail closed.
+    for bad_other in (
+        VehicleObservation(3, 'car', 2., (100., NEWBORN_Y), height=40.,
+                           bbox=(97., NEWBORN_Y-40.), source_bbox=narrow(68.)),
+        VehicleObservation(3, 'car', 2., (100., NEWBORN_Y), height=40.,
+                           bbox=[15., 30., 15., 60.], source_bbox=narrow(68.), in_region=False),
+        VehicleObservation(3, 'car', 2., (100., NEWBORN_Y),
+                           bbox=(97., NEWBORN_Y-40., 10**400, NEWBORN_Y), source_bbox=narrow(68.)),
+    ):
+        waits_fc = book(exit_persistence_sec=0.3)
+        end = play(waits_fc, lost_one())
+        waits_fc.observe([newborn(source=narrow(66.)), bad_other], 'RED', end/FPS, end+1, 1, unassigned=())
+        assert _links(waits_fc) == []
+        assert waits_fc.continuation_unavailable_frames == 1
+        assert (0, 3) not in waits_fc.active
+
+    # 2. P2: Exact rear cutoff at +4.93e-31 margin holds pending_crossing (both direct and indexed).
+    yb, hb = 86.73534301973801, 2.9775606652610387
+    yc, hc = 86.13113975771972, 2.1144131466634843
+    assert (*_exact_rear(yb, hb), 0.0) >= _exact_floor(yc, hc, min(1e-9, 1e-6 * hc))
+    # Direct from clip_history (10 fps matching stationary top_speed bound):
+    waits_d = book(side=lambda p: 86.5 - p[1])
+    for seq in range(1, 6):
+        waits_d.observe([car(1, yb, x=150., height=hb, speed=0.)], 'RED', (seq - 1) * 0.1, seq, 1, unassigned=())
+    waits_d.observe([car(1, yc, x=150., height=hc, speed=0.)], 'RED', 0.5, 6, 1, unassigned=())
+    assert not only_row(waits_d)['crossed_stop_line']
+    assert waits_d.active[(0, 1)].get('pending_crossing') is not None
+    # Aged out of clip_history into _ClipBaselines:
+    waits_idx = book(side=lambda p: 86.5 - p[1])
+    h_mid = 2.45  # 2.1144 > 0.85*2.45 = 2.0825 -> middle baseline fails height_eligible
+    y2_mid = 86.55  # stays behind stop line y=86.5 while keeping y1=84.10 within 0.15*hb of both yb and yc
+    play(waits_idx, [[car(1, yb, x=150., height=hb, speed=0.)] for _ in range(10)]
+         + [[car(1, y2_mid, x=150., height=h_mid, speed=0.)] for _ in range(12)]
+         + [[car(1, yc, x=150., height=hc, speed=0.)]], phase='RED')
+    assert not only_row(waits_idx)['crossed_stop_line']
+    assert waits_idx.active[(0, 1)].get('pending_crossing') is not None
+
+    # 3. P2: Sole-owner crossing teardown AND whole-track drift eviction at 65,536 baselines < 2 ms.
+    waits_64k = book(side=lambda p: 270.0 - p[1])
+    for seq in range(1, 5):
+        waits_64k.observe([car(1, 275.0, x=150.0, height=60.0, speed=0.0)], 'RED', (seq - 1) / FPS, seq, 1, unassigned=())
+    cb_64k = waits_64k.active[(0, 1)]['clip_baselines']
+    py_q, h_q = 269.0, 48.0
+    rf = _exact_floor(py_q, h_q, 1e-9)
+    target = rf[0] + rf[1] - 2e-13
+    cb_64k.clear()
+    waits_64k._retired.clear()
+    for i in range(65536):
+        hb_i = 60.0 + 2e-5 * i
+        y2_i = target + OCCLUSION_BOTTOM_SHARE * hb_i
+        r0, r1, r2 = _exact_rear(y2_i, hb_i)
+        if (r0, r1, r2, 0.0) >= rf:
+            y2_i = math.nextafter(y2_i, -math.inf)
+            r0, r1, r2 = _exact_rear(y2_i, hb_i)
+        cb_64k._insert_raw(150.0, y2_i - hb_i, y2_i, hb_i, r0, 0.0, r1, r2)
+    assert len(cb_64k) == 65536
+    del cb_64k  # VehicleWaits is now the SOLE owner!
+    t0 = time.perf_counter()
+    waits_64k.observe([car(1, py_q, x=150.0, height=h_q, speed=0.0)], 'RED', 4 / FPS, 5, 1, unassigned=())
+    dt_cross_ms = (time.perf_counter() - t0) * 1000.0
+    assert only_row(waits_64k)['crossed_stop_line'] and dt_cross_ms < 2.0
+    assert waits_64k.active[(0, 1)]['clip_baselines'] is None
+    assert waits_64k._retired
+    # Subsequent frames drain retirement incrementally in bounded per-frame time until empty.
+    max_drain_ms = 0.0
+    seq = 6
+    while waits_64k._retired and seq < 500:
+        td = time.perf_counter()
+        waits_64k.observe([], 'RED', (seq - 1) / FPS, seq, 1, unassigned=())
+        max_drain_ms = max(max_drain_ms, (time.perf_counter() - td) * 1000.0)
+        seq += 1
+    assert not waits_64k._retired and max_drain_ms < 2.0
+
+    # Whole-track drift eviction at 65,536 baselines is also O(1) (< 2 ms) with 0 heap_remove calls.
+    cb_ev64 = _ClipBaselines(exact_rear=True)
+    for i in range(65536):
+        hb_i = 60.0 + 2e-5 * i
+        y2_i = 200.0 + hb_i
+        r0, r1, r2 = _exact_rear(y2_i, hb_i)
+        cb_ev64._insert_raw(150.0, 200.0, y2_i, hb_i, r0, 0.0, r1, r2)
+    rem_calls = [0]
+    orig_rem = _HBlock.heap_remove
+    def spy_rem64(self, *args, **kwargs):
+        rem_calls[0] += 1
+        return orig_rem(self, *args, **kwargs)
+    monkeypatch.setattr(_HBlock, 'heap_remove', spy_rem64)
+    t_ev = time.perf_counter()
+    alive_ev = cb_ev64.prune(150.0, 230.0, compact=False)
+    dt_ev64_ms = (time.perf_counter() - t_ev) * 1000.0
+    assert not alive_ev and len(cb_ev64) == 0 and rem_calls[0] == 0 and dt_ev64_ms < 2.0
+
+    # 4. P3: Growing microscopic box (1e-12 -> 1.1e-12 across y=1.05e-12) serves immediately
+    #    and 16,384 microscopic baselines trigger O(1) side() calls via straight-line early stop.
+    waits_grow = book(side=lambda p: p[1] - 1.05e-12)
+    for seq in range(1, 6):
+        waits_grow.observe([car(1, 1.0e-12, x=0.0, height=1.0e-12, speed=0.0)], 'GREEN', (seq - 1) / FPS, seq, 1, unassigned=())
+    waits_grow.observe([car(1, 1.1e-12, x=0.0, height=1.1e-12, speed=0.0)], 'GREEN', 5 / FPS, 6, 1, unassigned=())
+    assert only_row(waits_grow)['crossed_stop_line'] and only_row(waits_grow)['tracking_state'] == 'SERVED'
+
+    side_n = [0]
+    def micro_side(p):
+        side_n[0] += 1
+        return p[1] - 1.05e-12
+    waits_ms = book(side=micro_side)
+    for seq in range(1, 5):
+        waits_ms.observe([car(1, 1.0e-12, x=0.0, height=1.0e-12, speed=0.0)], 'GREEN', (seq - 1) / FPS, seq, 1, unassigned=())
+    cb_ms = waits_ms.active[(0, 1)]['clip_baselines']
+    cb_ms.clear()
+    for i in range(16384):
+        hb_i = 1.0e-12 + 1e-17 * i
+        y2_i = hb_i
+        r0, r1, r2 = _exact_rear(y2_i, hb_i)
+        cb_ms._insert_raw(0.0, 0.0, y2_i, hb_i, r0, 0.0, r1, r2)
+    del cb_ms
+    side_n[0] = 0
+    waits_ms.observe([car(1, 1.1e-12, x=0.0, height=1.1e-12, speed=0.0)], 'GREEN', 4 / FPS, 5, 1, unassigned=())
+    assert only_row(waits_ms)['crossed_stop_line']
+    assert side_n[0] <= 4  # only crossing check itself; 0 baseline scans!
+
+    # Also verify taller microscopic baselines (2e-12..3e-12) that are ALL past stop line early-stop in <= 2 side() calls.
+    side_t = [0]
+    def micro_side_tall(p):
+        side_t[0] += 1
+        return 1.05e-12 - p[1]
+    waits_mt = book(side=micro_side_tall)
+    for seq in range(1, 5):
+        waits_mt.observe([car(1, 2.0e-12, x=0.0, height=2.0e-12, speed=0.0)], 'GREEN', (seq - 1) / FPS, seq, 1, unassigned=())
+    cb_mt = waits_mt.active[(0, 1)]['clip_baselines']
+    cb_mt.clear()
+    for i in range(16384):
+        hb_i = 2.0e-12 + 1e-16 * i
+        y2_i = hb_i
+        r0, r1, r2 = _exact_rear(y2_i, hb_i)
+        cb_mt._insert_raw(0.0, 0.0, y2_i, hb_i, r0, 0.0, r1, r2)
+    del cb_mt
+    side_t[0] = 0
+    # Cross to y1=-3e-12, py=-2e-12, h=1e-12 -> even tallest y1+hb = -3e-12 + 3.6384e-12 = 0.6384e-12 < 1.05e-12 (past line).
+    waits_mt.observe([car(1, -2.0e-12, x=0.0, height=1.0e-12, speed=0.0)], 'GREEN', 4 / FPS, 5, 1, unassigned=())
+    assert only_row(waits_mt)['crossed_stop_line']
+    assert side_t[0] <= 6  # straight-line early stop fires on the very first block!
