@@ -2206,17 +2206,63 @@ def test_sustained_stationary_jitter_per_frame_cost_stays_bounded():
         cb_xb.step_dom_sweep(1)
     assert len(cb_xb) == 400 and not cb_xb.has_dom_sweep()
 
-    # 4. 2-level _SlotFIFO avoids directory resize copies across page boundaries (65,536/page).
+    # 4. Fixed-depth radix _SlotFIFO has zero directory resizing across growth + negative prepend.
+    import sys
     fifo_2l = _SlotFIFO()
     for i in range(262144):
         fifo_2l.append(i)
+    root_sz = sys.getsizeof(fifo_2l._root)
     started = time.perf_counter()
     fifo_2l.append(262144)
     assert (time.perf_counter()-started)*1000. < 1.0
-    assert len(fifo_2l._pages) == 5 and fifo_2l[262144] == 262144
+    assert sys.getsizeof(fifo_2l._root) == root_sz and fifo_2l[262144] == 262144
     for i in range(1, 300):
         fifo_2l.appendleft(-i)
     assert fifo_2l[0] == -299 and fifo_2l.popleft() == -299 and fifo_2l.pop() == 262144
+
+    # Sol Round 26:
+    # 1. Vertical jitter (32 y2 anchors) AND 3D height+x jitter across 64 tracks stay bounded.
+    for mode in ('vertical', '3d_height_x'):
+        waits_v = book(side=lambda p: 270.-p[1])
+        seq_v = 0
+        for a in range(32):
+            for _ in range(2):
+                if mode == 'vertical':
+                    obs = [car(1+k, 281.+0.24*a, x=150.+80.*k, height=61., speed=0.) for k in range(64)]
+                else:
+                    obs = [car(1+k, 281.+0.01*a, x=150.+80.*k+0.24*a, height=61.+0.01*a, speed=0.) for k in range(64)]
+                waits_v.observe(obs, 'RED', seq_v/FPS, seq_v+1, 1, unassigned=()); seq_v += 1
+        for f in range(1000):
+            a = f % 32
+            if mode == 'vertical':
+                obs = [car(1+k, 280.+0.24*a, x=150.+80.*k+1e-5*(f+1), height=60., speed=0.) for k in range(64)]
+            else:
+                obs = [car(1+k, 280., x=150.+80.*k+0.24*a+1e-5*(f+1), height=60., speed=0.) for k in range(64)]
+            waits_v.observe(obs, 'RED', seq_v/FPS, seq_v+1, 1, unassigned=()); seq_v += 1
+        live_v = sorted(len(waits_v.active[(0, 1+k)]['clip_baselines']) for k in range(64))
+        assert live_v[32] <= 48, f'64-track {mode} cycling median live {live_v[32]} grew unbounded'
+
+    # 2. Same-height probes never retire multiple candidates on a 1-unit budget returning 0.
+    cb_sh = _ClipBaselines()
+    for y in (279., 281.):
+        cb_sh.add((150., y-60., y, 60., y-42., _rear_err(y, 60.)), compact=False, dom_budget=[0])
+    for i in range(32):
+        y = 280.+0.001*i
+        cb_sh.add((150., y-60., y, 60., y-42., _rear_err(y, 60.)), compact=False, dom_budget=[0])
+    # Force pending cover probes even after strict max_h <= bh skips queueing them, and verify 1-unit charge.
+    for s in range(2, 34):
+        cb_sh._queue_cover_probe(s)
+    used_1 = cb_sh.step_dom_sweep(1)
+    assert used_1 == 1 and cb_sh.has_dom_sweep()
+
+    # 3. Synthetic non-standard geometry equal-height baseline with larger y2 is still evicted.
+    cb_syn = _ClipBaselines()
+    cb_syn.add((0., 0., 62., 61., 90., 1e-12), compact=False, dom_budget=[0])
+    cb_syn.add((1., 0., 60., 60., 90., 1e-12), compact=False, dom_budget=[0])
+    cb_syn.add((0., 0., 61., 61., 100., 1e-12), compact=False, dom_budget=[0])
+    while cb_syn.has_dom_sweep():
+        cb_syn.step_dom_sweep(1)
+    assert len(cb_syn) == 2 and cb_syn._alive[0] == 0 and cb_syn._alive[1] == 1 and cb_syn._alive[2] == 1
 
 
 def test_missed_frame_clears_crossing_clip_evidence_but_preserves_fragment_history():
